@@ -3,7 +3,6 @@ package com.example.snake
 import android.app.AlertDialog
 import android.content.Context
 import android.graphics.Color
-import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.WindowManager
@@ -46,14 +45,14 @@ class MainActivity : AppCompatActivity() {
                 gravity=Gravity.CENTER_VERTICAL
             }
             scoreView=TextView(this).apply{
-                text="分数: 0";textSize=12f;setTextColor(Color.WHITE)
+                text="分数: 0";textSize=14f;setTextColor(Color.WHITE)
             }
             moneyView=TextView(this).apply{
-                text="金币: ${prefs.getInt("money",0)}";textSize=12f
+                text="金币: ${prefs.getInt("money",0)}";textSize=14f
                 setTextColor(Color.rgb(241,196,15));setPadding(14,0,0,0)
             }
             aiBtn=Button(this).apply{
-                textSize=9f;setTextColor(Color.WHITE);setPadding(8,0,8,0)
+                textSize=12f;setTextColor(Color.WHITE);setPadding(8,0,8,0)
                 updateAiButton()
                 setOnClickListener{
                     aiOn=!aiOn
@@ -63,7 +62,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             val shop=Button(this).apply{
-                text="🛒";textSize=9f;setTextColor(Color.WHITE)
+                text="🛒";textSize=12f;setTextColor(Color.WHITE)
                 setBackgroundColor(Color.rgb(46,204,113))
                 setOnClickListener{showShopCategoryDialog()}
             }
@@ -108,7 +107,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun makeStrategyBtn(label:String,click:()->Unit)=Button(this).apply{
-        text=label;textSize=8f;setTextColor(Color.WHITE);setPadding(3,0,3,0)
+        text=label;textSize=12f;setTextColor(Color.WHITE);setPadding(3,0,3,0)
         layoutParams=LinearLayout.LayoutParams(0,-2,1f)
         setOnClickListener{click()}
     }
@@ -118,7 +117,8 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().putInt("forced_strategy",forcedStrategy).apply()
         gameView?.setForcedStrategy(forcedStrategy)
         updateButtons()
-        Toast.makeText(this,"策略: ${if(forcedStrategy<0)"自动" else forcedStrategy}",Toast.LENGTH_SHORT).show()
+        val name=when(forcedStrategy){-1->"自动";0->"BFS";1->"追尾";2->"HAM";4->"BEAM";else->"未知"}
+        Toast.makeText(this,"策略: $name",Toast.LENGTH_SHORT).show()
     }
 
     private fun updateButtons(){
