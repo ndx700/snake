@@ -364,37 +364,21 @@ class SnakeView @JvmOverloads constructor(
     // ============================================================
 
     /**
-     * 分类死因：
-     *  WALL  撞墙（蛇头贴边）
-     *  TRAP  被围死（空间太小）
-     *  SELF  撞自己
+     * 根据死因调整学习参数。
+     * 死因由 update() 在死亡发生的瞬间判定后传入，不再事后反推：
+     *   WALL 撞墙（蛇头越界）
+     *   SELF 撞自己（剩余空间充裕）
+     *   TRAP 被围死（剩余空间 < 蛇长 * 1.2）
+     *
+     * 参数调整规则：
+     *   WALL → 更保守（激进↓，抄近道↓）
+     *   SELF → 更保守（安全余量↑）
+     *   TRAP → 更保守（安全余量↑，激进↓）
+     *   高分 → 奖励（激进↑，抄近道↑）
+     *   速死 → 惩罚（激进↓）
      */
-    private fun classifyDeath(): String {
-        val head = snake.first()
-        if (head.x == 0 || head.x == cols - 1 || head.y == 0 || head.y == rows - 1) {
-            return "WALL"
-        }
-        // 死亡前的位置空间
-        val space = regionSize(head, snake)
-        if (space < snake.size * 1.2f) return "TRAP"
-        return "SELF"
-    }
-
-    /**
-     * 死因 → 参数调整：
-     *  撞墙     → 更保守（激进↓，抄近道↓）
-     *  撞自己   → 更保守（安全余量↑）
-     *  被围死   → 更保守（安全余量↑，激进↓）
-     *  高分      → 奖励（激进↑，抄近道↑）
-     *  速死      → 惩罚（激进↓）
-     */
-    private fun analyzeAndLearn() {
-        val reason = classifyDeath()
-        val snakeLen = snake.size
-        val space = regionSize(snake.first(), snake)
-        val ratio = space.toFloat() / snakeLen
-
-        when (reason) {
+    private fun analyzeAndLearn(cause: String) {
+        when (cause) {
             "WALL" -> {
                 deathByWall++
                 aggression = (aggression * 0.88f).coerceAtLeast(0.5f)
@@ -411,6 +395,9 @@ class SnakeView @JvmOverloads constructor(
                 safetyMargin = (safetyMargin * 1.15f).coerceAtMost(3.0f)
                 aggression = (aggression * 0.90f).coerceAtLeast(0.5f)
                 lastDeathInfo = "被围死了 → 安全余量↑ 激进↓"
+            }
+            else -> {
+                lastDeathInfo = "未知死因"
             }
         }
 
@@ -874,13 +861,27 @@ class SnakeView @JvmOverloads constructor(
 
         val head = snake.first()
         val newHead = Point(head.x + dir.x, head.y + dir.y)
-        if (newHead.x !in 0 until cols || newHead.y !in 0 until rows) { gameOver = true; onDeath(); return }
+
+        // ★ 撞墙：越界 → 100% 是 WALL
+        if (newHead.x !in 0 until cols || newHead.y !in 0 until rows) {
+            gameOver = true
+            onDeath("WALL")
+            return
+        }
 
         val isEating = newHead.x == food.x && newHead.y == food.y
         val tail = snake.last()
         val collided = if (newHead.x == tail.x && newHead.y == tail.y) isEating
         else snake.any { it.x == newHead.x && it.y == newHead.y }
-        if (collided) { gameOver = true; onDeath(); return }
+
+        // ★ 撞身体：根据剩余空间再细分 TRAP / SELF
+        if (collided) {
+            gameOver = true
+            val space = regionSize(head, snake)
+            val cause = if (space < snake.size * 1.2f) "TRAP" else "SELF"
+            onDeath(cause)
+            return
+        }
 
         val tailX = offsetX + tail.x * cellSize + cellSize / 2
         val tailY = offsetY + tail.y * cellSize + cellSize / 2
@@ -921,7 +922,7 @@ class SnakeView @JvmOverloads constructor(
         floats.add(FloatText(cx, cy, 1.0f, "+$scoreGained"))
     }
 
-    private fun onDeath() {
+    private fun onDeath(cause: String) {
         vibrate(300); shakeTime = 400f; deathFlashAlpha = 255f
         val hx = offsetX + snake.first().x * cellSize + cellSize / 2
         val hy = offsetY + snake.first().y * cellSize + cellSize / 2
@@ -941,8 +942,8 @@ class SnakeView @JvmOverloads constructor(
         prefs.edit().putInt("money", cm).apply()
         onMoneyChanged?.invoke(cm)
 
-        // ★★★ 关键：分析死因并调整参数 ★★★
-        analyzeAndLearn()
+        // ★ 使用传入的明确死因更新学习参数
+        analyzeAndLearn(cause)
 
         aiMode = 0
     }
