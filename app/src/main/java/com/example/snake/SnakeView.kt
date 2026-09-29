@@ -50,7 +50,7 @@ class SnakeView(context: Context) : View(context) {
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
-    var onAutoPlayChanged: ((Boolean) -> Unit)? = null // 通知外部 UI 更新
+    var onAutoPlayChanged: ((Boolean) -> Unit)? = null
     
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
@@ -286,67 +286,70 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
+    // ================== 极其严密的 AI 核心逻辑 ==================
     private fun autoPilot() {
         if (gameOver) return
-        val currentHead = snake.first()
-        val pathToFood = bfsPath(currentHead, food, snake)
+        val head = snake.first()
         
+        // 1. 计算所有绝对安全的方向（不撞墙、不撞身体、绝对不掉头）
+        val allDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
+        val validDirs = allDirs.filter { d ->
+            val isReverse = (d.x == -dir.x && d.y == -dir.y)
+            val newHead = Point(head.x + d.x, head.y + d.y)
+            val isWall = newHead.x !in 0 until cols || newHead.y !in 0 until rows
+            // 注意：这里将尾巴视为安全，但如果同时吃到食物，尾巴不会移开，会撞上！这一点在后续模拟中严查
+            val isSelf = snake.dropLast(1).any { it == newHead } 
+            !isReverse && !isWall && !isSelf
+        }
+        
+        if (validDirs.isEmpty()) return // 天罗地网，必死无疑
+        
+        // 2. 优先判断能否去吃食物（必须保证吃完后能追到尾巴）
+        val pathToFood = bfsPath(head, food, snake)
         if (pathToFood != null && pathToFood.size > 1) {
-            val simulatedSnake = ArrayDeque(snake)
-            simulatedSnake.addFirst(food)
-            simulatedSnake.removeLast()
-            val tailAfterEating = simulatedSnake.last()
-            val pathToTailAfterEating = bfsPath(simulatedSnake.first(), tailAfterEating, simulatedSnake)
-            
-            if (pathToTailAfterEating != null) {
-                val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
+            val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
+            if (validDirs.contains(nextMove)) {
+                // 模拟吃完食物后，能否安全追到尾巴
+                val simulatedSnake = ArrayDeque(snake)
+                simulatedSnake.addFirst(food) // 蛇头变长
+                // 吃掉食物尾巴不移开
+                val tailAfterEating = simulatedSnake.last()
+                val safeToEat = bfsPath(simulatedSnake.first(), tailAfterEating, simulatedSnake) != null
+                
+                if (safeToEat) {
+                    directionQueue.clear()
+                    directionQueue.add(nextMove)
+                    return
+                }
+            }
+        }
+        
+        // 3. 无法安全吃食物，则尝试追自己的尾巴（这是保证不死的核心）
+        val pathToTail = bfsPath(head, snake.last(), snake)
+        if (pathToTail != null && pathToTail.size > 1) {
+            val nextMove = Point(pathToTail[1].x - pathToTail[0].x, pathToTail[1].y - pathToTail[0].y)
+            if (validDirs.contains(nextMove)) {
                 directionQueue.clear()
                 directionQueue.add(nextMove)
                 return
             }
         }
         
-        val pathToTail = bfsPath(currentHead, snake.last(), snake)
-        if (pathToTail != null && pathToTail.size > 1) {
-            val nextMove = Point(pathToTail[1].x - pathToTail[0].x, pathToTail[1].y - pathToTail[0].y)
-            directionQueue.clear()
-            directionQueue.add(nextMove)
-            return
-        }
-        
-        val bestMove = findMoveWithMaxSpace()
-        if (bestMove != null) {
-            directionQueue.clear()
-            directionQueue.add(bestMove)
-        } else {
-            val emergencyDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
-            for (d in emergencyDirs) {
-                val newHead = Point(currentHead.x + d.x, currentHead.y + d.y)
-                if (newHead.x in 0 until cols && newHead.y in 0 until rows && snake.none { it == newHead }) {
-                    directionQueue.clear()
-                    directionQueue.add(d)
-                    break
-                }
-            }
-        }
-    }
-
-    private fun findMoveWithMaxSpace(): Point? {
-        val head = snake.first()
-        val directions = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
+        // 4. 连尾巴都追不到，在安全方向里寻找最大生存空间，做最后的挣扎
         var bestMove: Point? = null
         var maxSpace = -1
-        for (d in directions) {
+        for (d in validDirs) {
             val newHead = Point(head.x + d.x, head.y + d.y)
-            if (newHead.x !in 0 until cols || newHead.y !in 0 until rows) continue
-            if (snake.any { it == newHead }) continue
             val space = floodFill(newHead)
             if (space > maxSpace) {
                 maxSpace = space
                 bestMove = d
             }
         }
-        return bestMove
+        if (bestMove != null) {
+            directionQueue.clear()
+            directionQueue.add(bestMove)
+        }
     }
 
     private fun bfsPath(start: Point, target: Point, currentSnake: Collection<Point>): List<Point>? {
@@ -397,6 +400,7 @@ class SnakeView(context: Context) : View(context) {
         }
         return visited.size
     }
+    // =======================================================
 
     private fun update() {
         if (gameOver) return
@@ -407,14 +411,11 @@ class SnakeView(context: Context) : View(context) {
 
         if (directionQueue.isNotEmpty()) {
             val next = directionQueue.removeFirst()
-            if (isAutoPlay) {
-                dir = next
-            } else {
-                if (dir.x == 0 && dir.y == 0) {
-                    dir = next
-                } else if (dir.x != -next.x || dir.y != -next.y) {
-                    dir = next
-                }
+            // 底层防护：无论外部怎么传，绝对禁止 180 度掉头
+            if (dir.x == 0 && dir.y == 0) {
+                dir = next // 初始方向
+            } else if (dir.x != -next.x || dir.y != -next.y) {
+                dir = next // 合法转弯
             }
         }
 
@@ -423,7 +424,7 @@ class SnakeView(context: Context) : View(context) {
         val head = snake.first()
         val newHead = Point(head.x + dir.x, head.y + dir.y)
 
-        // 1. 撞墙检测
+        // 1. 撞墙判定
         if (newHead.x < 0 || newHead.x >= cols || newHead.y < 0 || newHead.y >= rows) {
             gameOver = true
             triggerDeathEffects()
@@ -431,14 +432,16 @@ class SnakeView(context: Context) : View(context) {
             return
         }
 
-        // 2. 撞自己检测（修复核心 Bug：允许蛇头移动到尾巴的位置，因为尾巴会移开）
+        // 2. 撞自己判定（核心修复：精准区分尾巴和身体）
         val isEating = newHead == food
         val tail = snake.last()
+        
         val collidedWithSelf = if (newHead == tail) {
-            // 如果蛇头移动到尾巴的位置，只有当它同时吃到食物时（尾巴不移开）才算撞到自己
+            // 如果头撞到尾：只有“同时吃到食物”时尾巴才不移开，算死亡。
+            // 否则尾会移开，是安全的。
             isEating 
         } else {
-            // 其他情况下，如果蛇头碰到身体任何部位，都算撞到自己
+            // 没撞尾，则检查是否撞到身体的其他部位
             snake.any { it == newHead }
         }
 
@@ -449,7 +452,7 @@ class SnakeView(context: Context) : View(context) {
             return
         }
 
-        // 3. 移动
+        // 3. 正式移动
         snake.addFirst(newHead)
         if (isEating) {
             score += 10
@@ -501,7 +504,7 @@ class SnakeView(context: Context) : View(context) {
             particles.add(Particle(headX, headY, cos(angle).toFloat() * speed, sin(angle).toFloat() * speed, 1.5f, Color.rgb(255, 50, 50)))
         }
         
-        // 死亡后自动关闭演示模式
+        // 核心：死亡后自动关闭演示模式，更新按钮状态
         if (isAutoPlay) {
             isAutoPlay = false
             onAutoPlayChanged?.invoke(false)
