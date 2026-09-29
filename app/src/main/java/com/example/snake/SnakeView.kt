@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.AttributeSet
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
@@ -26,7 +27,10 @@ import kotlin.math.atan2
 import kotlin.math.PI
 import kotlin.random.Random
 
-class SnakeView(context: Context) : View(context) {
+class SnakeView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null
+) : View(context, attrs) {
 
     private val cols = 15
     private val rows = 15
@@ -40,9 +44,8 @@ class SnakeView(context: Context) : View(context) {
     private val directionQueue = ArrayDeque<Point>()
 
     private var dir = Point(0, 0)
-    private var nextDir = Point(0, 0)
-
     private var food = Point(5, 5)
+
     private var score = 0
     private var highScore = 0
     private var gameOver = false
@@ -53,39 +56,26 @@ class SnakeView(context: Context) : View(context) {
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
-    var onAIModeChanged: ((Int) -> Unit)? = null
-    var onStrategyChanged: ((Int) -> Unit)? = null
 
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
-    private var aiLevel = 1
-    private var aiBestScore = 0
     private var comboCount = 0
-    private var currentMultiplier = 1.0f
     private var hungerCounter = 0
-    private var consecutiveDeaths = 0
     private var foodUnreachableStreak = 0
 
-    // 强制策略：-1 = 自动；0 = BFS+Beam；1 = 追尾；2 = 加权HAM；3 = 纯HAM；4 = MCTS
+    // 强制策略：-1=自动 0=BFS 1=追尾 2=加权HAM 3=纯HAM 4=MCTS
     private var forcedStrategy = -1
-    // MCTS 是否允许（当 forcedStrategy = -1 时，自动切换才会用 MCTS）
-    private var mctsEnabled = false
-
-    // 当前实际使用的策略
     private var strategyMode = 0
 
     private val pathIndex = Array(cols) { IntArray(rows) }
     private val pathSequence = mutableListOf<Point>()
 
-    private var currentSkinBodyColor = Color.rgb(46, 204, 113)
-    private var currentSkinHeadColor = Color.rgb(39, 174, 96)
-    private var currentBoardBgColor = Color.BLACK
-    private var currentBoardGridColor = Color.rgb(0, 255, 255)
+    private var bodyColor = Color.rgb(46, 204, 113)
+    private var headColor = Color.rgb(39, 174, 96)
+    private var bgColor = Color.BLACK
+    private var gridColor = Color.rgb(0, 255, 255)
     private var isRainbowSkin = false
-
-    private val rainbowColors = IntArray(361) { i ->
-        Color.HSVToColor(floatArrayOf(i.toFloat(), 1f, 1f))
-    }
+    private val rainbow = IntArray(361) { Color.HSVToColor(floatArrayOf(it.toFloat(), 1f, 1f)) }
 
     private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -99,45 +89,40 @@ class SnakeView(context: Context) : View(context) {
     private var shakeTime = 0f
     private var shakeOffsetX = 0f
     private var shakeOffsetY = 0f
-    private var shockwaveX = 0f
-    private var shockwaveY = 0f
     private var shockwaveRadius = 0f
     private var shockwaveAlpha = 0f
+    private var shockwaveX = 0f
+    private var shockwaveY = 0f
 
     private data class Particle(
         var x: Float, var y: Float,
         var vx: Float, var vy: Float,
         var life: Float, val color: Int,
-        var size: Float = 1f,
-        var decay: Float = 0.002f,
-        var isTrail: Boolean = false
+        var size: Float, var decay: Float, var isTrail: Boolean
     )
-    private data class FloatingText(
-        var x: Float, var y: Float,
-        var life: Float, val text: String
-    )
+    private data class FloatText(var x: Float, var y: Float, var life: Float, val text: String)
 
     private val particles = mutableListOf<Particle>()
-    private val floatingTexts = mutableListOf<FloatingText>()
+    private val floats = mutableListOf<FloatText>()
 
     private val paintSnakeBody = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = currentSkinBodyColor
+        color = bodyColor
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
         pathEffect = CornerPathEffect(30f)
-        setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
+        setShadowLayer(20f, 0f, 0f, bodyColor)
     }
     private val paintSnakeHead = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = currentSkinHeadColor
+        color = headColor
         style = Paint.Style.FILL
-        setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
+        setShadowLayer(15f, 0f, 0f, headColor)
     }
-    private val paintSnakeHighlight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val paintHighlight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE; style = Paint.Style.FILL; alpha = 100
     }
-    private val paintEyeWhite = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
-    private val paintEyeBlack = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
+    private val paintEyeW = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    private val paintEyeB = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
     private val paintFoodGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val paintFoodCore = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
     private val paintFoodCross = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -145,14 +130,14 @@ class SnakeView(context: Context) : View(context) {
         setShadowLayer(15f, 0f, 0f, Color.CYAN)
     }
     private val paintParticle = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val paintFloatingText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val paintFloat = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(241, 196, 15); textSize = 45f; textAlign = Paint.Align.CENTER
         setShadowLayer(10f, 0f, 0f, Color.BLACK)
     }
     private val paintGrid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         strokeWidth = 2f; setShadowLayer(8f, 0f, 0f, Color.CYAN)
     }
-    private val paintShockwave = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val paintShock = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE; strokeWidth = 8f; color = Color.RED
     }
     private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -165,7 +150,6 @@ class SnakeView(context: Context) : View(context) {
         style = Paint.Style.STROKE; strokeWidth = 3f
         color = Color.argb(60, 255, 255, 255)
     }
-
     private val paintPanelBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(180, 0, 0, 0); style = Paint.Style.FILL
     }
@@ -181,8 +165,6 @@ class SnakeView(context: Context) : View(context) {
     private val paintModeInfo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(180, 180, 180); textSize = 18f; textAlign = Paint.Align.LEFT
     }
-
-    private var isRainbowBoard = false
     private val paintBoardBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val boardMatrix = Matrix()
 
@@ -194,80 +176,63 @@ class SnakeView(context: Context) : View(context) {
             if (!running) return
             val currentTime = System.nanoTime()
             if (lastFrameTime == 0L) lastFrameTime = currentTime
-            val deltaTime = (currentTime - lastFrameTime) / 1_000_000f
+            val dt = (currentTime - lastFrameTime) / 1_000_000f
             lastFrameTime = currentTime
-            timeAccumulator += deltaTime.toLong()
+            timeAccumulator += dt.toLong()
             if (timeAccumulator >= gameSpeed) {
                 update()
                 timeAccumulator -= gameSpeed
             }
-            updateEffects(deltaTime)
+            updateEffects(dt)
             invalidate()
             Choreographer.getInstance().postFrameCallback(this)
         }
     }
 
     init {
-        initHamiltonianPath()
-        aiBestScore = prefs.getInt("ai_best_score", 0)
-        aiLevel = prefs.getInt("ai_level", 1)
-        consecutiveDeaths = prefs.getInt("consecutive_deaths", 0)
+        initHamPath()
         highScore = prefs.getInt("high_score", 0)
         updateCurrentSkin()
         updateCurrentBoard()
         reset()
     }
 
-    private fun initHamiltonianPath() {
+    private fun initHamPath() {
         pathSequence.clear()
         for (c in 0 until cols) {
             if (c % 2 == 0) {
-                for (r in 0 until rows) {
-                    pathIndex[c][r] = pathSequence.size
-                    pathSequence.add(Point(c, r))
-                }
+                for (r in 0 until rows) { pathIndex[c][r] = pathSequence.size; pathSequence.add(Point(c, r)) }
             } else {
-                for (r in rows - 1 downTo 0) {
-                    pathIndex[c][r] = pathSequence.size
-                    pathSequence.add(Point(c, r))
-                }
+                for (r in rows - 1 downTo 0) { pathIndex[c][r] = pathSequence.size; pathSequence.add(Point(c, r)) }
             }
         }
     }
 
     fun getAIMode(): Int = aiMode
-    fun setAIMode(mode: Int) { aiMode = mode; onAIModeChanged?.invoke(aiMode); reset() }
-
-    fun setMctsEnabled(enabled: Boolean) { mctsEnabled = enabled }
-    fun isMctsEnabled(): Boolean = mctsEnabled
-
-    fun getForcedStrategy(): Int = forcedStrategy
-    fun setForcedStrategy(s: Int) {
-        forcedStrategy = s
-        onStrategyChanged?.invoke(forcedStrategy)
-    }
+    fun setAIMode(mode: Int) { aiMode = mode; reset() }
+    fun setForcedStrategy(s: Int) { forcedStrategy = s }
 
     fun updateCurrentSkin() {
         val id = prefs.getString("equipped_skin", "green") ?: "green"
         isRainbowSkin = false
         when (id) {
-            "blue" -> { currentSkinBodyColor = Color.rgb(52, 152, 219); currentSkinHeadColor = Color.rgb(41, 128, 185) }
-            "red" -> { currentSkinBodyColor = Color.rgb(231, 76, 60); currentSkinHeadColor = Color.rgb(192, 57, 43) }
-            "purple" -> { currentSkinBodyColor = Color.rgb(155, 89, 182); currentSkinHeadColor = Color.rgb(142, 68, 173) }
-            "gold" -> { currentSkinBodyColor = Color.rgb(241, 196, 15); currentSkinHeadColor = Color.rgb(243, 156, 18) }
+            "blue" -> { bodyColor = Color.rgb(52, 152, 219); headColor = Color.rgb(41, 128, 185) }
+            "red" -> { bodyColor = Color.rgb(231, 76, 60); headColor = Color.rgb(192, 57, 43) }
+            "purple" -> { bodyColor = Color.rgb(155, 89, 182); headColor = Color.rgb(142, 68, 173) }
+            "gold" -> { bodyColor = Color.rgb(241, 196, 15); headColor = Color.rgb(243, 156, 18) }
             "rainbow" -> {
                 isRainbowSkin = true
-                currentSkinBodyColor = Color.WHITE; currentSkinHeadColor = Color.WHITE
+                bodyColor = Color.WHITE; headColor = Color.WHITE
                 paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
             }
-            else -> { currentSkinBodyColor = Color.rgb(46, 204, 113); currentSkinHeadColor = Color.rgb(39, 174, 96) }
+            else -> { bodyColor = Color.rgb(46, 204, 113); headColor = Color.rgb(39, 174, 96) }
         }
         if (!isRainbowSkin) {
             paintSnakeBody.shader = null
-            paintSnakeBody.color = currentSkinBodyColor
-            paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
-            paintSnakeHead.color = currentSkinHeadColor
-            paintSnakeHead.setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
+            paintSnakeBody.color = bodyColor
+            paintSnakeBody.setShadowLayer(20f, 0f, 0f, bodyColor)
+            paintSnakeHead.color = headColor
+            paintSnakeHead.setShadowLayer(15f, 0f, 0f, headColor)
         }
         invalidate()
     }
@@ -275,43 +240,16 @@ class SnakeView(context: Context) : View(context) {
     fun updateCurrentBoard() {
         val id = prefs.getString("equipped_board", "dark") ?: "dark"
         when (id) {
-            "light" -> {
-                isRainbowBoard = false; paintBoardBg.shader = null
-                currentBoardBgColor = Color.rgb(240, 240, 240)
-                currentBoardGridColor = Color.rgb(200, 200, 200)
-                paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
-            }
-            "neon" -> {
-                isRainbowBoard = false; paintBoardBg.shader = null
-                currentBoardBgColor = Color.rgb(10, 25, 47)
-                currentBoardGridColor = Color.rgb(0, 255, 255)
-                paintGrid.setShadowLayer(8f, 0f, 0f, Color.CYAN)
-            }
-            "forest" -> {
-                isRainbowBoard = false; paintBoardBg.shader = null
-                currentBoardBgColor = Color.rgb(27, 46, 26)
-                currentBoardGridColor = Color.rgb(46, 74, 45)
-                paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
-            }
-            "cyberpunk" -> {
-                isRainbowBoard = false; paintBoardBg.shader = null
-                currentBoardBgColor = Color.rgb(43, 15, 59)
-                currentBoardGridColor = Color.rgb(200, 0, 255)
-                paintGrid.setShadowLayer(8f, 0f, 0f, Color.MAGENTA)
-            }
+            "light" -> { bgColor = Color.rgb(240, 240, 240); gridColor = Color.rgb(200, 200, 200); paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT) }
+            "neon" -> { bgColor = Color.rgb(10, 25, 47); gridColor = Color.rgb(0, 255, 255); paintGrid.setShadowLayer(8f, 0f, 0f, Color.CYAN) }
+            "forest" -> { bgColor = Color.rgb(27, 46, 26); gridColor = Color.rgb(46, 74, 45); paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT) }
+            "cyberpunk" -> { bgColor = Color.rgb(43, 15, 59); gridColor = Color.rgb(200, 0, 255); paintGrid.setShadowLayer(8f, 0f, 0f, Color.MAGENTA) }
             "rainbow_board" -> {
-                isRainbowBoard = true
-                currentBoardBgColor = Color.BLACK
-                currentBoardGridColor = Color.WHITE
+                bgColor = Color.BLACK; gridColor = Color.WHITE
                 paintGrid.setShadowLayer(6f, 0f, 0f, Color.WHITE)
-                paintBoardBg.shader = LinearGradient(0f, 0f, 2000f, 2000f, rainbowColors, null, Shader.TileMode.MIRROR)
+                paintBoardBg.shader = LinearGradient(0f, 0f, 2000f, 2000f, rainbow, null, Shader.TileMode.MIRROR)
             }
-            else -> {
-                isRainbowBoard = false; paintBoardBg.shader = null
-                currentBoardBgColor = Color.BLACK
-                currentBoardGridColor = Color.rgb(0, 255, 255)
-                paintGrid.setShadowLayer(8f, 0f, 0f, Color.CYAN)
-            }
+            else -> { bgColor = Color.BLACK; gridColor = Color.rgb(0, 255, 255); paintGrid.setShadowLayer(8f, 0f, 0f, Color.CYAN) }
         }
         invalidate()
     }
@@ -323,11 +261,9 @@ class SnakeView(context: Context) : View(context) {
         } else {
             snake.add(Point(10, 10)); dir = Point(0, 0)
         }
-        nextDir = Point(0, 0)
         directionQueue.clear()
         score = 0; comboCount = 0; hungerCounter = 0
         foodUnreachableStreak = 0
-        currentMultiplier = 1.0f
         gameOver = false
         gameSpeed = 180L
         lastFrameTime = 0L; timeAccumulator = 0L
@@ -335,15 +271,15 @@ class SnakeView(context: Context) : View(context) {
         shakeOffsetX = 0f; shakeOffsetY = 0f
         shockwaveRadius = 0f; shockwaveAlpha = 0f
         strategyMode = 0
-        particles.clear(); floatingTexts.clear()
+        particles.clear(); floats.clear()
 
         if (isRainbowSkin) {
             paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
         } else {
-            paintSnakeBody.color = currentSkinBodyColor
-            paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
-            paintSnakeHead.color = currentSkinHeadColor
-            paintSnakeHead.setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
+            paintSnakeBody.color = bodyColor
+            paintSnakeBody.setShadowLayer(20f, 0f, 0f, bodyColor)
+            paintSnakeHead.color = headColor
+            paintSnakeHead.setShadowLayer(15f, 0f, 0f, headColor)
         }
         placeFood()
         onScoreChanged?.invoke(score)
@@ -363,20 +299,22 @@ class SnakeView(context: Context) : View(context) {
     }
 
     private fun placeFood() {
-        while (true) {
+        var attempts = 0
+        while (attempts < 1000) {
             val p = Point(Random.nextInt(cols), Random.nextInt(rows))
             if (snake.none { it == p }) { food = p; return }
+            attempts++
         }
     }
 
-    private fun vibrate(duration: Long, amplitude: Int = VibrationEffect.DEFAULT_AMPLITUDE) {
+    private fun vibrate(ms: Long) {
         vibrator?.let {
             if (!it.hasVibrator()) return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                it.vibrate(VibrationEffect.createOneShot(duration, amplitude))
+                it.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {
                 @Suppress("DEPRECATION")
-                it.vibrate(duration)
+                it.vibrate(ms)
             }
         }
     }
@@ -401,7 +339,7 @@ class SnakeView(context: Context) : View(context) {
             p.life -= deltaTime * p.decay
             if (p.life <= 0) it.remove()
         }
-        val ti = floatingTexts.iterator()
+        val ti = floats.iterator()
         while (ti.hasNext()) {
             val t = ti.next()
             t.y -= 2.5f * (deltaTime / 16f); t.life -= deltaTime * 0.001f
@@ -409,29 +347,27 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ========================= AI 决策 =========================
-
+    // ==================== AI 决策 ====================
     private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
 
         val allDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
         val validDirs = allDirs.filter { d ->
-            val isReverse = (d.x == -dir.x && d.y == -dir.y)
+            val isRev = (d.x == -dir.x && d.y == -dir.y)
             val nh = Point(head.x + d.x, head.y + d.y)
             val isWall = nh.x !in 0 until cols || nh.y !in 0 until rows
             val isSelf = snake.dropLast(1).any { it == nh }
-            !isReverse && !isWall && !isSelf
+            !isRev && !isWall && !isSelf
         }
         if (validDirs.isEmpty()) return
 
-        val testFoodPath = bfsPathWithSnake(head, food, snake, dir)
+        val testFoodPath = bfsPath(head, food, snake, dir)
         if (testFoodPath != null) foodUnreachableStreak = 0 else foodUnreachableStreak++
 
         val snakeLen = snake.size
         val freeSpace = cols * rows - snakeLen
 
-        // 强制策略优先；没有强制则自动切换
         strategyMode = if (forcedStrategy >= 0) {
             forcedStrategy
         } else {
@@ -439,15 +375,15 @@ class SnakeView(context: Context) : View(context) {
                 score >= 150000 || freeSpace < snakeLen / 3 -> 3
                 score >= 80000 || (snakeLen > 100 && freeSpace < snakeLen) -> 2
                 snakeLen > 70 && foodUnreachableStreak > 10 -> 1
-                mctsEnabled && snakeLen in 15..40 && gameSpeed > 120 && score < 30000 -> 4
+                snakeLen in 15..40 && gameSpeed > 120 && score < 30000 -> 4
                 else -> 0
             }
         }
 
         val chosenDir: Point? = when (strategyMode) {
             1 -> tailChaseStrategy(head, validDirs)
-            2 -> weightedHamiltonianStrategy(head, validDirs)
-            3 -> pureHamiltonianStrategy(head, validDirs)
+            2 -> weightedHamStrategy(head, validDirs)
+            3 -> pureHamStrategy(head, validDirs)
             4 -> mctsStrategy(head, validDirs)
             else -> bfsBeamStrategy(head, validDirs)
         }
@@ -460,7 +396,7 @@ class SnakeView(context: Context) : View(context) {
 
     private fun bfsBeamStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
-            val p = bfsPathWithSnake(head, food, snake, dir)
+            val p = bfsPath(head, food, snake, dir)
             if (p != null && p.size > 1) {
                 val nm = Point(p[1].x - p[0].x, p[1].y - p[0].y)
                 if (validDirs.contains(nm)) return nm
@@ -473,7 +409,7 @@ class SnakeView(context: Context) : View(context) {
             if (validDirs.contains(fd) && isEatingSafe(head, food)) return fd
         }
         if (hungerCounter > 8) {
-            val p = bfsPathWithSnake(head, food, snake, dir)
+            val p = bfsPath(head, food, snake, dir)
             if (p != null && p.size > 1) {
                 val nm = Point(p[1].x - p[0].x, p[1].y - p[0].y)
                 if (validDirs.contains(nm) && isEatingSafe(head, food)) return nm
@@ -509,14 +445,14 @@ class SnakeView(context: Context) : View(context) {
                         nextBeam.add(Pair(cd, nbs))
                     }
                 }
-                val pruned = nextBeam.sortedByDescending { floodFillWithSnake(it.second.first(), it.second) }.take(3)
+                val pruned = nextBeam.sortedByDescending { floodFill(it.second.first(), it.second) }.take(3)
                 beam = pruned.toMutableList()
                 if (beam.isEmpty()) break
             }
 
             for ((_, fs) in beam) {
-                val space = floodFillWithSnake(fs.first(), fs)
-                val reachFood = bfsPathWithSnake(fs.first(), food, fs, Point(0, 0))
+                val space = floodFill(fs.first(), fs)
+                val reachFood = bfsPath(fs.first(), food, fs, Point(0, 0))
                 totalScore += space * 10
                 if (reachFood != null) totalScore += 500
                 totalScore -= (reachFood?.size ?: 999) * 5
@@ -532,20 +468,20 @@ class SnakeView(context: Context) : View(context) {
         for (d in validDirs) {
             val nh = Point(head.x + d.x, head.y + d.y)
             val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
-            val canReach = bfsPathWithSnake(nh, sim.last(), sim, Point(0, 0)) != null
+            val canReach = bfsPath(nh, sim.last(), sim, Point(0, 0)) != null
             if (!canReach) continue
-            val space = floodFillWithSnake(nh, sim)
+            val space = floodFill(nh, sim)
             if (space > bestSpace) { bestSpace = space; best = d }
         }
         if (best != null) return best
         return validDirs.maxByOrNull {
             val nh = Point(head.x + it.x, head.y + it.y)
             val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
-            floodFillWithSnake(nh, sim)
+            floodFill(nh, sim)
         }
     }
 
-    private fun weightedHamiltonianStrategy(head: Point, validDirs: List<Point>): Point? {
+    private fun weightedHamStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
         val pathDx = pathNext.x - head.x
@@ -554,7 +490,7 @@ class SnakeView(context: Context) : View(context) {
 
         val foodDist = abs(head.x - food.x) + abs(head.y - food.y)
         if (foodDist <= 3) {
-            val p = bfsPathWithSnake(head, food, snake, dir)
+            val p = bfsPath(head, food, snake, dir)
             if (p != null && p.size > 1) {
                 val nm = Point(p[1].x - p[0].x, p[1].y - p[0].y)
                 if (validDirs.contains(nm) && isEatingSafe(head, food)) return nm
@@ -565,11 +501,11 @@ class SnakeView(context: Context) : View(context) {
         return validDirs.maxByOrNull {
             val nh = Point(head.x + it.x, head.y + it.y)
             val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
-            floodFillWithSnake(nh, sim)
+            floodFill(nh, sim)
         }
     }
 
-    private fun pureHamiltonianStrategy(head: Point, validDirs: List<Point>): Point? {
+    private fun pureHamStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
         val pathDx = pathNext.x - head.x
@@ -579,21 +515,21 @@ class SnakeView(context: Context) : View(context) {
         return validDirs.maxByOrNull {
             val nh = Point(head.x + it.x, head.y + it.y)
             val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
-            floodFillWithSnake(nh, sim)
+            floodFill(nh, sim)
         }
     }
 
     private fun mctsStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
-            val p = bfsPathWithSnake(head, food, snake, dir)
+            val p = bfsPath(head, food, snake, dir)
             if (p != null && p.size > 1) {
                 val nm = Point(p[1].x - p[0].x, p[1].y - p[0].y)
                 if (validDirs.contains(nm)) return nm
             }
         }
 
-        val rolloutCount = 12
-        val maxRolloutSteps = 60
+        val rolloutCount = 6
+        val maxRolloutSteps = 30
 
         var bestDir: Point? = null
         var bestAvgScore = -1e9
@@ -647,16 +583,18 @@ class SnakeView(context: Context) : View(context) {
             sim.addFirst(snh)
             if (ate) {
                 scoreGain += 10.0
-                while (true) {
+                var att = 0
+                while (att < 500) {
                     val np = Point(Random.nextInt(cols), Random.nextInt(rows))
                     if (sim.none { it == np }) { simFood = np; break }
+                    att++
                 }
             } else {
                 sim.removeLast()
             }
             simDir = next
 
-            val space = floodFillWithSnake(sim.first(), sim)
+            val space = floodFill(sim.first(), sim)
             scoreGain += space * 0.1
             if (space < sim.size) scoreGain -= 200.0
         }
@@ -668,10 +606,10 @@ class SnakeView(context: Context) : View(context) {
         simSnake.addFirst(foodPos)
         val newHead = simSnake.first()
         val newTail = simSnake.last()
-        val spaceAfterEating = floodFillWithSnake(newHead, simSnake)
+        val spaceAfterEating = floodFill(newHead, simSnake)
         if (spaceAfterEating > simSnake.size * 1.2f) return true
         if (spaceAfterEating < simSnake.size * 0.7f) return false
-        return bfsPathWithSnake(newHead, newTail, simSnake, Point(0, 0)) != null
+        return bfsPath(newHead, newTail, simSnake, Point(0, 0)) != null
     }
 
     private fun autoPilotHamiltonian() {
@@ -696,7 +634,7 @@ class SnakeView(context: Context) : View(context) {
         dir = Point(dx, dy)
     }
 
-    private fun floodFillWithSnake(start: Point, currentSnake: Collection<Point>): Int {
+    private fun floodFill(start: Point, currentSnake: Collection<Point>): Int {
         val queue = ArrayDeque<Point>()
         val visited = mutableSetOf<Point>()
         queue.add(start); visited.add(start)
@@ -713,7 +651,7 @@ class SnakeView(context: Context) : View(context) {
         return visited.size
     }
 
-    private fun bfsPathWithSnake(start: Point, target: Point, customSnake: Collection<Point>, reverseDir: Point): List<Point>? {
+    private fun bfsPath(start: Point, target: Point, customSnake: Collection<Point>, reverseDir: Point): List<Point>? {
         val queue = ArrayDeque<Point>()
         val visited = mutableSetOf<Point>()
         val parent = mutableMapOf<Point, Point>()
@@ -769,19 +707,19 @@ class SnakeView(context: Context) : View(context) {
         val newHead = Point(head.x + dir.x, head.y + dir.y)
 
         if (newHead.x < 0 || newHead.x >= cols || newHead.y < 0 || newHead.y >= rows) {
-            gameOver = true; triggerDeathEffects(); saveScoreAndMoney(); return
+            gameOver = true; onDeath(); return
         }
 
         val isEating = newHead == food
         val tail = snake.last()
         val collidedWithSelf = if (newHead == tail) isEating else snake.any { it == newHead }
         if (collidedWithSelf) {
-            gameOver = true; triggerDeathEffects(); saveScoreAndMoney(); return
+            gameOver = true; onDeath(); return
         }
 
         val tailX = offsetX + tail.x * cellSize + cellSize / 2
         val tailY = offsetY + tail.y * cellSize + cellSize / 2
-        val trailColor = if (isRainbowSkin) Color.HSVToColor(floatArrayOf((System.currentTimeMillis() / 10f) % 360f, 1f, 1f)) else currentSkinBodyColor
+        val trailColor = if (isRainbowSkin) Color.HSVToColor(floatArrayOf((System.currentTimeMillis() / 10f) % 360f, 1f, 1f)) else bodyColor
         particles.add(Particle(
             x = tailX + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
             y = tailY + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
@@ -797,16 +735,16 @@ class SnakeView(context: Context) : View(context) {
             hungerCounter = 0
             comboCount++
             val basePoints = 10 + (comboCount - 1) * 5
-            currentMultiplier = when {
+            val mult = when {
                 score >= 1000 -> 3.0f
                 score >= 500 -> 2.0f
                 score >= 200 -> 1.5f
                 else -> 1.0f
             }
-            val earned = (basePoints * currentMultiplier).toInt()
+            val earned = (basePoints * mult).toInt()
             score += earned
             onScoreChanged?.invoke(score)
-            triggerEatEffects(earned)
+            eatEffect(earned)
             placeFood()
             gameSpeed = max(70L, gameSpeed - 3L)
         } else {
@@ -815,8 +753,8 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    private fun triggerEatEffects(scoreGained: Int) {
-        vibrate(35, 100)
+    private fun eatEffect(scoreGained: Int) {
+        vibrate(35)
         val cx = offsetX + food.x * cellSize + cellSize / 2
         val cy = offsetY + food.y * cellSize + cellSize / 2
         val colors = intArrayOf(
@@ -835,24 +773,13 @@ class SnakeView(context: Context) : View(context) {
                 size = Random.nextFloat() * 1.5f + 0.5f, decay = 0.0015f
             ))
         }
-        floatingTexts.add(FloatingText(cx, cy, 1.0f, "+$scoreGained"))
+        floats.add(FloatText(cx, cy, 1.0f, "+$scoreGained"))
     }
 
-    private fun triggerDeathEffects() {
-        vibrate(35, 100)
-        vibrator?.let {
-            if (it.hasVibrator()) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    val timings = longArrayOf(0, 100, 50, 200, 50, 300, 100, 400)
-                    val amps = intArrayOf(0, 255, 0, 200, 0, 150, 0, 80)
-                    it.vibrate(VibrationEffect.createWaveform(timings, amps, -1))
-                } else {
-                    @Suppress("DEPRECATION")
-                    it.vibrate(longArrayOf(0, 100, 50, 200, 50, 300, 100, 400), -1)
-                }
-            }
-        }
-        shakeTime = 400f; deathFlashAlpha = 255f
+    private fun onDeath() {
+        vibrate(300)
+        shakeTime = 400f
+        deathFlashAlpha = 255f
         val hx = offsetX + snake.first().x * cellSize + cellSize / 2
         val hy = offsetY + snake.first().y * cellSize + cellSize / 2
         shockwaveX = hx; shockwaveY = hy; shockwaveRadius = cellSize; shockwaveAlpha = 255f
@@ -871,38 +798,11 @@ class SnakeView(context: Context) : View(context) {
                 size = Random.nextFloat() * 2f + 1f, decay = 0.002f
             ))
         }
-        if (aiMode != 0) { aiMode = 0; onAIModeChanged?.invoke(aiMode) }
-    }
-
-    private fun saveScoreAndMoney() {
         if (score > highScore) { highScore = score; prefs.edit().putInt("high_score", highScore).apply() }
-        var cm = prefs.getInt("money", 0); cm += score
+        val cm = prefs.getInt("money", 0) + score
         prefs.edit().putInt("money", cm).apply()
         onMoneyChanged?.invoke(cm)
-        if (score > aiBestScore) {
-            aiBestScore = score
-            prefs.edit().putInt("ai_best_score", aiBestScore).apply()
-            if (score > 100) {
-                aiLevel = (aiLevel + 1).coerceAtMost(10)
-                prefs.edit().putInt("ai_level", aiLevel).apply()
-            }
-            consecutiveDeaths = 0
-            prefs.edit().putInt("consecutive_deaths", 0).apply()
-        } else {
-            if (score < 50) {
-                consecutiveDeaths++
-                prefs.edit().putInt("consecutive_deaths", consecutiveDeaths).apply()
-                if (consecutiveDeaths >= 2 || score < aiBestScore * 0.3) {
-                    aiLevel = (aiLevel - 1).coerceAtLeast(1)
-                    prefs.edit().putInt("ai_level", aiLevel).apply()
-                    consecutiveDeaths = 0
-                    prefs.edit().putInt("consecutive_deaths", 0).apply()
-                }
-            } else {
-                consecutiveDeaths = 0
-                prefs.edit().putInt("consecutive_deaths", 0).apply()
-            }
-        }
+        aiMode = 0
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -911,12 +811,14 @@ class SnakeView(context: Context) : View(context) {
         offsetX = (width - cellSize * cols) / 2f
         offsetY = (height - cellSize * rows) / 2f
 
-        if (isRainbowBoard) {
+        if (paintBoardBg.shader != null) {
             val time = System.currentTimeMillis() % 5000L
             boardMatrix.setTranslate(time * 0.15f, time * 0.15f)
             paintBoardBg.shader?.setLocalMatrix(boardMatrix)
             canvas.drawRect(offsetX, offsetY, offsetX + cols * cellSize, offsetY + rows * cellSize, paintBoardBg)
-        } else canvas.drawColor(currentBoardBgColor)
+        } else {
+            canvas.drawColor(bgColor)
+        }
 
         canvas.save()
         if (gameOver && shakeTime > 0) canvas.translate(shakeOffsetX, shakeOffsetY)
@@ -924,7 +826,7 @@ class SnakeView(context: Context) : View(context) {
         val breath = (sin(System.currentTimeMillis() / 400.0).toFloat() + 1f) / 2f
         val gridAlpha = (60 + 195 * breath).toInt()
         paintGrid.alpha = gridAlpha
-        paintGrid.color = currentBoardGridColor
+        paintGrid.color = gridColor
         for (i in 0..cols) {
             val x = offsetX + i * cellSize
             canvas.drawLine(x, offsetY, x, offsetY + rows * cellSize, paintGrid)
@@ -1001,16 +903,16 @@ class SnakeView(context: Context) : View(context) {
                 paintSnakeBody.shader = LinearGradient(
                     hp.x - cos(angle) * fd, hp.y - sin(angle) * fd,
                     tp.x - cos(angle) * fd, tp.y - sin(angle) * fd,
-                    rainbowColors, null, Shader.TileMode.MIRROR
+                    rainbow, null, Shader.TileMode.MIRROR
                 )
                 paintSnakeHead.color = Color.WHITE
                 paintSnakeBody.alpha = 255
                 paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
             } else {
                 paintSnakeBody.shader = null
-                paintSnakeBody.color = currentSkinBodyColor
+                paintSnakeBody.color = bodyColor
                 paintSnakeBody.alpha = 255
-                paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
+                paintSnakeBody.setShadowLayer(20f, 0f, 0f, bodyColor)
             }
             paintSnakeBody.strokeWidth = cellSize * 0.8f
             paintSnakeBody.alpha = if (isRainbowSkin) 150 else 120
@@ -1021,14 +923,14 @@ class SnakeView(context: Context) : View(context) {
 
             val hp = points.first()
             canvas.drawCircle(hp.x, hp.y, cellSize * 0.5f, paintSnakeHead)
-            canvas.drawCircle(hp.x - cellSize * 0.1f, hp.y - cellSize * 0.1f, cellSize * 0.15f, paintSnakeHighlight)
+            canvas.drawCircle(hp.x - cellSize * 0.1f, hp.y - cellSize * 0.1f, cellSize * 0.15f, paintHighlight)
             val cd = if (dir.x == 0 && dir.y == 0) Point(1, 0) else dir
             val eo = cellSize * 0.2f
             val poX = -cd.y * (cellSize * 0.2f); val poY = cd.x * (cellSize * 0.2f)
-            canvas.drawCircle(hp.x + cd.x * eo + poX, hp.y + cd.y * eo + poY, cellSize * 0.12f, paintEyeWhite)
-            canvas.drawCircle(hp.x + cd.x * eo - poX, hp.y + cd.y * eo - poY, cellSize * 0.12f, paintEyeWhite)
-            canvas.drawCircle(hp.x + cd.x * eo * 1.2f + poX, hp.y + cd.y * eo * 1.2f + poY, cellSize * 0.06f, paintEyeBlack)
-            canvas.drawCircle(hp.x + cd.x * eo * 1.2f - poX, hp.y + cd.y * eo * 1.2f - poY, cellSize * 0.06f, paintEyeBlack)
+            canvas.drawCircle(hp.x + cd.x * eo + poX, hp.y + cd.y * eo + poY, cellSize * 0.12f, paintEyeW)
+            canvas.drawCircle(hp.x + cd.x * eo - poX, hp.y + cd.y * eo - poY, cellSize * 0.12f, paintEyeW)
+            canvas.drawCircle(hp.x + cd.x * eo * 1.2f + poX, hp.y + cd.y * eo * 1.2f + poY, cellSize * 0.06f, paintEyeB)
+            canvas.drawCircle(hp.x + cd.x * eo * 1.2f - poX, hp.y + cd.y * eo * 1.2f - poY, cellSize * 0.06f, paintEyeB)
         }
 
         particles.forEach { p ->
@@ -1038,12 +940,12 @@ class SnakeView(context: Context) : View(context) {
             else canvas.drawCircle(p.x, p.y, cellSize * 0.15f * p.life * p.size, paintParticle)
         }
         if (shockwaveAlpha > 0) {
-            paintShockwave.alpha = shockwaveAlpha.toInt().coerceIn(0, 255)
-            canvas.drawCircle(shockwaveX, shockwaveY, shockwaveRadius, paintShockwave)
+            paintShock.alpha = shockwaveAlpha.toInt().coerceIn(0, 255)
+            canvas.drawCircle(shockwaveX, shockwaveY, shockwaveRadius, paintShock)
         }
-        floatingTexts.forEach { t ->
-            paintFloatingText.alpha = (t.life * 255).toInt().coerceIn(0, 255)
-            canvas.drawText(t.text, t.x, t.y, paintFloatingText)
+        floats.forEach { t ->
+            paintFloat.alpha = (t.life * 255).toInt().coerceIn(0, 255)
+            canvas.drawText(t.text, t.x, t.y, paintFloat)
         }
         canvas.restore()
 
@@ -1062,10 +964,10 @@ class SnakeView(context: Context) : View(context) {
             }
         } else if (dir.x == 0 && dir.y == 0) {
             paintSubText.textSize = 32f
-            paintSubText.color = if (isRainbowBoard) Color.WHITE else if (currentBoardBgColor == Color.BLACK) Color.WHITE else Color.DKGRAY
+            paintSubText.color = Color.WHITE
             canvas.drawText("滑动屏幕开始", width / 2f, height / 2f, paintSubText)
             paintSubText.textSize = 20f
-            paintSubText.color = if (isRainbowBoard) Color.LTGRAY else if (currentBoardBgColor == Color.BLACK) Color.LTGRAY else Color.GRAY
+            paintSubText.color = Color.LTGRAY
             canvas.drawText("(滑动控制方向)", width / 2f, height / 2f + 50, paintSubText)
         } else if (aiMode == 1) {
             val modeName: String
@@ -1089,7 +991,7 @@ class SnakeView(context: Context) : View(context) {
                 }
                 4 -> {
                     modeName = "🧠 MCTS 深推 (MCTS)"
-                    modeDesc = "每方向12次rollout模拟，深度60步"
+                    modeDesc = "每方向6次rollout，深度30步"
                     modeColor = Color.rgb(155, 89, 182)
                 }
                 else -> {
