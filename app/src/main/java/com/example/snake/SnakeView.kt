@@ -661,9 +661,9 @@ class SnakeView @JvmOverloads constructor(
         border.color=when(ai.danger){1->Color.GREEN;2->Color.rgb(150,255,80);3->Color.YELLOW;4->Color.rgb(255,150,0);else->Color.RED}
         border.style=Paint.Style.STROKE;border.strokeWidth=3f
         c.drawRoundRect(left,top,left+w,top+h,18f,18f,border)
-        text.textAlign=Paint.Align.LEFT;text.setFakeBoldText(true);text.textSize=16f;text.color=Color.WHITE
+        text.textAlign=Paint.Align.LEFT;text.isFakeBoldText=true;text.textSize=16f;text.color=Color.WHITE
         c.drawText("🧠 AI  ${ai.strategy}",left+12,top+24,text)
-        text.setFakeBoldText(false);text.textSize=12f
+        text.isFakeBoldText=false;text.textSize=12f
         text.color=Color.YELLOW;c.drawText("正在判断：${ai.reason}",left+12,top+43,text)
         text.color=Color.WHITE
         c.drawText("危险 ${"●".repeat(ai.danger)}${"○".repeat(5-ai.danger)}   空间 ${ai.region}   比例 ${"%.1f".format(ai.spaceRatio)}",left+12,top+61,text)
@@ -681,16 +681,16 @@ class SnakeView @JvmOverloads constructor(
         text.color=Color.LTGRAY
         c.drawText("学习：Q/UCB + 多步前瞻；死亡后自动调整安全策略",left+12,top+168,text)
         if(gameOver){
-            text.color=Color.RED;text.isFakeBold=true;text.textSize=15f
+            text.color=Color.RED;text.isFakeBoldText=true;text.textSize=15f
             c.drawText("死亡原因：$deathCause",left+12,top+190,text)
         }
     }
 
     private fun drawGameOver(c:Canvas){
         paint.color=Color.argb(150,0,0,0);c.drawRect(0f,0f,width.toFloat(),height.toFloat(),paint)
-        text.textAlign=Paint.Align.CENTER;text.isFakeBold=true;text.textSize=30f;text.color=Color.WHITE
+        text.textAlign=Paint.Align.CENTER;text.isFakeBoldText=true;text.textSize=30f;text.color=Color.WHITE
         c.drawText("GAME OVER",width/2f,height/2f-45,text)
-        text.textSize=15f;text.isFakeBold=false
+        text.textSize=15f;text.isFakeBoldText=false
         c.drawText("分数 $score   最高 $highScore   长度 ${snake.size}",width/2f,height/2f-15,text)
         text.color=Color.YELLOW;c.drawText("点击屏幕重新开始",width/2f,height/2f+20,text)
         text.color=Color.LTGRAY;text.textSize=11f
