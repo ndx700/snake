@@ -4,11 +4,15 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.os.Handler
 import android.os.Looper
+import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.sin
 import kotlin.random.Random
 
 class SnakeView(context: Context) : View(context) {
@@ -29,10 +33,16 @@ class SnakeView(context: Context) : View(context) {
 
     private var food = Point(5, 5)
     private var score = 0
+    private var highScore = 0
     private var gameOver = false
     private var running = false
 
+    // 逻辑移动速度（毫秒），初始 160ms，最低 70ms（越快越难）
+    private var gameSpeed = 160L
+
     var onScoreChanged: ((Int) -> Unit)? = null
+
+    private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
     private val paintSnake = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(46, 204, 113)
@@ -44,6 +54,12 @@ class SnakeView(context: Context) : View(context) {
 
     private val paintFood = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(231, 76, 60)
+        setShadowLayer(15f, 0f, 0f, Color.rgb(231, 76, 60))
+    }
+
+    private val paintGrid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(30, 30, 30)
+        strokeWidth = 1f
     }
 
     private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -52,19 +68,43 @@ class SnakeView(context: Context) : View(context) {
         textAlign = Paint.Align.CENTER
     }
 
-    private val handler = Handler(Looper.getMainLooper())
+    private val paintSubText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.LTGRAY
+        textSize = 28f
+        textAlign = Paint.Align.CENTER
+    }
 
-    private val tick = object : Runnable {
-        override fun run() {
-            if (running) {
+    // --- 高帧率渲染核心逻辑 ---
+    private var lastFrameTime = 0L
+    private var timeAccumulator = 0L
+
+    private val frameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!running) return
+
+            val currentTime = System.nanoTime()
+            if (lastFrameTime == 0L) lastFrameTime = currentTime
+
+            val deltaTime = (currentTime - lastFrameTime) / 1_000_000 // 转毫秒
+            lastFrameTime = currentTime
+            timeAccumulator += deltaTime
+
+            // 只有当累计时间达到游戏速度时，才更新一次逻辑（蛇移动）
+            if (timeAccumulator >= gameSpeed) {
                 update()
-                invalidate()
-                handler.postDelayed(this, 120L)
+                timeAccumulator -= gameSpeed
             }
+
+            // 每一帧都强制重绘画面（约 60/90/120 帧每秒）
+            invalidate()
+
+            // 注册下一帧
+            Choreographer.getInstance().postFrameCallback(this)
         }
     }
 
     init {
+        highScore = prefs.getInt("high_score", 0)
         reset()
     }
 
@@ -77,9 +117,11 @@ class SnakeView(context: Context) : View(context) {
 
         score = 0
         gameOver = false
+        gameSpeed = 160L
+        lastFrameTime = 0L
+        timeAccumulator = 0L
 
         placeFood()
-
         onScoreChanged?.invoke(score)
         invalidate()
     }
@@ -87,13 +129,15 @@ class SnakeView(context: Context) : View(context) {
     fun resume() {
         if (!running) {
             running = true
-            handler.post(tick)
+            lastFrameTime = 0L
+            timeAccumulator = 0L
+            Choreographer.getInstance().postFrameCallback(frameCallback)
         }
     }
 
     fun pause() {
         running = false
-        handler.removeCallbacks(tick)
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
     }
 
     private fun placeFood() {
@@ -109,14 +153,13 @@ class SnakeView(context: Context) : View(context) {
     private fun update() {
         if (gameOver) return
 
-        // 修复后的方向控制逻辑：防止瞬间掉头撞到自己
         if (nextDir.x != 0 || nextDir.y != 0) {
             if (dir.x == 0 && dir.y == 0) {
-                dir = nextDir // 初始状态，允许开始
+                dir = nextDir
             } else if (dir.x != 0 && nextDir.y != 0) {
-                dir = nextDir // 水平移动中，只能上下转弯
+                dir = nextDir
             } else if (dir.y != 0 && nextDir.x != 0) {
-                dir = nextDir // 垂直移动中，只能左右转弯
+                dir = nextDir
             }
         }
 
@@ -127,22 +170,33 @@ class SnakeView(context: Context) : View(context) {
 
         if (newHead.x < 0 || newHead.x >= cols || newHead.y < 0 || newHead.y >= rows) {
             gameOver = true
+            saveHighScore()
             return
         }
 
         if (snake.any { it == newHead }) {
             gameOver = true
+            saveHighScore()
             return
         }
 
         snake.addFirst(newHead)
 
         if (newHead == food) {
-            score++
+            score += 10
             onScoreChanged?.invoke(score)
             placeFood()
+            // 动态加速
+            gameSpeed = max(70L, gameSpeed - 4L)
         } else {
             snake.removeLast()
+        }
+    }
+
+    private fun saveHighScore() {
+        if (score > highScore) {
+            highScore = score
+            prefs.edit().putInt("high_score", highScore).apply()
         }
     }
 
@@ -155,42 +209,57 @@ class SnakeView(context: Context) : View(context) {
         offsetX = (width - cellSize * cols) / 2f
         offsetY = (height - cellSize * rows) / 2f
 
-        // 食物
+        for (i in 0..cols) {
+            val x = offsetX + i * cellSize
+            canvas.drawLine(x, offsetY, x, offsetY + rows * cellSize, paintGrid)
+        }
+        for (i in 0..rows) {
+            val y = offsetY + i * cellSize
+            canvas.drawLine(offsetX, y, offsetX + cols * cellSize, y, paintGrid)
+        }
+
+        // 食物发光呼吸动画（由高帧率驱动，现在会非常丝滑）
+        val pulse = 1f + 0.15f * sin(System.currentTimeMillis() / 150.0).toFloat()
         canvas.drawCircle(
             offsetX + food.x * cellSize + cellSize / 2,
             offsetY + food.y * cellSize + cellSize / 2,
-            cellSize * 0.4f,
+            cellSize * 0.35f * pulse,
             paintFood
         )
 
-        // 蛇
+        val rectF = RectF()
         snake.forEachIndexed { index, p ->
             val left = offsetX + p.x * cellSize + 2
             val top = offsetY + p.y * cellSize + 2
             val right = left + cellSize - 4
             val bottom = top + cellSize - 4
 
-            canvas.drawRect(
-                left,
-                top,
-                right,
-                bottom,
-                if (index == 0) paintHead else paintSnake
-            )
+            rectF.set(left, top, right, bottom)
+            canvas.drawRoundRect(rectF, 8f, 8f, if (index == 0) paintHead else paintSnake)
         }
 
-        // 游戏结束
         if (gameOver) {
-            canvas.drawColor(0xAA000000.toInt())
+            canvas.drawColor(0xBB000000.toInt())
+            paintText.textSize = 52f
+            paintText.color = Color.rgb(231, 76, 60)
+            canvas.drawText("游戏结束", width / 2f, height / 2f - 60, paintText)
 
-            paintText.textSize = 48f
-            canvas.drawText("游戏结束", width / 2f, height / 2f - 20, paintText)
+            paintText.textSize = 32f
+            paintText.color = Color.WHITE
+            canvas.drawText("本局得分: $score", width / 2f, height / 2f + 10, paintText)
 
-            paintText.textSize = 28f
-            canvas.drawText("点击屏幕重新开始", width / 2f, height / 2f + 40, paintText)
+            paintSubText.color = Color.rgb(241, 196, 15)
+            canvas.drawText("最高分: $highScore", width / 2f, height / 2f + 60, paintSubText)
+
+            paintSubText.color = Color.LTGRAY
+            canvas.drawText("点击屏幕重新开始", width / 2f, height / 2f + 130, paintSubText)
         } else if (dir.x == 0 && dir.y == 0) {
-            paintText.textSize = 28f
-            canvas.drawText("滑动屏幕开始", width / 2f, height / 2f, paintText)
+            paintSubText.textSize = 32f
+            paintSubText.color = Color.WHITE
+            canvas.drawText("滑动屏幕开始", width / 2f, height / 2f, paintSubText)
+            paintSubText.textSize = 20f
+            paintSubText.color = Color.GRAY
+            canvas.drawText("(滑动控制方向)", width / 2f, height / 2f + 50, paintSubText)
         }
     }
 
@@ -221,11 +290,9 @@ class SnakeView(context: Context) : View(context) {
                 } else {
                     nextDir = if (dy > 0) Point(0, 1) else Point(0, -1)
                 }
-
                 return true
             }
         }
-
         return super.onTouchEvent(event)
     }
 }
