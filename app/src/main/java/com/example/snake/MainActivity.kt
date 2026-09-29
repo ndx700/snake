@@ -27,7 +27,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var mctsBtn: Button
     private lateinit var prefs: android.content.SharedPreferences
 
-    private var forcedStrategy = -1  // -1=自动 0=BFS 1=追尾 2=加权HAM 4=MCTS
+    private var forcedStrategy = -1
     private var aiOn = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,7 +59,6 @@ class MainActivity : AppCompatActivity() {
         if (aiOn) gameView.setAIMode(1)
         gameView.setForcedStrategy(forcedStrategy)
 
-        // ===== 第一行：分数、金币、AI开关、商店 =====
         val row1 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(16, 16, 16, 4)
@@ -111,7 +110,6 @@ class MainActivity : AppCompatActivity() {
         row1.addView(aiBtn)
         row1.addView(shopBtn)
 
-        // ===== 第二行：5 个策略按钮 =====
         val row2 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(8, 2, 8, 8)
@@ -164,7 +162,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setForcedStrategy(s: Int) {
-        // 如果点的是当前已选中的按钮，取消强制回到自动
         forcedStrategy = if (forcedStrategy == s) -1 else s
         gameView.setForcedStrategy(forcedStrategy)
         prefs.edit().putInt("forced_strategy", forcedStrategy).apply()
