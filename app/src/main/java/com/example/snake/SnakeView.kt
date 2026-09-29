@@ -50,6 +50,7 @@ class SnakeView(context: Context) : View(context) {
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
+    var onAutoPlayChanged: ((Boolean) -> Unit)? = null // 通知外部 UI 更新
     
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
@@ -160,6 +161,7 @@ class SnakeView(context: Context) : View(context) {
 
     fun toggleAutoPlay() {
         isAutoPlay = !isAutoPlay
+        onAutoPlayChanged?.invoke(isAutoPlay)
         reset()
     }
 
@@ -284,28 +286,19 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ================== 顶级 AI 核心逻辑 ==================
-    
     private fun autoPilot() {
         if (gameOver) return
-        
         val currentHead = snake.first()
-        
-        // 1. 尝试寻找去食物的路径
         val pathToFood = bfsPath(currentHead, food, snake)
         
         if (pathToFood != null && pathToFood.size > 1) {
-            // 2. 模拟吃完食物后的状态
             val simulatedSnake = ArrayDeque(snake)
-            simulatedSnake.addFirst(food) // 假设吃到食物
-            simulatedSnake.removeLast() // 去掉尾巴
-            
-            // 3. 安全检查：吃完后还能找到尾巴吗？
+            simulatedSnake.addFirst(food)
+            simulatedSnake.removeLast()
             val tailAfterEating = simulatedSnake.last()
             val pathToTailAfterEating = bfsPath(simulatedSnake.first(), tailAfterEating, simulatedSnake)
             
             if (pathToTailAfterEating != null) {
-                // 安全！去吃食物
                 val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
                 directionQueue.clear()
                 directionQueue.add(nextMove)
@@ -313,7 +306,6 @@ class SnakeView(context: Context) : View(context) {
             }
         }
         
-        // 4. 如果吃食物不安全，转入求生模式：追自己的尾巴
         val pathToTail = bfsPath(currentHead, snake.last(), snake)
         if (pathToTail != null && pathToTail.size > 1) {
             val nextMove = Point(pathToTail[1].x - pathToTail[0].x, pathToTail[1].y - pathToTail[0].y)
@@ -322,27 +314,32 @@ class SnakeView(context: Context) : View(context) {
             return
         }
         
-        // 5. 连尾巴都追不到（极度危险），用洪泛填充寻找最大的生存空间
         val bestMove = findMoveWithMaxSpace()
         if (bestMove != null) {
             directionQueue.clear()
             directionQueue.add(bestMove)
+        } else {
+            val emergencyDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
+            for (d in emergencyDirs) {
+                val newHead = Point(currentHead.x + d.x, currentHead.y + d.y)
+                if (newHead.x in 0 until cols && newHead.y in 0 until rows && snake.none { it == newHead }) {
+                    directionQueue.clear()
+                    directionQueue.add(d)
+                    break
+                }
+            }
         }
     }
 
-    // 洪泛填充算法 (Flood Fill)：计算每个可走方向能到达的空格数量，选择最大的
     private fun findMoveWithMaxSpace(): Point? {
         val head = snake.first()
         val directions = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
         var bestMove: Point? = null
         var maxSpace = -1
-        
         for (d in directions) {
             val newHead = Point(head.x + d.x, head.y + d.y)
             if (newHead.x !in 0 until cols || newHead.y !in 0 until rows) continue
             if (snake.any { it == newHead }) continue
-            if (d.x == -dir.x && d.y == -dir.y) continue
-            
             val space = floodFill(newHead)
             if (space > maxSpace) {
                 maxSpace = space
@@ -352,14 +349,12 @@ class SnakeView(context: Context) : View(context) {
         return bestMove
     }
 
-    // BFS 辅助函数
     private fun bfsPath(start: Point, target: Point, currentSnake: Collection<Point>): List<Point>? {
         val queue = ArrayDeque<Point>()
         val visited = mutableSetOf<Point>()
         val parent = mutableMapOf<Point, Point>()
         queue.add(start)
         visited.add(start)
-        
         while (queue.isNotEmpty()) {
             val curr = queue.removeFirst()
             if (curr == target) {
@@ -374,7 +369,6 @@ class SnakeView(context: Context) : View(context) {
             for (d in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
                 val next = Point(curr.x + d.x, curr.y + d.y)
                 if (next.x !in 0 until cols || next.y !in 0 until rows) continue
-                // 注意：目标格子（尾巴）虽然当前被占据，但在下一回合是空的，可以走
                 if (currentSnake.any { it == next } && next != target) continue
                 if (visited.contains(next)) continue
                 visited.add(next)
@@ -385,13 +379,11 @@ class SnakeView(context: Context) : View(context) {
         return null
     }
     
-    // 洪泛填充辅助函数
     private fun floodFill(start: Point): Int {
         val queue = ArrayDeque<Point>()
         val visited = mutableSetOf<Point>()
         queue.add(start)
         visited.add(start)
-        
         while (queue.isNotEmpty()) {
             val curr = queue.removeFirst()
             for (d in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
@@ -405,7 +397,6 @@ class SnakeView(context: Context) : View(context) {
         }
         return visited.size
     }
-    // =======================================================
 
     private fun update() {
         if (gameOver) return
@@ -416,10 +407,14 @@ class SnakeView(context: Context) : View(context) {
 
         if (directionQueue.isNotEmpty()) {
             val next = directionQueue.removeFirst()
-            if (dir.x == 0 && dir.y == 0) {
+            if (isAutoPlay) {
                 dir = next
-            } else if (dir.x != -next.x || dir.y != -next.y) {
-                dir = next
+            } else {
+                if (dir.x == 0 && dir.y == 0) {
+                    dir = next
+                } else if (dir.x != -next.x || dir.y != -next.y) {
+                    dir = next
+                }
             }
         }
 
@@ -490,6 +485,12 @@ class SnakeView(context: Context) : View(context) {
             val angle = Random.nextFloat() * 2 * PI
             val speed = Random.nextFloat() * 8f + 3f
             particles.add(Particle(headX, headY, cos(angle).toFloat() * speed, sin(angle).toFloat() * speed, 1.5f, Color.rgb(255, 50, 50)))
+        }
+        
+        // --- 关键修改：AI 死亡后自动关闭演示模式 ---
+        if (isAutoPlay) {
+            isAutoPlay = false
+            onAutoPlayChanged?.invoke(false)
         }
     }
 
