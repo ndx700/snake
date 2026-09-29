@@ -12,8 +12,168 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+
+        private const val CRASH_FILE = "last_crash.txt"
+
+        /**
+         * 安装全局崩溃捕获器。
+         *
+         * 无论是 MainActivity、SnakeView，
+         * 还是 Choreographer / 游戏线程里的异常，
+         * 只要最终进入 UncaughtExceptionHandler，
+         * 都会保存下来。
+         */
+        private fun installCrashHandler(context: Context) {
+
+            val appContext = context.applicationContext
+
+            val oldHandler =
+                Thread.getDefaultUncaughtExceptionHandler()
+
+            Thread.setDefaultUncaughtExceptionHandler {
+                    thread,
+                    throwable ->
+
+                try {
+
+                    val time =
+                        SimpleDateFormat(
+                            "yyyy-MM-dd HH:mm:ss",
+                            Locale.getDefault()
+                        ).format(Date())
+
+                    val file =
+                        File(
+                            appContext.filesDir,
+                            CRASH_FILE
+                        )
+
+                    val text =
+                        buildString {
+
+                            append("================================\n")
+                            append("        SNAKE 崩溃诊断日志\n")
+                            append("================================\n\n")
+
+                            append("时间:\n")
+                            append(time)
+                            append("\n\n")
+
+                            append("线程:\n")
+                            append(thread.name)
+                            append("\n\n")
+
+                            append("异常类型:\n")
+                            append(
+                                throwable.javaClass.name
+                            )
+                            append("\n\n")
+
+                            append("异常信息:\n")
+                            append(
+                                throwable.message ?: "无"
+                            )
+                            append("\n\n")
+
+                            append("========== STACK TRACE ==========\n")
+
+                            append(
+                                throwable.stackTraceToString()
+                            )
+
+                            var cause =
+                                throwable.cause
+
+                            var level = 1
+
+                            while (cause != null) {
+
+                                append(
+                                    "\n\n========== CAUSE $level ==========\n"
+                                )
+
+                                append(
+                                    cause.stackTraceToString()
+                                )
+
+                                cause = cause.cause
+                                level++
+                            }
+                        }
+
+                    file.writeText(text)
+
+                } catch (_: Throwable) {
+                    // 崩溃记录本身绝对不能再导致第二次崩溃
+                }
+
+                /*
+                 * 保存完成以后仍然交给系统原来的 Handler，
+                 * 让 Android 正常结束发生崩溃的进程。
+                 */
+                try {
+
+                    oldHandler?.uncaughtException(
+                        thread,
+                        throwable
+                    )
+
+                } catch (_: Throwable) {
+                }
+            }
+        }
+
+        private fun getCrashFile(
+            context: Context
+        ): File {
+
+            return File(
+                context.applicationContext.filesDir,
+                CRASH_FILE
+            )
+        }
+
+        private fun readCrashLog(
+            context: Context
+        ): String? {
+
+            return try {
+
+                val file =
+                    getCrashFile(context)
+
+                if (!file.exists()) {
+                    null
+                } else {
+                    file.readText()
+                }
+
+            } catch (_: Throwable) {
+
+                null
+            }
+        }
+
+        private fun deleteCrashLog(
+            context: Context
+        ) {
+
+            try {
+
+                getCrashFile(context).delete()
+
+            } catch (_: Throwable) {
+            }
+        }
+    }
 
     private var gameView: SnakeView? = null
 
@@ -28,13 +188,34 @@ class MainActivity : AppCompatActivity() {
     private var hamBtn: Button? = null
     private var mctsBtn: Button? = null
 
-    private lateinit var prefs: android.content.SharedPreferences
+    private lateinit var prefs:
+        android.content.SharedPreferences
 
     private var forcedStrategy = -1
+
     private var aiOn = true
 
-    override fun onCreate(savedInstanceState: Bundle?) {
+    override fun onCreate(
+        savedInstanceState: Bundle?
+    ) {
+
+        /*
+         * 必须尽可能早安装崩溃捕获。
+         */
+        installCrashHandler(
+            applicationContext
+        )
+
         super.onCreate(savedInstanceState)
+
+        /*
+         * 如果上一次运行崩溃，
+         * 先显示上一次的错误。
+         */
+        val previousCrash =
+            readCrashLog(
+                applicationContext
+            )
 
         try {
 
@@ -42,22 +223,29 @@ class MainActivity : AppCompatActivity() {
                 WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
             )
 
-            prefs = getSharedPreferences(
-                "snake_prefs",
-                Context.MODE_PRIVATE
-            )
+            prefs =
+                getSharedPreferences(
+                    "snake_prefs",
+                    Context.MODE_PRIVATE
+                )
 
-            forcedStrategy = prefs.getInt(
-                "forced_strategy",
-                -1
-            )
+            forcedStrategy =
+                prefs.getInt(
+                    "forced_strategy",
+                    -1
+                )
 
-            aiOn = prefs.getBoolean(
-                "ai_on",
-                true
-            )
+            aiOn =
+                prefs.getBoolean(
+                    "ai_on",
+                    true
+                )
 
-            gameView = SnakeView(this)
+            /*
+             * 创建游戏。
+             */
+            gameView =
+                SnakeView(this)
 
             gameView?.setAIMode(
                 if (aiOn) 1 else 0
@@ -71,256 +259,308 @@ class MainActivity : AppCompatActivity() {
             // 第一行：分数 / 金币 / 商店
             // ========================================
 
-            val row1 = LinearLayout(this).apply {
+            val row1 =
+                LinearLayout(this).apply {
 
-                orientation =
-                    LinearLayout.HORIZONTAL
+                    orientation =
+                        LinearLayout.HORIZONTAL
 
-                setPadding(
-                    12,
-                    12,
-                    12,
-                    4
-                )
-
-                gravity =
-                    Gravity.CENTER_VERTICAL
-            }
-
-            scoreView = TextView(this).apply {
-
-                text = "分数: 0"
-
-                textSize = 14f
-
-                setTextColor(
-                    Color.WHITE
-                )
-            }
-
-            moneyView = TextView(this).apply {
-
-                text =
-                    "金币: ${
-                        prefs.getInt(
-                            "money",
-                            0
-                        )
-                    }"
-
-                textSize = 14f
-
-                setTextColor(
-                    Color.rgb(
-                        241,
-                        196,
-                        15
+                    setPadding(
+                        12,
+                        12,
+                        12,
+                        4
                     )
-                )
 
-                setPadding(
-                    14,
-                    0,
-                    0,
-                    0
-                )
-            }
-
-            val shop = Button(this).apply {
-
-                text = "🛒"
-
-                textSize = 12f
-
-                setTextColor(
-                    Color.WHITE
-                )
-
-                setPadding(
-                    8,
-                    0,
-                    8,
-                    0
-                )
-
-                setBackgroundColor(
-                    Color.rgb(
-                        46,
-                        204,
-                        113
-                    )
-                )
-
-                setOnClickListener {
-                    showShopCategoryDialog()
+                    gravity =
+                        Gravity.CENTER_VERTICAL
                 }
-            }
 
-            val spacer = FrameLayout(this).apply {
+            scoreView =
+                TextView(this).apply {
 
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        0,
-                        1,
-                        1f
+                    text =
+                        "分数: 0"
+
+                    textSize =
+                        14f
+
+                    setTextColor(
+                        Color.WHITE
                     )
-            }
+                }
 
-            row1.addView(scoreView)
-            row1.addView(moneyView)
-            row1.addView(spacer)
-            row1.addView(shop)
+            moneyView =
+                TextView(this).apply {
+
+                    text =
+                        "金币: ${
+                            prefs.getInt(
+                                "money",
+                                0
+                            )
+                        }"
+
+                    textSize =
+                        14f
+
+                    setTextColor(
+                        Color.rgb(
+                            241,
+                            196,
+                            15
+                        )
+                    )
+
+                    setPadding(
+                        14,
+                        0,
+                        0,
+                        0
+                    )
+                }
+
+            val shop =
+                Button(this).apply {
+
+                    text = "🛒"
+
+                    textSize =
+                        12f
+
+                    setTextColor(
+                        Color.WHITE
+                    )
+
+                    setPadding(
+                        8,
+                        0,
+                        8,
+                        0
+                    )
+
+                    setBackgroundColor(
+                        Color.rgb(
+                            46,
+                            204,
+                            113
+                        )
+                    )
+
+                    setOnClickListener {
+
+                        showShopCategoryDialog()
+                    }
+                }
+
+            val spacer =
+                FrameLayout(this).apply {
+
+                    layoutParams =
+                        LinearLayout.LayoutParams(
+                            0,
+                            1,
+                            1f
+                        )
+                }
+
+            row1.addView(
+                scoreView
+            )
+
+            row1.addView(
+                moneyView
+            )
+
+            row1.addView(
+                spacer
+            )
+
+            row1.addView(
+                shop
+            )
 
             // ========================================
-            // 第二行：策略按钮 + AI ON/OFF
+            // 第二行：策略 + AI
             // ========================================
 
-            val row2 = LinearLayout(this).apply {
+            val row2 =
+                LinearLayout(this).apply {
 
-                orientation =
-                    LinearLayout.HORIZONTAL
+                    orientation =
+                        LinearLayout.HORIZONTAL
 
-                setPadding(
-                    6,
-                    0,
-                    6,
-                    6
-                )
+                    setPadding(
+                        6,
+                        0,
+                        6,
+                        6
+                    )
 
-                gravity =
-                    Gravity.CENTER_VERTICAL
-            }
+                    gravity =
+                        Gravity.CENTER_VERTICAL
+                }
 
             autoBtn =
-                makeStrategyBtn("自动") {
+                makeStrategyBtn(
+                    "自动"
+                ) {
                     setForcedStrategy(-1)
                 }
 
             bfsBtn =
-                makeStrategyBtn("BFS") {
+                makeStrategyBtn(
+                    "BFS"
+                ) {
                     setForcedStrategy(0)
                 }
 
             tailBtn =
-                makeStrategyBtn("追尾") {
+                makeStrategyBtn(
+                    "追尾"
+                ) {
                     setForcedStrategy(1)
                 }
 
             hamBtn =
-                makeStrategyBtn("HAM") {
+                makeStrategyBtn(
+                    "HAM"
+                ) {
                     setForcedStrategy(2)
                 }
 
             mctsBtn =
-                makeStrategyBtn("BEAM") {
+                makeStrategyBtn(
+                    "BEAM"
+                ) {
                     setForcedStrategy(4)
                 }
 
             // ========================================
-            // AI 按钮：第二行最右边
+            // AI ON/OFF
             // ========================================
 
-            aiBtn = Button(this).apply {
+            aiBtn =
+                Button(this).apply {
 
-                textSize = 11f
+                    textSize =
+                        11f
 
-                setTextColor(
-                    Color.WHITE
-                )
+                    setTextColor(
+                        Color.WHITE
+                    )
 
-                setPadding(
-                    4,
-                    0,
-                    4,
-                    0
-                )
-
-                layoutParams =
-                    LinearLayout.LayoutParams(
+                    setPadding(
+                        4,
                         0,
-                        -2,
-                        1.25f
+                        4,
+                        0
                     )
 
-                updateAiButton()
-
-                setOnClickListener {
-
-                    aiOn = !aiOn
-
-                    prefs.edit()
-                        .putBoolean(
-                            "ai_on",
-                            aiOn
+                    layoutParams =
+                        LinearLayout.LayoutParams(
+                            0,
+                            -2,
+                            1.25f
                         )
-                        .apply()
-
-                    gameView?.setAIMode(
-                        if (aiOn) 1 else 0
-                    )
 
                     updateAiButton()
+
+                    setOnClickListener {
+
+                        aiOn = !aiOn
+
+                        prefs.edit()
+                            .putBoolean(
+                                "ai_on",
+                                aiOn
+                            )
+                            .apply()
+
+                        gameView?.setAIMode(
+                            if (aiOn) 1 else 0
+                        )
+
+                        updateAiButton()
+                    }
                 }
-            }
 
-            row2.addView(autoBtn)
-            row2.addView(bfsBtn)
-            row2.addView(tailBtn)
-            row2.addView(hamBtn)
-            row2.addView(mctsBtn)
-            row2.addView(aiBtn)
+            row2.addView(
+                autoBtn
+            )
+
+            row2.addView(
+                bfsBtn
+            )
+
+            row2.addView(
+                tailBtn
+            )
+
+            row2.addView(
+                hamBtn
+            )
+
+            row2.addView(
+                mctsBtn
+            )
+
+            row2.addView(
+                aiBtn
+            )
 
             // ========================================
-            // 顶部控制区域
+            // 顶部区域
             // ========================================
 
-            val top = LinearLayout(this).apply {
+            val top =
+                LinearLayout(this).apply {
 
-                orientation =
-                    LinearLayout.VERTICAL
+                    orientation =
+                        LinearLayout.VERTICAL
 
-                addView(row1)
-                addView(row2)
-            }
+                    addView(row1)
 
-            // ========================================
-            // 分数回调
-            // ========================================
-
-            gameView?.onScoreChanged = { s ->
-
-                runOnUiThread {
-
-                    scoreView?.text =
-                        "分数: $s"
+                    addView(row2)
                 }
-            }
 
             // ========================================
-            // 金币回调
+            // 游戏回调
             // ========================================
 
-            gameView?.onMoneyChanged = { m ->
+            gameView?.onScoreChanged =
+                { s ->
 
-                runOnUiThread {
+                    runOnUiThread {
 
-                    moneyView?.text =
-                        "金币: $m"
+                        scoreView?.text =
+                            "分数: $s"
+                    }
                 }
-            }
+
+            gameView?.onMoneyChanged =
+                { m ->
+
+                    runOnUiThread {
+
+                        moneyView?.text =
+                            "金币: $m"
+                    }
+                }
 
             updateButtons()
 
             // ========================================
-            // 游戏根布局
+            // 根布局
             // ========================================
 
-            val root = FrameLayout(this).apply {
+            val root =
+                FrameLayout(this).apply {
 
-                setBackgroundColor(
-                    Color.BLACK
-                )
-            }
+                    setBackgroundColor(
+                        Color.BLACK
+                    )
+                }
 
             root.addView(
                 gameView,
@@ -341,35 +581,136 @@ class MainActivity : AppCompatActivity() {
 
             setContentView(root)
 
-        } catch (e: Exception) {
+            /*
+             * 如果上一次发生过崩溃，
+             * 当前 App 已经成功启动后再显示。
+             */
+            if (
+                !previousCrash.isNullOrBlank()
+            ) {
 
-            val err = TextView(this).apply {
+                window.decorView.post {
 
-                setTextColor(
-                    Color.RED
-                )
-
-                textSize = 14f
-
-                setPadding(
-                    20,
-                    20,
-                    20,
-                    20
-                )
-
-                text =
-                    "启动失败:\n" +
-                    "${e.javaClass.simpleName}\n" +
-                    "${e.message}"
+                    showPreviousCrash(
+                        previousCrash
+                    )
+                }
             }
 
-            setContentView(err)
+        } catch (e: Throwable) {
+
+            /*
+             * 这里是 Activity 启动阶段的额外保护。
+             */
+            val error =
+                TextView(this).apply {
+
+                    setTextColor(
+                        Color.RED
+                    )
+
+                    textSize =
+                        14f
+
+                    setPadding(
+                        20,
+                        20,
+                        20,
+                        20
+                    )
+
+                    text =
+                        buildString {
+
+                            append(
+                                "启动失败\n\n"
+                            )
+
+                            append(
+                                e.javaClass.name
+                            )
+
+                            append(
+                                "\n\n"
+                            )
+
+                            append(
+                                e.message
+                                    ?: "无错误信息"
+                            )
+
+                            append(
+                                "\n\n"
+                            )
+
+                            append(
+                                e.stackTraceToString()
+                            )
+                        }
+                }
+
+            setContentView(error)
         }
     }
 
     // ========================================
-    // 创建策略按钮
+    // 显示上一次崩溃
+    // ========================================
+
+    private fun showPreviousCrash(
+        crash: String
+    ) {
+
+        val view =
+            TextView(this).apply {
+
+                setTextColor(
+                    Color.WHITE
+                )
+
+                textSize =
+                    11f
+
+                setPadding(
+                    30,
+                    20,
+                    30,
+                    20
+                )
+
+                text =
+                    crash
+            }
+
+        AlertDialog.Builder(this)
+            .setTitle(
+                "⚠ 上一次运行发生崩溃"
+            )
+            .setView(view)
+            .setPositiveButton(
+                "知道了"
+            ) { _, _ ->
+
+                deleteCrashLog(
+                    applicationContext
+                )
+            }
+            .setNeutralButton(
+                "保留日志",
+                null
+            )
+            .setOnDismissListener {
+
+                /*
+                 * 如果用户没有点击删除，
+                 * 日志继续保留。
+                 */
+            }
+            .show()
+    }
+
+    // ========================================
+    // 策略按钮
     // ========================================
 
     private fun makeStrategyBtn(
@@ -379,9 +720,11 @@ class MainActivity : AppCompatActivity() {
 
         return Button(this).apply {
 
-            text = label
+            text =
+                label
 
-            textSize = 11f
+            textSize =
+                11f
 
             setTextColor(
                 Color.WHITE
@@ -408,13 +751,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ========================================
-    // 设置强制策略
+    // 设置策略
     // ========================================
 
-    private fun setForcedStrategy(s: Int) {
+    private fun setForcedStrategy(
+        s: Int
+    ) {
 
         forcedStrategy =
-            if (forcedStrategy == s) {
+            if (
+                forcedStrategy == s
+            ) {
                 -1
             } else {
                 s
@@ -457,7 +804,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ========================================
-    // 更新策略按钮颜色
+    // 更新策略按钮
     // ========================================
 
     private fun updateButtons() {
@@ -484,7 +831,9 @@ class MainActivity : AppCompatActivity() {
             )
 
         autoBtn?.setBackgroundColor(
-            if (forcedStrategy == -1) {
+            if (
+                forcedStrategy == -1
+            ) {
                 auto
             } else {
                 inactive
@@ -492,7 +841,9 @@ class MainActivity : AppCompatActivity() {
         )
 
         bfsBtn?.setBackgroundColor(
-            if (forcedStrategy == 0) {
+            if (
+                forcedStrategy == 0
+            ) {
                 active
             } else {
                 inactive
@@ -500,7 +851,9 @@ class MainActivity : AppCompatActivity() {
         )
 
         tailBtn?.setBackgroundColor(
-            if (forcedStrategy == 1) {
+            if (
+                forcedStrategy == 1
+            ) {
                 active
             } else {
                 inactive
@@ -508,7 +861,9 @@ class MainActivity : AppCompatActivity() {
         )
 
         hamBtn?.setBackgroundColor(
-            if (forcedStrategy == 2) {
+            if (
+                forcedStrategy == 2
+            ) {
                 active
             } else {
                 inactive
@@ -516,7 +871,9 @@ class MainActivity : AppCompatActivity() {
         )
 
         mctsBtn?.setBackgroundColor(
-            if (forcedStrategy == 4) {
+            if (
+                forcedStrategy == 4
+            ) {
                 active
             } else {
                 inactive
@@ -525,7 +882,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ========================================
-    // 更新 AI 按钮
+    // AI 按钮
     // ========================================
 
     private fun updateAiButton() {
@@ -565,9 +922,7 @@ class MainActivity : AppCompatActivity() {
     private fun showShopCategoryDialog() {
 
         AlertDialog.Builder(this)
-
             .setTitle("商店")
-
             .setItems(
                 arrayOf(
                     "蛇皮肤",
@@ -584,12 +939,10 @@ class MainActivity : AppCompatActivity() {
                     showBoardShopDialog()
                 }
             }
-
             .setNegativeButton(
                 "关闭",
                 null
             )
-
             .show()
     }
 
@@ -611,44 +964,45 @@ class MainActivity : AppCompatActivity() {
                 "green"
             ) ?: "green"
 
-        val skins = listOf(
+        val skins =
+            listOf(
 
-            Skin(
-                "经典绿",
-                "green",
-                0
-            ),
+                Skin(
+                    "经典绿",
+                    "green",
+                    0
+                ),
 
-            Skin(
-                "海洋蓝",
-                "blue",
-                500
-            ),
+                Skin(
+                    "海洋蓝",
+                    "blue",
+                    500
+                ),
 
-            Skin(
-                "烈焰红",
-                "red",
-                1000
-            ),
+                Skin(
+                    "烈焰红",
+                    "red",
+                    1000
+                ),
 
-            Skin(
-                "暗夜紫",
-                "purple",
-                2000
-            ),
+                Skin(
+                    "暗夜紫",
+                    "purple",
+                    2000
+                ),
 
-            Skin(
-                "黄金圣斗士",
-                "gold",
-                5000
-            ),
+                Skin(
+                    "黄金圣斗士",
+                    "gold",
+                    5000
+                ),
 
-            Skin(
-                "RGB神龙",
-                "rainbow",
-                100000
+                Skin(
+                    "RGB神龙",
+                    "rainbow",
+                    100000
+                )
             )
-        )
 
         val items =
             skins.map {
@@ -677,12 +1031,12 @@ class MainActivity : AppCompatActivity() {
             }.toTypedArray()
 
         AlertDialog.Builder(this)
-
             .setTitle(
                 "蛇皮肤 (金币: $current)"
             )
-
-            .setItems(items) { _, which ->
+            .setItems(items) {
+                    _,
+                    which ->
 
                 val s =
                     skins[which]
@@ -704,7 +1058,9 @@ class MainActivity : AppCompatActivity() {
 
                     gameView?.updateCurrentSkin()
 
-                } else if (current >= s.price) {
+                } else if (
+                    current >= s.price
+                ) {
 
                     val nm =
                         current - s.price
@@ -738,17 +1094,15 @@ class MainActivity : AppCompatActivity() {
                     ).show()
                 }
             }
-
             .setNegativeButton(
                 "返回",
                 null
             )
-
             .show()
     }
 
     // ========================================
-    // 棋盘主题商店
+    // 棋盘商店
     // ========================================
 
     private fun showBoardShopDialog() {
@@ -765,44 +1119,45 @@ class MainActivity : AppCompatActivity() {
                 "dark"
             ) ?: "dark"
 
-        val boards = listOf(
+        val boards =
+            listOf(
 
-            Board(
-                "经典纯黑",
-                "dark",
-                0
-            ),
+                Board(
+                    "经典纯黑",
+                    "dark",
+                    0
+                ),
 
-            Board(
-                "极简白",
-                "light",
-                500
-            ),
+                Board(
+                    "极简白",
+                    "light",
+                    500
+                ),
 
-            Board(
-                "霓虹蓝",
-                "neon",
-                1500
-            ),
+                Board(
+                    "霓虹蓝",
+                    "neon",
+                    1500
+                ),
 
-            Board(
-                "森林绿",
-                "forest",
-                3000
-            ),
+                Board(
+                    "森林绿",
+                    "forest",
+                    3000
+                ),
 
-            Board(
-                "赛博朋克",
-                "cyberpunk",
-                6000
-            ),
+                Board(
+                    "赛博朋克",
+                    "cyberpunk",
+                    6000
+                ),
 
-            Board(
-                "RGB流光",
-                "rainbow_board",
-                100000
+                Board(
+                    "RGB流光",
+                    "rainbow_board",
+                    100000
+                )
             )
-        )
 
         val items =
             boards.map {
@@ -831,12 +1186,12 @@ class MainActivity : AppCompatActivity() {
             }.toTypedArray()
 
         AlertDialog.Builder(this)
-
             .setTitle(
                 "棋盘主题 (金币: $current)"
             )
-
-            .setItems(items) { _, which ->
+            .setItems(items) {
+                    _,
+                    which ->
 
                 val b =
                     boards[which]
@@ -858,7 +1213,9 @@ class MainActivity : AppCompatActivity() {
 
                     gameView?.updateCurrentBoard()
 
-                } else if (current >= b.price) {
+                } else if (
+                    current >= b.price
+                ) {
 
                     val nm =
                         current - b.price
@@ -892,12 +1249,10 @@ class MainActivity : AppCompatActivity() {
                     ).show()
                 }
             }
-
             .setNegativeButton(
                 "返回",
                 null
             )
-
             .show()
     }
 
