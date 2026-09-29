@@ -3,6 +3,7 @@ package com.example.snake
 import android.app.AlertDialog
 import android.content.Context
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.WindowManager
@@ -24,8 +25,35 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        prefs = getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
+        
+        // --- 核心修改：请求最高 120Hz 刷新率 ---
+        try {
+            val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay
+            }
+            
+            if (display != null) {
+                val modes = display.supportedModes
+                // 寻找支持的最高刷新率（例如 120Hz）
+                val maxMode = modes.maxByOrNull { it.refreshRate }
+                if (maxMode != null) {
+                    val params = window.attributes
+                    params.preferredDisplayModeId = maxMode.modeId
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        params.preferredRefreshRate = maxMode.refreshRate
+                    }
+                    window.attributes = params
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        // ------------------------------------
 
+        prefs = getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
         gameView = SnakeView(this)
 
         val topBar = LinearLayout(this).apply {
@@ -97,7 +125,6 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
     }
 
-    // --- 商店分类弹窗 ---
     private fun showShopCategoryDialog() {
         val options = arrayOf("🐍 蛇皮肤", "🏁 棋盘主题")
         AlertDialog.Builder(this)
@@ -112,7 +139,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // --- 蛇皮肤商店 ---
     private fun showSnakeShopDialog() {
         val currentMoney = prefs.getInt("money", 0)
         val equippedSkin = prefs.getString("equipped_skin", "green") ?: "green"
@@ -158,7 +184,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // --- 棋盘商店 ---
     private fun showBoardShopDialog() {
         val currentMoney = prefs.getInt("money", 0)
         val equippedBoard = prefs.getString("equipped_board", "dark") ?: "dark"
