@@ -116,7 +116,6 @@ class SnakeView @JvmOverloads constructor(
     private val foodPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private var flash = 0f
 
-    // ===== 性能优化：用数组替代 HashSet/ArrayDeque，避免 GC 导致卡顿 =====
     private val bfsVisited = BooleanArray(cols * rows)
     private val bfsQueue = IntArray(cols * rows)
 
@@ -496,7 +495,6 @@ class SnakeView @JvmOverloads constructor(
     }
     private fun inside(p:P)=p.x in 0 until cols&&p.y in 0 until rows
 
-    // ===== 优化：免费区域计算不再用 HashSet，改用数组 =====
     private fun freeRegion(body:ArrayDeque<P>):Int {
         if(body.isEmpty())return 0
         java.util.Arrays.fill(bfsVisited, false)
@@ -545,7 +543,6 @@ class SnakeView @JvmOverloads constructor(
         return distance(body.first(),target,body,allowTail=true)>=0
     }
 
-    // ===== 优化：距离计算不再用 HashSet，改用数组 =====
     private fun distance(start:P,target:P,body:Collection<P>,allowTail:Boolean):Int {
         if(start==target)return 0
         java.util.Arrays.fill(bfsVisited, false)
@@ -660,7 +657,6 @@ class SnakeView @JvmOverloads constructor(
     private fun drawSnake(c:Canvas){
         if(snake.isEmpty())return
         snakePaint.strokeWidth=max(8f,cell*.62f)
-        // 删除了原来无用的 Path 循环，直接使用 drawLine 绘制
         val list=snake.toList()
         for(i in 0 until list.size-1){
             val a=list[i];val b=list[i+1]
