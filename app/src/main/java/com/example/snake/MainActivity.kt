@@ -605,7 +605,22 @@ class MainActivity : AppCompatActivity() {
                     -1,
                     -2,
                     Gravity.TOP
-                )
+                ).apply {
+
+                    /*
+                     * 把按钮区整体下移到 HUD 面板下方。
+                     *
+                     * SnakeView 顶部 HUD 面板：
+                     *   top    = 12px
+                     *   height = 275px（游戏中）
+                     *            300px（GAME OVER）
+                     *
+                     * 12 + 300 = 312 是 HUD 的最坏底边，
+                     * 这里用 360 留出足够间距，
+                     * 游戏中和 GAME OVER 都不会压到 HUD。
+                     */
+                    topMargin = 360
+                }
             )
 
             setContentView(
