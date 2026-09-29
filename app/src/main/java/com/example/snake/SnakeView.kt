@@ -3,6 +3,7 @@ package com.example.snake
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
@@ -66,6 +67,9 @@ class SnakeView(context: Context) : View(context) {
     private var currentSkinHeadColor = Color.rgb(39, 174, 96)
     private var currentBoardBgColor = Color.BLACK
     private var currentBoardGridColor = Color.rgb(0, 255, 255) // 默认青色霓虹网格
+    
+    // 新增：RGB 皮肤标志位
+    private var isRainbowSkin = false
 
     private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -196,17 +200,32 @@ class SnakeView(context: Context) : View(context) {
 
     fun updateCurrentSkin() {
         val currentSkinId = prefs.getString("equipped_skin", "green") ?: "green"
+        
+        // 重置彩虹标志
+        isRainbowSkin = false
+        
         when (currentSkinId) {
             "blue" -> { currentSkinBodyColor = Color.rgb(52, 152, 219); currentSkinHeadColor = Color.rgb(41, 128, 185) }
             "red" -> { currentSkinBodyColor = Color.rgb(231, 76, 60); currentSkinHeadColor = Color.rgb(192, 57, 43) }
             "purple" -> { currentSkinBodyColor = Color.rgb(155, 89, 182); currentSkinHeadColor = Color.rgb(142, 68, 173) }
             "gold" -> { currentSkinBodyColor = Color.rgb(241, 196, 15); currentSkinHeadColor = Color.rgb(243, 156, 18) }
+            "rainbow" -> {
+                // 激活 RGB 流光神龙皮肤
+                isRainbowSkin = true
+                currentSkinBodyColor = Color.WHITE
+                currentSkinHeadColor = Color.WHITE
+                // 为 RGB 皮肤提供极致的发光效果（阴影层加强）
+                paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
+            }
             else -> { currentSkinBodyColor = Color.rgb(46, 204, 113); currentSkinHeadColor = Color.rgb(39, 174, 96) }
         }
-        paintSnakeBody.color = currentSkinBodyColor
-        paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
-        paintSnakeHead.color = currentSkinHeadColor
-        paintSnakeHead.setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
+        
+        if (!isRainbowSkin) {
+            paintSnakeBody.color = currentSkinBodyColor
+            paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
+            paintSnakeHead.color = currentSkinHeadColor
+            paintSnakeHead.setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
+        }
         invalidate()
     }
 
@@ -243,10 +262,16 @@ class SnakeView(context: Context) : View(context) {
         shockwaveAlpha = 0f
         particles.clear()
         floatingTexts.clear()
-        paintSnakeBody.color = currentSkinBodyColor
-        paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
-        paintSnakeHead.color = currentSkinHeadColor
-        paintSnakeHead.setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
+        
+        if (isRainbowSkin) {
+            paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
+        } else {
+            paintSnakeBody.color = currentSkinBodyColor
+            paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
+            paintSnakeHead.color = currentSkinHeadColor
+            paintSnakeHead.setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
+        }
+        
         placeFood()
         onScoreChanged?.invoke(score)
         invalidate()
@@ -670,7 +695,7 @@ class SnakeView(context: Context) : View(context) {
         paintFoodCore.alpha = 255
         canvas.drawCircle(foodCenterX, foodCenterY, foodRadius * 0.35f, paintFoodCore)
 
-        // === 3. 绘制蛇 ===
+        // === 3. 绘制蛇（核心 RGB 流光渲染） ===
         if (snake.isNotEmpty()) {
             val progress = if (gameOver) 0f else (timeAccumulator.toFloat() / gameSpeed).coerceIn(0f, 1f)
             val path = Path()
@@ -698,14 +723,59 @@ class SnakeView(context: Context) : View(context) {
             }
             if (points.size > 1) path.lineTo(points.last().x, points.last().y)
 
+            // --- 动态 RGB 流光逻辑 ---
+            if (isRainbowSkin) {
+                // 计算从蛇头到蛇尾的向量
+                val headX = points.first().x
+                val headY = points.first().y
+                val tailX = points.last().x
+                val tailY = points.last().y
+                
+                // 时间偏移，让光效流动
+                val timeOffset = (System.currentTimeMillis() % 2000) / 2000f
+                
+                // 鲜艳的 RGB 颜色数组
+                val rainbowColors = intArrayOf(
+                    Color.RED, Color.MAGENTA, Color.BLUE, Color.CYAN, Color.GREEN, Color.YELLOW, Color.RED
+                )
+                
+                // 计算动态渐变的位置，产生流动感
+                val dx = tailX - headX
+                val dy = tailY - headY
+                val length = max(1f, kotlin.math.sqrt(dx * dx + dy * dy))
+                val offsetX = dx / length * cellSize * timeOffset
+                val offsetY = dy / length * cellSize * timeOffset
+                
+                val shader = LinearGradient(
+                    headX - offsetX, headY - offsetY,
+                    tailX + offsetX, tailY + offsetY,
+                    rainbowColors, null, Shader.TileMode.MIRROR
+                )
+                paintSnakeBody.shader = shader
+                paintSnakeHead.color = Color.WHITE
+                
+                // 因为 shader 会覆盖颜色，所以需要设置 alpha 和阴影
+                paintSnakeBody.alpha = 255
+                paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE) // 极致发光
+            } else {
+                // 普通皮肤逻辑
+                paintSnakeBody.shader = null // 清除 shader
+                paintSnakeBody.color = currentSkinBodyColor
+                paintSnakeBody.alpha = 255
+                paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
+            }
+            
+            // 绘制外层光晕
             paintSnakeBody.strokeWidth = cellSize * 0.8f
-            paintSnakeBody.alpha = 120
+            paintSnakeBody.alpha = if (isRainbowSkin) 150 else 120
             canvas.drawPath(path, paintSnakeBody)
             
+            // 绘制内层实体
             paintSnakeBody.strokeWidth = cellSize * 0.65f
             paintSnakeBody.alpha = 255
             canvas.drawPath(path, paintSnakeBody)
 
+            // 绘制蛇头
             val headPoint = points.first()
             canvas.drawCircle(headPoint.x, headPoint.y, cellSize * 0.5f, paintSnakeHead)
             canvas.drawCircle(headPoint.x - cellSize * 0.1f, headPoint.y - cellSize * 0.1f, cellSize * 0.15f, paintSnakeHighlight)
