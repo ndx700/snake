@@ -4,15 +4,21 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.RectF
-import android.os.Handler
-import android.os.Looper
+import android.graphics.Path
+import android.graphics.PointF
+import android.graphics.CornerPathEffect
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sin
+import kotlin.math.cos
+import kotlin.math.PI
 import kotlin.random.Random
 
 class SnakeView(context: Context) : View(context) {
@@ -25,9 +31,7 @@ class SnakeView(context: Context) : View(context) {
     private var offsetY = 0f
 
     private data class Point(val x: Int, val y: Int)
-
     private val snake = ArrayDeque<Point>()
-
     private var dir = Point(0, 0)
     private var nextDir = Point(0, 0)
 
@@ -36,25 +40,70 @@ class SnakeView(context: Context) : View(context) {
     private var highScore = 0
     private var gameOver = false
     private var running = false
-
-    // 逻辑移动速度（毫秒），初始 160ms，最低 70ms（越快越难）
     private var gameSpeed = 160L
 
     var onScoreChanged: ((Int) -> Unit)? = null
-
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
-    private val paintSnake = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(46, 204, 113)
+    // --- 震动马达初始化 ---
+    private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+        vibratorManager?.defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
     }
 
-    private val paintHead = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(39, 174, 96)
+    // --- 死亡特效状态 ---
+    private var deathFlashAlpha = 0f
+    private var shakeTime = 0f
+    private var shakeOffsetX = 0f
+    private var shakeOffsetY = 0f
+
+    // --- 特效数据类 ---
+    private data class Particle(
+        var x: Float, var y: Float,
+        var vx: Float, var vy: Float,
+        var life: Float, val color: Int
+    )
+    private data class FloatingText(
+        var x: Float, var y: Float,
+        var life: Float, val text: String
+    )
+
+    private val particles = mutableListOf<Particle>()
+    private val floatingTexts = mutableListOf<FloatingText>()
+
+    // --- 画笔定义 ---
+    private val paintSnakeBody = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(46, 204, 113)
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        pathEffect = CornerPathEffect(20f)
+        setShadowLayer(10f, 0f, 0f, Color.rgb(46, 204, 113))
     }
+
+    private val paintSnakeHead = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(39, 174, 96)
+        style = Paint.Style.FILL
+    }
+
+    private val paintEyeWhite = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    private val paintEyeBlack = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
 
     private val paintFood = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(231, 76, 60)
+        style = Paint.Style.FILL
         setShadowLayer(15f, 0f, 0f, Color.rgb(231, 76, 60))
+    }
+
+    private val paintParticle = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val paintFloatingText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(241, 196, 15)
+        textSize = 40f
+        textAlign = Paint.Align.CENTER
+        setShadowLayer(8f, 0f, 0f, Color.BLACK)
     }
 
     private val paintGrid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -64,13 +113,11 @@ class SnakeView(context: Context) : View(context) {
 
     private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
-        textSize = 48f
         textAlign = Paint.Align.CENTER
     }
 
     private val paintSubText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.LTGRAY
-        textSize = 28f
         textAlign = Paint.Align.CENTER
     }
 
@@ -85,25 +132,23 @@ class SnakeView(context: Context) : View(context) {
             val currentTime = System.nanoTime()
             if (lastFrameTime == 0L) lastFrameTime = currentTime
 
-            val deltaTime = (currentTime - lastFrameTime) / 1_000_000 // 转毫秒
+            val deltaTime = (currentTime - lastFrameTime) / 1_000_000f
             lastFrameTime = currentTime
-            timeAccumulator += deltaTime
 
-            // 只有当累计时间达到游戏速度时，才更新一次逻辑（蛇移动）
+            timeAccumulator += deltaTime.toLong()
             if (timeAccumulator >= gameSpeed) {
                 update()
                 timeAccumulator -= gameSpeed
             }
 
-            // 每一帧都强制重绘画面（约 60/90/120 帧每秒）
+            updateEffects(deltaTime)
             invalidate()
-
-            // 注册下一帧
             Choreographer.getInstance().postFrameCallback(this)
         }
     }
 
     init {
+        setLayerType(LAYER_TYPE_SOFTWARE, null)
         highScore = prefs.getInt("high_score", 0)
         reset()
     }
@@ -111,15 +156,25 @@ class SnakeView(context: Context) : View(context) {
     fun reset() {
         snake.clear()
         snake.add(Point(10, 10))
-
         dir = Point(0, 0)
         nextDir = Point(0, 0)
-
         score = 0
         gameOver = false
         gameSpeed = 160L
         lastFrameTime = 0L
         timeAccumulator = 0L
+
+        deathFlashAlpha = 0f
+        shakeTime = 0f
+        shakeOffsetX = 0f
+        shakeOffsetY = 0f
+
+        particles.clear()
+        floatingTexts.clear()
+
+        paintSnakeBody.color = Color.rgb(46, 204, 113)
+        paintSnakeBody.setShadowLayer(10f, 0f, 0f, Color.rgb(46, 204, 113))
+        paintSnakeHead.color = Color.rgb(39, 174, 96)
 
         placeFood()
         onScoreChanged?.invoke(score)
@@ -150,17 +205,61 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
+    // --- 震动工具函数 ---
+    private fun vibrate(duration: Long, amplitude: Int = VibrationEffect.DEFAULT_AMPLITUDE) {
+        vibrator?.let {
+            if (!it.hasVibrator()) return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                it.vibrate(VibrationEffect.createOneShot(duration, amplitude))
+            } else {
+                @Suppress("DEPRECATION")
+                it.vibrate(duration)
+            }
+        }
+    }
+
+    private fun updateEffects(deltaTime: Float) {
+        if (gameOver) {
+            deathFlashAlpha = 120f + 60f * sin(System.currentTimeMillis() / 150.0).toFloat()
+        } else {
+            if (deathFlashAlpha > 0) deathFlashAlpha = max(0f, deathFlashAlpha - deltaTime * 0.5f)
+        }
+
+        if (shakeTime > 0) {
+            shakeTime -= deltaTime
+            shakeOffsetX = (Random.nextFloat() - 0.5f) * 30f * (shakeTime / 400f)
+            shakeOffsetY = (Random.nextFloat() - 0.5f) * 30f * (shakeTime / 400f)
+        } else {
+            shakeOffsetX = 0f
+            shakeOffsetY = 0f
+        }
+
+        val iterator = particles.iterator()
+        while (iterator.hasNext()) {
+            val p = iterator.next()
+            p.x += p.vx * (deltaTime / 16f)
+            p.y += p.vy * (deltaTime / 16f)
+            p.vy += 0.3f
+            p.life -= deltaTime * 0.002f
+            if (p.life <= 0) iterator.remove()
+        }
+
+        val textIterator = floatingTexts.iterator()
+        while (textIterator.hasNext()) {
+            val t = textIterator.next()
+            t.y -= 2f * (deltaTime / 16f)
+            t.life -= deltaTime * 0.001f
+            if (t.life <= 0) textIterator.remove()
+        }
+    }
+
     private fun update() {
         if (gameOver) return
 
         if (nextDir.x != 0 || nextDir.y != 0) {
-            if (dir.x == 0 && dir.y == 0) {
-                dir = nextDir
-            } else if (dir.x != 0 && nextDir.y != 0) {
-                dir = nextDir
-            } else if (dir.y != 0 && nextDir.x != 0) {
-                dir = nextDir
-            }
+            if (dir.x == 0 && dir.y == 0) dir = nextDir
+            else if (dir.x != 0 && nextDir.y != 0) dir = nextDir
+            else if (dir.y != 0 && nextDir.x != 0) dir = nextDir
         }
 
         if (dir.x == 0 && dir.y == 0) return
@@ -170,12 +269,14 @@ class SnakeView(context: Context) : View(context) {
 
         if (newHead.x < 0 || newHead.x >= cols || newHead.y < 0 || newHead.y >= rows) {
             gameOver = true
+            triggerDeathEffects()
             saveHighScore()
             return
         }
 
         if (snake.any { it == newHead }) {
             gameOver = true
+            triggerDeathEffects()
             saveHighScore()
             return
         }
@@ -185,11 +286,76 @@ class SnakeView(context: Context) : View(context) {
         if (newHead == food) {
             score += 10
             onScoreChanged?.invoke(score)
+            triggerEatEffects()
             placeFood()
-            // 动态加速
             gameSpeed = max(70L, gameSpeed - 4L)
         } else {
             snake.removeLast()
+        }
+    }
+
+    private fun triggerEatEffects() {
+        // 吃到食物：短促的轻震动
+        vibrate(35, 100)
+
+        val foodCenterX = offsetX + food.x * cellSize + cellSize / 2
+        val foodCenterY = offsetY + food.y * cellSize + cellSize / 2
+
+        val colors = intArrayOf(
+            Color.rgb(231, 76, 60), Color.rgb(241, 196, 15),
+            Color.rgb(46, 204, 113), Color.rgb(52, 152, 219)
+        )
+        for (i in 0 until 15) {
+            val angle = Random.nextFloat() * 2 * PI
+            val speed = Random.nextFloat() * 6f + 2f
+            particles.add(
+                Particle(
+                    x = foodCenterX, y = foodCenterY,
+                    vx = cos(angle).toFloat() * speed,
+                    vy = sin(angle).toFloat() * speed,
+                    life = 1.0f, color = colors[Random.nextInt(colors.size)]
+                )
+            )
+        }
+        floatingTexts.add(FloatingText(foodCenterX, foodCenterY, 1.0f, "+10"))
+    }
+
+    private fun triggerDeathEffects() {
+        // 死亡：沉重的长震动（心跳停止的感觉）
+        vibrator?.let {
+            if (it.hasVibrator()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val timings = longArrayOf(0, 100, 50, 200, 50, 300, 100, 400)
+                    val amplitudes = intArrayOf(0, 255, 0, 200, 0, 150, 0, 80)
+                    it.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                } else {
+                    @Suppress("DEPRECATION")
+                    it.vibrate(longArrayOf(0, 100, 50, 200, 50, 300, 100, 400), -1)
+                }
+            }
+        }
+
+        shakeTime = 400f
+        deathFlashAlpha = 255f
+
+        paintSnakeBody.color = Color.rgb(200, 50, 50)
+        paintSnakeBody.setShadowLayer(10f, 0f, 0f, Color.rgb(200, 50, 50))
+        paintSnakeHead.color = Color.rgb(150, 0, 0)
+
+        val headX = offsetX + snake.first().x * cellSize + cellSize / 2
+        val headY = offsetY + snake.first().y * cellSize + cellSize / 2
+
+        for (i in 0 until 40) {
+            val angle = Random.nextFloat() * 2 * PI
+            val speed = Random.nextFloat() * 8f + 3f
+            particles.add(
+                Particle(
+                    x = headX, y = headY,
+                    vx = cos(angle).toFloat() * speed,
+                    vy = sin(angle).toFloat() * speed,
+                    life = 1.5f, color = Color.rgb(255, 50, 50)
+                )
+            )
         }
     }
 
@@ -209,6 +375,11 @@ class SnakeView(context: Context) : View(context) {
         offsetX = (width - cellSize * cols) / 2f
         offsetY = (height - cellSize * rows) / 2f
 
+        canvas.save()
+        if (gameOver && shakeTime > 0) {
+            canvas.translate(shakeOffsetX, shakeOffsetY)
+        }
+
         for (i in 0..cols) {
             val x = offsetX + i * cellSize
             canvas.drawLine(x, offsetY, x, offsetY + rows * cellSize, paintGrid)
@@ -218,7 +389,6 @@ class SnakeView(context: Context) : View(context) {
             canvas.drawLine(offsetX, y, offsetX + cols * cellSize, y, paintGrid)
         }
 
-        // 食物发光呼吸动画（由高帧率驱动，现在会非常丝滑）
         val pulse = 1f + 0.15f * sin(System.currentTimeMillis() / 150.0).toFloat()
         canvas.drawCircle(
             offsetX + food.x * cellSize + cellSize / 2,
@@ -227,32 +397,86 @@ class SnakeView(context: Context) : View(context) {
             paintFood
         )
 
-        val rectF = RectF()
-        snake.forEachIndexed { index, p ->
-            val left = offsetX + p.x * cellSize + 2
-            val top = offsetY + p.y * cellSize + 2
-            val right = left + cellSize - 4
-            val bottom = top + cellSize - 4
+        if (snake.isNotEmpty()) {
+            val path = Path()
+            val points = snake.mapIndexed { index, p ->
+                val baseX = offsetX + p.x * cellSize + cellSize / 2
+                val baseY = offsetY + p.y * cellSize + cellSize / 2
 
-            rectF.set(left, top, right, bottom)
-            canvas.drawRoundRect(rectF, 8f, 8f, if (index == 0) paintHead else paintSnake)
+                val t = System.currentTimeMillis() / 200.0
+                val swingAmplitude = if (dir.x != 0) cellSize * 0.15f else cellSize * 0.08f
+                val swingX = sin(t + index * 0.5).toFloat() * swingAmplitude
+                val swingY = cos(t + index * 0.5).toFloat() * swingAmplitude
+
+                PointF(baseX + swingX, baseY + swingY)
+            }
+
+            path.moveTo(points[0].x, points[0].y)
+            for (i in 1 until points.size) {
+                val prev = points[i - 1]
+                val curr = points[i]
+                val midX = (prev.x + curr.x) / 2f
+                val midY = (prev.y + curr.y) / 2f
+                path.quadTo(prev.x, prev.y, midX, midY)
+            }
+            if (points.size > 1) {
+                path.lineTo(points.last().x, points.last().y)
+            }
+
+            paintSnakeBody.strokeWidth = cellSize * 0.75f
+            canvas.drawPath(path, paintSnakeBody)
+
+            val headPoint = points.first()
+            canvas.drawCircle(headPoint.x, headPoint.y, cellSize * 0.5f, paintSnakeHead)
+
+            val currentDir = if (dir.x == 0 && dir.y == 0) Point(1, 0) else dir
+            val eyeOffset = cellSize * 0.2f
+            val perpOffsetX = -currentDir.y * (cellSize * 0.2f)
+            val perpOffsetY = currentDir.x * (cellSize * 0.2f)
+
+            canvas.drawCircle(headPoint.x + currentDir.x * eyeOffset + perpOffsetX, headPoint.y + currentDir.y * eyeOffset + perpOffsetY, cellSize * 0.1f, paintEyeWhite)
+            canvas.drawCircle(headPoint.x + currentDir.x * eyeOffset - perpOffsetX, headPoint.y + currentDir.y * eyeOffset - perpOffsetY, cellSize * 0.1f, paintEyeWhite)
+            canvas.drawCircle(headPoint.x + currentDir.x * eyeOffset * 1.2f + perpOffsetX, headPoint.y + currentDir.y * eyeOffset * 1.2f + perpOffsetY, cellSize * 0.05f, paintEyeBlack)
+            canvas.drawCircle(headPoint.x + currentDir.x * eyeOffset * 1.2f - perpOffsetX, headPoint.y + currentDir.y * eyeOffset * 1.2f - perpOffsetY, cellSize * 0.05f, paintEyeBlack)
+        }
+
+        particles.forEach { p ->
+            paintParticle.color = p.color
+            paintParticle.alpha = (p.life * 255).toInt().coerceIn(0, 255)
+            canvas.drawCircle(p.x, p.y, cellSize * 0.15f * p.life, paintParticle)
+        }
+
+        floatingTexts.forEach { t ->
+            paintFloatingText.alpha = (t.life * 255).toInt().coerceIn(0, 255)
+            canvas.drawText(t.text, t.x, t.y, paintFloatingText)
+        }
+
+        canvas.restore()
+
+        if (gameOver) {
+            canvas.drawColor(Color.argb(deathFlashAlpha.toInt().coerceIn(0, 255), 180, 0, 0))
         }
 
         if (gameOver) {
-            canvas.drawColor(0xBB000000.toInt())
-            paintText.textSize = 52f
-            paintText.color = Color.rgb(231, 76, 60)
-            canvas.drawText("游戏结束", width / 2f, height / 2f - 60, paintText)
+            paintText.textSize = 80f
+            paintText.color = Color.RED
+            paintText.setShadowLayer(20f, 0f, 0f, Color.BLACK)
+            canvas.drawText("GAME OVER", width / 2f, height / 2f - 60, paintText)
 
-            paintText.textSize = 32f
+            paintText.textSize = 40f
             paintText.color = Color.WHITE
-            canvas.drawText("本局得分: $score", width / 2f, height / 2f + 10, paintText)
+            canvas.drawText("最终得分: $score", width / 2f, height / 2f + 10, paintText)
 
+            paintSubText.textSize = 30f
             paintSubText.color = Color.rgb(241, 196, 15)
             canvas.drawText("最高分: $highScore", width / 2f, height / 2f + 60, paintSubText)
 
-            paintSubText.color = Color.LTGRAY
-            canvas.drawText("点击屏幕重新开始", width / 2f, height / 2f + 130, paintSubText)
+            val blink = (System.currentTimeMillis() / 500) % 2 == 0L
+            if (blink) {
+                paintSubText.textSize = 32f
+                paintSubText.color = Color.WHITE
+                canvas.drawText("点击屏幕重新开始", width / 2f, height / 2f + 150, paintSubText)
+            }
         } else if (dir.x == 0 && dir.y == 0) {
             paintSubText.textSize = 32f
             paintSubText.color = Color.WHITE
