@@ -23,7 +23,6 @@ import kotlin.random.Random
 
 class SnakeView(context: Context) : View(context) {
 
-    // 1. 棋盘放大：从 20x20 改为 15x15
     private val cols = 15
     private val rows = 15
 
@@ -33,6 +32,10 @@ class SnakeView(context: Context) : View(context) {
 
     private data class Point(val x: Int, val y: Int)
     private val snake = ArrayDeque<Point>()
+    
+    // 方向缓冲队列
+    private val directionQueue = ArrayDeque<Point>()
+
     private var dir = Point(0, 0)
     private var nextDir = Point(0, 0)
 
@@ -41,7 +44,9 @@ class SnakeView(context: Context) : View(context) {
     private var highScore = 0
     private var gameOver = false
     private var running = false
-    private var gameSpeed = 160L
+    
+    // --- 核心提速：初始速度 100ms，最低速度 50ms ---
+    private var gameSpeed = 100L
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
@@ -192,9 +197,10 @@ class SnakeView(context: Context) : View(context) {
         snake.add(Point(10, 10))
         dir = Point(0, 0)
         nextDir = Point(0, 0)
+        directionQueue.clear()
         score = 0
         gameOver = false
-        gameSpeed = 160L
+        gameSpeed = 100L // 重置速度 100ms
         lastFrameTime = 0L
         timeAccumulator = 0L
 
@@ -289,10 +295,13 @@ class SnakeView(context: Context) : View(context) {
     private fun update() {
         if (gameOver) return
 
-        if (nextDir.x != 0 || nextDir.y != 0) {
-            if (dir.x == 0 && dir.y == 0) dir = nextDir
-            else if (dir.x != 0 && nextDir.y != 0) dir = nextDir
-            else if (dir.y != 0 && nextDir.x != 0) dir = nextDir
+        if (directionQueue.isNotEmpty()) {
+            val next = directionQueue.removeFirst()
+            if (dir.x == 0 && dir.y == 0) {
+                dir = next
+            } else if (dir.x != -next.x || dir.y != -next.y) {
+                dir = next
+            }
         }
 
         if (dir.x == 0 && dir.y == 0) return
@@ -321,7 +330,8 @@ class SnakeView(context: Context) : View(context) {
             onScoreChanged?.invoke(score)
             triggerEatEffects()
             placeFood()
-            gameSpeed = max(70L, gameSpeed - 4L)
+            // 每次吃食物提速，最低降到 50ms
+            gameSpeed = max(50L, gameSpeed - 4L)
         } else {
             snake.removeLast()
         }
@@ -431,9 +441,7 @@ class SnakeView(context: Context) : View(context) {
             paintFood
         )
 
-        // 2. 丝滑插值核心逻辑
         if (snake.isNotEmpty()) {
-            // 计算当前时间进度 (0.0 到 1.0)
             val progress = if (gameOver) 0f else (timeAccumulator.toFloat() / gameSpeed).coerceIn(0f, 1f)
             
             val path = Path()
@@ -441,7 +449,6 @@ class SnakeView(context: Context) : View(context) {
                 var baseX = offsetX + p.x * cellSize + cellSize / 2
                 var baseY = offsetY + p.y * cellSize + cellSize / 2
 
-                // 对蛇头进行平滑插值：让它从上一帧位置平滑滑动到当前位置
                 if (index == 0 && !gameOver) {
                     val prevP = if (snake.size > 1) snake[1] else Point(snake[0].x - dir.x, snake[0].y - dir.y)
                     val prevX = offsetX + prevP.x * cellSize + cellSize / 2
@@ -450,7 +457,6 @@ class SnakeView(context: Context) : View(context) {
                     baseY = prevY + (baseY - prevY) * progress
                 }
 
-                // 摆动幅度稍微调小一点点，配合大格子更自然
                 val t = System.currentTimeMillis() / 200.0
                 val swingAmplitude = if (dir.x != 0) cellSize * 0.08f else cellSize * 0.04f
                 val swingX = sin(t + index * 0.5).toFloat() * swingAmplitude
@@ -552,11 +558,26 @@ class SnakeView(context: Context) : View(context) {
                 }
                 val dx = event.x - touchStartX
                 val dy = event.y - touchStartY
-                if (abs(dx) < 20 && abs(dy) < 20) return true
+
+                // 触发滑动距离 15 像素，已经非常灵敏了
+                if (abs(dx) < 15 && abs(dy) < 15) return true
+
+                val lastDir = if (directionQueue.isNotEmpty()) directionQueue.last() else dir
+                
                 if (abs(dx) > abs(dy)) {
-                    nextDir = if (dx > 0) Point(1, 0) else Point(-1, 0)
+                    val newDir = if (dx > 0) Point(1, 0) else Point(-1, 0)
+                    if (newDir.x != -lastDir.x || newDir.y != -lastDir.y) {
+                        if (directionQueue.size < 2 && (lastDir.x != newDir.x || lastDir.y != newDir.y)) {
+                            directionQueue.add(newDir)
+                        }
+                    }
                 } else {
-                    nextDir = if (dy > 0) Point(0, 1) else Point(0, -1)
+                    val newDir = if (dy > 0) Point(0, 1) else Point(0, -1)
+                    if (newDir.x != -lastDir.x || newDir.y != -lastDir.y) {
+                        if (directionQueue.size < 2 && (lastDir.x != newDir.x || lastDir.y != newDir.y)) {
+                            directionQueue.add(newDir)
+                        }
+                    }
                 }
                 return true
             }
