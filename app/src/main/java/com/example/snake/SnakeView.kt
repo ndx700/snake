@@ -54,6 +54,7 @@ class SnakeView(context: Context) : View(context) {
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
     var onAIModeChanged: ((Int) -> Unit)? = null
+    var onStrategyChanged: ((Int) -> Unit)? = null
 
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
@@ -65,7 +66,12 @@ class SnakeView(context: Context) : View(context) {
     private var consecutiveDeaths = 0
     private var foodUnreachableStreak = 0
 
-    // 0=NORMAL(BFS+Beam) 1=TAIL_CHASE 2=WEIGHTED_HAM 3=PURE_HAM 4=MCTS
+    // 强制策略：-1 = 自动；0 = BFS+Beam；1 = 追尾；2 = 加权HAM；3 = 纯HAM；4 = MCTS
+    private var forcedStrategy = -1
+    // MCTS 是否允许（当 forcedStrategy = -1 时，自动切换才会用 MCTS）
+    private var mctsEnabled = false
+
+    // 当前实际使用的策略
     private var strategyMode = 0
 
     private val pathIndex = Array(cols) { IntArray(rows) }
@@ -114,7 +120,6 @@ class SnakeView(context: Context) : View(context) {
     private val particles = mutableListOf<Particle>()
     private val floatingTexts = mutableListOf<FloatingText>()
 
-    // ===== 画笔（全部提到类成员，避免每帧 new）=====
     private val paintSnakeBody = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = currentSkinBodyColor
         style = Paint.Style.STROKE
@@ -161,7 +166,6 @@ class SnakeView(context: Context) : View(context) {
         color = Color.argb(60, 255, 255, 255)
     }
 
-    // ===== 实时策略面板专用画笔 =====
     private val paintPanelBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(180, 0, 0, 0); style = Paint.Style.FILL
     }
@@ -233,6 +237,15 @@ class SnakeView(context: Context) : View(context) {
 
     fun getAIMode(): Int = aiMode
     fun setAIMode(mode: Int) { aiMode = mode; onAIModeChanged?.invoke(aiMode); reset() }
+
+    fun setMctsEnabled(enabled: Boolean) { mctsEnabled = enabled }
+    fun isMctsEnabled(): Boolean = mctsEnabled
+
+    fun getForcedStrategy(): Int = forcedStrategy
+    fun setForcedStrategy(s: Int) {
+        forcedStrategy = s
+        onStrategyChanged?.invoke(forcedStrategy)
+    }
 
     fun updateCurrentSkin() {
         val id = prefs.getString("equipped_skin", "green") ?: "green"
@@ -396,9 +409,7 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ==========================================================================
-    // ============ 多模式智能体：BFS + Beam + MCTS + HAM + 追尾 ============
-    // ==========================================================================
+    // ========================= AI 决策 =========================
 
     private fun autoPilotBFS() {
         if (gameOver) return
@@ -417,21 +428,20 @@ class SnakeView(context: Context) : View(context) {
         val testFoodPath = bfsPathWithSnake(head, food, snake, dir)
         if (testFoodPath != null) foodUnreachableStreak = 0 else foodUnreachableStreak++
 
-        // ========== 自动模式切换 ==========
         val snakeLen = snake.size
         val freeSpace = cols * rows - snakeLen
 
-        strategyMode = when {
-            // 分数极高 或 空间极度紧张 -> 纯汉密尔顿保命
-            score >= 150000 || freeSpace < snakeLen / 3 -> 3
-            // 分数高 或 长蛇 + 空间紧 -> 加权汉密尔顿
-            score >= 80000 || (snakeLen > 100 && freeSpace < snakeLen) -> 2
-            // 长蛇 + 食物长期不可达 -> 追尾模式
-            snakeLen > 70 && foodUnreachableStreak > 10 -> 1
-            // 短蛇 + 速度较慢 + 分数不高 -> MCTS 深推
-            snakeLen in 15..40 && gameSpeed > 120 && score < 30000 -> 4
-            // 默认 -> BFS + Beam
-            else -> 0
+        // 强制策略优先；没有强制则自动切换
+        strategyMode = if (forcedStrategy >= 0) {
+            forcedStrategy
+        } else {
+            when {
+                score >= 150000 || freeSpace < snakeLen / 3 -> 3
+                score >= 80000 || (snakeLen > 100 && freeSpace < snakeLen) -> 2
+                snakeLen > 70 && foodUnreachableStreak > 10 -> 1
+                mctsEnabled && snakeLen in 15..40 && gameSpeed > 120 && score < 30000 -> 4
+                else -> 0
+            }
         }
 
         val chosenDir: Point? = when (strategyMode) {
@@ -448,7 +458,6 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ===== 策略 0：BFS + Beam Search =====
     private fun bfsBeamStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
             val p = bfsPathWithSnake(head, food, snake, dir)
@@ -517,7 +526,6 @@ class SnakeView(context: Context) : View(context) {
         return bestDir
     }
 
-    // ===== 策略 1：追尾模式 =====
     private fun tailChaseStrategy(head: Point, validDirs: List<Point>): Point? {
         var best: Point? = null
         var bestSpace = -1
@@ -537,7 +545,6 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ===== 策略 2：加权汉密尔顿 =====
     private fun weightedHamiltonianStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
@@ -562,7 +569,6 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ===== 策略 3：纯汉密尔顿 =====
     private fun pureHamiltonianStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
@@ -577,7 +583,6 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ===== 策略 4：轻量 MCTS =====
     private fun mctsStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
             val p = bfsPathWithSnake(head, food, snake, dir)
@@ -1042,7 +1047,6 @@ class SnakeView(context: Context) : View(context) {
         }
         canvas.restore()
 
-        // ===== 游戏结束界面 =====
         if (gameOver) {
             canvas.drawColor(Color.argb(deathFlashAlpha.toInt().coerceIn(0, 255), 180, 0, 0))
             paintText.textSize = 80f; paintText.color = Color.RED
@@ -1064,7 +1068,6 @@ class SnakeView(context: Context) : View(context) {
             paintSubText.color = if (isRainbowBoard) Color.LTGRAY else if (currentBoardBgColor == Color.BLACK) Color.LTGRAY else Color.GRAY
             canvas.drawText("(滑动控制方向)", width / 2f, height / 2f + 50, paintSubText)
         } else if (aiMode == 1) {
-            // ===== 实时策略面板 =====
             val modeName: String
             val modeDesc: String
             val modeColor: Int
@@ -1119,7 +1122,8 @@ class SnakeView(context: Context) : View(context) {
 
             val snakeLen = snake.size
             val freeSpace = cols * rows - snakeLen
-            val infoText = "LEN:$snakeLen  SPACE:$freeSpace  HUNGER:$hungerCounter  STRK:$foodUnreachableStreak"
+            val forceTag = if (forcedStrategy >= 0) " [强制]" else ""
+            val infoText = "LEN:$snakeLen  SPACE:$freeSpace  HUNGER:$hungerCounter  STRK:$foodUnreachableStreak$forceTag"
             canvas.drawText(infoText, panelX - panelW / 2 + 15f, panelY + 42f, paintModeInfo)
         }
     }
