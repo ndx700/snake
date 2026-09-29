@@ -22,13 +22,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var aiBtn: Button
     private lateinit var autoBtn: Button
     private lateinit var bfsBtn: Button
+    private lateinit var tailBtn: Button
     private lateinit var hamBtn: Button
     private lateinit var mctsBtn: Button
-    private lateinit var tailBtn: Button
     private lateinit var prefs: android.content.SharedPreferences
 
-    // -1 = 自动；0=BFS；1=追尾；2=加权HAM；3=纯HAM；4=MCTS
-    private var forcedStrategy = -1
+    private var forcedStrategy = -1  // -1=自动 0=BFS 1=追尾 2=加权HAM 4=MCTS
     private var aiOn = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -57,11 +56,10 @@ class MainActivity : AppCompatActivity() {
         aiOn = prefs.getBoolean("ai_on", true)
 
         gameView = SnakeView(this)
-        gameView.setMctsEnabled(true)
         if (aiOn) gameView.setAIMode(1)
         gameView.setForcedStrategy(forcedStrategy)
 
-        // ===== 第一行：分数、金币、AI总开关、商店 =====
+        // ===== 第一行：分数、金币、AI开关、商店 =====
         val row1 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(16, 16, 16, 4)
@@ -120,21 +118,11 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        autoBtn = makeStrategyBtn("🎯自动") {
-            setForcedStrategy(-1)
-        }
-        bfsBtn = makeStrategyBtn("🚀BFS") {
-            setForcedStrategy(0)
-        }
-        tailBtn = makeStrategyBtn("🔄追尾") {
-            setForcedStrategy(1)
-        }
-        hamBtn = makeStrategyBtn("🛤HAM") {
-            setForcedStrategy(2)
-        }
-        mctsBtn = makeStrategyBtn("🧠MCTS") {
-            setForcedStrategy(4)
-        }
+        autoBtn = makeStrategyBtn("🎯自动") { setForcedStrategy(-1) }
+        bfsBtn = makeStrategyBtn("🚀BFS") { setForcedStrategy(0) }
+        tailBtn = makeStrategyBtn("🔄追尾") { setForcedStrategy(1) }
+        hamBtn = makeStrategyBtn("🛤HAM") { setForcedStrategy(2) }
+        mctsBtn = makeStrategyBtn("🧠MCTS") { setForcedStrategy(4) }
 
         row2.addView(autoBtn)
         row2.addView(bfsBtn)
@@ -142,7 +130,6 @@ class MainActivity : AppCompatActivity() {
         row2.addView(hamBtn)
         row2.addView(mctsBtn)
 
-        // ===== 顶部容器 =====
         val topContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
@@ -177,6 +164,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setForcedStrategy(s: Int) {
+        // 如果点的是当前已选中的按钮，取消强制回到自动
         forcedStrategy = if (forcedStrategy == s) -1 else s
         gameView.setForcedStrategy(forcedStrategy)
         prefs.edit().putInt("forced_strategy", forcedStrategy).apply()
@@ -186,7 +174,6 @@ class MainActivity : AppCompatActivity() {
             0 -> "强制 BFS + Beam Search"
             1 -> "强制 追尾保命"
             2 -> "强制 加权汉密尔顿"
-            3 -> "强制 纯汉密尔顿"
             4 -> "强制 MCTS 深推"
             else -> "未知"
         }
