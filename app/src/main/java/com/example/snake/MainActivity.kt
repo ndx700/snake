@@ -73,11 +73,9 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setPadding(10, 0, 10, 0)
             setOnClickListener {
-                val newMode = if (gameView.getAIMode() == SnakeView.AI_MODE_BFS) {
-                    SnakeView.AI_MODE_NONE
-                } else {
-                    SnakeView.AI_MODE_BFS
-                }
+                // 0 = NONE, 1 = BFS, 2 = HAM
+                val current = gameView.getAIMode()
+                val newMode = if (current == 1) 0 else 1
                 gameView.setAIMode(newMode)
             }
         }
@@ -89,11 +87,8 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setPadding(10, 0, 10, 0)
             setOnClickListener {
-                val newMode = if (gameView.getAIMode() == SnakeView.AI_MODE_HAMILTONIAN) {
-                    SnakeView.AI_MODE_NONE
-                } else {
-                    SnakeView.AI_MODE_HAMILTONIAN
-                }
+                val current = gameView.getAIMode()
+                val newMode = if (current == 2) 0 else 2
                 gameView.setAIMode(newMode)
             }
         }
@@ -128,13 +123,13 @@ class MainActivity : AppCompatActivity() {
         gameView.onAIModeChanged = { mode ->
             runOnUiThread {
                 when (mode) {
-                    SnakeView.AI_MODE_BFS -> {
+                    1 -> {
                         bfsBtn.setBackgroundColor(Color.RED)
                         bfsBtn.text = "🛑 BFS"
                         hamBtn.setBackgroundColor(Color.rgb(52, 152, 219))
                         hamBtn.text = "🛡 HAM"
                     }
-                    SnakeView.AI_MODE_HAMILTONIAN -> {
+                    2 -> {
                         bfsBtn.setBackgroundColor(Color.rgb(155, 89, 182))
                         bfsBtn.text = "🤖 BFS"
                         hamBtn.setBackgroundColor(Color.RED)
