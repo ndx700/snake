@@ -37,18 +37,13 @@ class SnakeView @JvmOverloads constructor(
     private var offsetY = 0f
 
     private data class Point(val x: Int, val y: Int)
-    private data class BeamNode(
-        val firstDir: Point,
-        val simSnake: ArrayDeque<Point>,
-        val foodCount: Int
-    )
+    private data class BeamNode(val firstDir: Point, val simSnake: ArrayDeque<Point>, val foodCount: Int)
     private data class Decision(val strategy: Int, val reason: String)
 
     private val snake = ArrayDeque<Point>()
     private val directionQueue = ArrayDeque<Point>()
     private var dir = Point(0, 0)
     private var food = Point(5, 5)
-
     private var score = 0
     private var highScore = 0
     private var gameOver = false
@@ -331,10 +326,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // ============================================================
-    // ================= 决策与安全检查核心 =================
-    // ============================================================
-
     private fun analyzeAndDecide(head: Point): Decision {
         val snakeLen = snake.size
         val space = floodFill(head, snake)
@@ -342,9 +333,9 @@ class SnakeView @JvmOverloads constructor(
 
         val dangerLevel = when {
             spaceRatio < 1.0 -> 5
-            spaceRatio < 1.5 -> 4
-            spaceRatio < 2.5 -> 3
-            spaceRatio < 4.0 -> 2
+            spaceRatio < 1.4 -> 4
+            spaceRatio < 2.0 -> 3
+            spaceRatio < 3.0 -> 2
             else -> 1
         }
         val hungerLevel = when {
@@ -358,78 +349,54 @@ class SnakeView @JvmOverloads constructor(
         val foodDist = foodPath?.size ?: 999
         val foodReachable = foodPath != null
         val foodLevel = when {
-            !foodReachable && foodUnreachableStreak > 8 -> 5
-            !foodReachable && foodUnreachableStreak > 3 -> 4
+            !foodReachable && foodUnreachableStreak > 10 -> 5
+            !foodReachable && foodUnreachableStreak > 5 -> 4
             !foodReachable -> 3
             foodDist < 8 -> 1
             foodDist < 15 -> 2
             else -> 3
         }
         val stage = when {
-            snakeLen < 30 -> 0
-            snakeLen < 60 -> 1
-            snakeLen < 100 -> 2
+            snakeLen < 25 -> 0
+            snakeLen < 50 -> 1
+            snakeLen < 85 -> 2
             else -> 3
         }
 
         if (dangerLevel >= 5) return Decision(3, "空间${spaceRatio.toInt()}x极危→纯HAM")
         if (hungerLevel >= 5 && foodReachable) return Decision(0, "饿了${hungerCounter}步→BFS冲食")
         if (dangerLevel >= 4) return Decision(1, "空间${spaceRatio.toInt()}x紧张→追尾")
-        if (foodLevel >= 4 && dangerLevel >= 3) return Decision(1, "食物${foodUnreachableStreak}步不可达→追尾")
+        if (foodLevel >= 5 && dangerLevel >= 3) return Decision(1, "食物${foodUnreachableStreak}步不可达→追尾")
         if (stage >= 3) return Decision(3, "蛇长${snakeLen}→纯HAM")
-        if (stage >= 2 || score >= 60000) return Decision(2, "后期${snakeLen}节→加权HAM")
-        if (stage <= 0 && dangerLevel <= 2 && hungerLevel <= 2) return Decision(4, "前期空闲→深度Beam")
+        if (stage >= 2) return Decision(2, "中期${snakeLen}节→加权HAM")
+        if (stage >= 1 && dangerLevel <= 2) return Decision(2, "30+节空闲→加权HAM")
+        if (stage == 0 && dangerLevel <= 2 && hungerLevel <= 2) return Decision(4, "前期空闲→深度Beam")
         if (dangerLevel <= 2) return Decision(0, "空间充裕→BFS吃食")
         return Decision(0, "默认BFS")
     }
 
-    /**
-     * 能否安全进入 HAM 模式的 3 项硬检查：
-     * 条件 1：蛇头必须在汉密尔顿路径上
-     * 条件 2：路径下一步必须是合法方向（不撞墙、不反向、不在身体上）
-     * 条件 3：模拟走完路径下一步，不撞身体
-     *
-     * 任一条件不满足 → 降级到 BFS
-     */
     private fun canSafelyEnterHam(head: Point, validDirs: List<Point>): Pair<Boolean, String> {
-        // 条件 1：蛇头必须在路径上（不能光看 pathIndex，因为默认值是 0）
         val pathPos = pathIndex[head.x][head.y]
         val pathPoint = pathSequence[pathPos]
-        if (pathPoint.x != head.x || pathPoint.y != head.y) {
-            return Pair(false, "蛇头不在路径")
-        }
+        if (pathPoint.x != head.x || pathPoint.y != head.y) return Pair(false, "蛇头不在路径")
 
-        // 条件 2：路径下一步必须是合法方向
         val nextPos = (pathPos + 1) % pathSequence.size
         val nextPoint = pathSequence[nextPos]
         val pathDir = Point(nextPoint.x - head.x, nextPoint.y - head.y)
-        if (abs(pathDir.x) + abs(pathDir.y) != 1) {
-            return Pair(false, "路径不连续")
-        }
-        if (!validDirs.contains(pathDir)) {
-            return Pair(false, "路径被堵")
-        }
+        if (abs(pathDir.x) + abs(pathDir.y) != 1) return Pair(false, "路径不连续")
+        if (!validDirs.contains(pathDir)) return Pair(false, "路径被堵")
 
-        // 条件 3：模拟走完路径下一步，不撞自己
         val nh = Point(head.x + pathDir.x, head.y + pathDir.y)
-        val sim = ArrayDeque(snake)
-        sim.addFirst(nh)
-        sim.removeLast()
-        var hit = false
-        var skipFirst = true
-        for (p in sim) {
-            if (skipFirst) { skipFirst = false; continue }
-            if (p.x == nh.x && p.y == nh.y) { hit = true; break }
-        }
+        val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
+        var hit = false; var skip = true
+        for (p in sim) { if (skip) { skip = false; continue }; if (p.x == nh.x && p.y == nh.y) { hit = true; break } }
         if (hit) return Pair(false, "会撞身体")
-
         return Pair(true, "安全")
     }
 
     private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
-
         val validDirs = dirsList.filter { d ->
             val isRev = (d.x == -dir.x && d.y == -dir.y)
             val nh = Point(head.x + d.x, head.y + d.y)
@@ -446,14 +413,9 @@ class SnakeView @JvmOverloads constructor(
         var wanted = if (forcedStrategy >= 0) forcedStrategy else decision.strategy
         var reason = if (forcedStrategy >= 0) "手动强制" else decision.reason
 
-        // ★ HAM 类策略（2=加权，3=纯）必须通过安全检查才能执行
         if (wanted == 2 || wanted == 3) {
             val (ok, why) = canSafelyEnterHam(head, validDirs)
-            if (!ok) {
-                // 降级到 BFS，并在面板显示原因
-                reason = "$reason ⚠降级:$why"
-                wanted = 0
-            }
+            if (!ok) { reason = "$reason ⚠$why"; wanted = 0 }
         }
 
         strategyMode = wanted
@@ -469,9 +431,8 @@ class SnakeView @JvmOverloads constructor(
         if (chosen != null) { directionQueue.clear(); directionQueue.add(chosen) }
     }
 
-    // ============ BFS + Beam ============
     private fun fastBfsStrategy(head: Point, validDirs: List<Point>): Point? {
-        if (hungerCounter > 15) {
+        if (hungerCounter > 12) {
             val p = bfsPath(head, food, snake, dir)
             if (p != null && p.size > 1) {
                 val nm = Point(p[1].x - p[0].x, p[1].y - p[0].y)
@@ -483,7 +444,7 @@ class SnakeView @JvmOverloads constructor(
             val fd = Point(fdx, fdy)
             if (validDirs.contains(fd)) return fd
         }
-        if (hungerCounter > 8) {
+        if (hungerCounter > 6) {
             val p = bfsPath(head, food, snake, dir)
             if (p != null && p.size > 1) {
                 val nm = Point(p[1].x - p[0].x, p[1].y - p[0].y)
@@ -491,37 +452,25 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
-        val candidates = ArrayList<Pair<Point, Int>>(validDirs.size)
-        for (d in validDirs) {
-            val nh = Point(head.x + d.x, head.y + d.y)
-            val ate = nh.x == food.x && nh.y == food.y
-            val dist = abs(nh.x - food.x) + abs(nh.y - food.y)
-            var s = -dist * 100
-            if (ate) s += 10000
-            if (nh.x == 0 || nh.x == cols - 1 || nh.y == 0 || nh.y == rows - 1) s -= 500
-            candidates.add(Pair(d, s))
-        }
-        candidates.sortByDescending { it.second }
-
         var bestDir: Point? = null; var bestScore = Int.MIN_VALUE
-        for (i in 0 until minOf(2, candidates.size)) {
-            val d = candidates[i].first
+        for (d in validDirs) {
             val nh = Point(head.x + d.x, head.y + d.y)
             val sim = ArrayDeque(snake); sim.addFirst(nh)
             val ate = nh.x == food.x && nh.y == food.y
             if (!ate) sim.removeLast()
             val space = floodFill(nh, sim)
             val dist = abs(nh.x - food.x) + abs(nh.y - food.y)
-            var s = space * 10 - dist * 3
-            if (ate) s += 2000
-            if (space < sim.size) s -= 20000
-            if (space > sim.size * 2 && bfsPath(nh, sim.last(), sim, Point(0, 0)) != null) s += 1000
+            val canReachTail = bfsPath(nh, sim.last(), sim, Point(0, 0)) != null
+            var s = space * 12 - dist * 4
+            if (ate) s += 3000
+            if (canReachTail) s += 500
+            if (space < sim.size) s -= 30000
+            if (nh.x == 0 || nh.x == cols - 1 || nh.y == 0 || nh.y == rows - 1) s -= 200
             if (s > bestScore) { bestScore = s; bestDir = d }
         }
-        return bestDir ?: candidates.firstOrNull()?.first
+        return bestDir
     }
 
-    // ============ 深度 Beam（运算最大化）============
     private fun deepBeamStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
             val p = bfsPath(head, food, snake, dir)
@@ -536,9 +485,7 @@ class SnakeView @JvmOverloads constructor(
             if (validDirs.contains(fd) && isEatingSafeQuick(head, food)) return fd
         }
 
-        val beamWidth = 12
-        val depth = 6
-
+        val beamWidth = 12; val depth = 6
         var beam = ArrayList<BeamNode>(validDirs.size)
         for (d in validDirs) {
             val nh = Point(head.x + d.x, head.y + d.y)
@@ -565,17 +512,13 @@ class SnakeView @JvmOverloads constructor(
                 }
             }
             if (nextBeam.isEmpty()) break
-            val scored = nextBeam.map { Pair(it, fullScoreNode(it)) }
-                .sortedByDescending { it.second }.take(beamWidth)
+            val scored = nextBeam.map { Pair(it, fullScoreNode(it)) }.sortedByDescending { it.second }.take(beamWidth)
             beam = ArrayList(beamWidth)
             for (i in 0 until scored.size) beam.add(scored[i].first)
         }
 
         var bestDir: Point? = null; var bestScore = Int.MIN_VALUE
-        for (node in beam) {
-            val s = fullScoreNode(node)
-            if (s > bestScore) { bestScore = s; bestDir = node.firstDir }
-        }
+        for (node in beam) { val s = fullScoreNode(node); if (s > bestScore) { bestScore = s; bestDir = node.firstDir } }
         return bestDir
     }
 
@@ -585,9 +528,7 @@ class SnakeView @JvmOverloads constructor(
         val reachTail = bfsPath(nh, node.simSnake.last(), node.simSnake, Point(0, 0)) != null
         val reachFood = bfsPath(nh, food, node.simSnake, Point(0, 0)) != null
         val distToFood = abs(nh.x - food.x) + abs(nh.y - food.y)
-        var s = 0
-        s += space * 8
-        s -= distToFood * 3
+        var s = space * 8 - distToFood * 3
         if (reachTail) s += 1500
         if (reachFood) s += 500
         s += node.foodCount * 600
@@ -595,30 +536,7 @@ class SnakeView @JvmOverloads constructor(
         return s
     }
 
-    // ============ 追尾保命 ============
     private fun tailChaseStrategy(head: Point, validDirs: List<Point>): Point? {
-        var best: Point? = null; var bestSpace = -1
-        for (d in validDirs) {
-            val nh = Point(head.x + d.x, head.y + d.y)
-            val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
-            if (bfsPath(nh, sim.last(), sim, Point(0, 0)) == null) continue
-            val space = floodFill(nh, sim)
-            if (space > bestSpace) { bestSpace = space; best = d }
-        }
-        if (best != null) return best
-        return validDirs.maxByOrNull {
-            val nh = Point(head.x + it.x, head.y + it.y)
-            val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
-            floodFill(nh, sim)
-        }
-    }
-
-    // ============ 加权汉密尔顿（进入前已通过安全检查）============
-    private fun weightedHamStrategy(head: Point, validDirs: List<Point>): Point? {
-        val pathPos = pathIndex[head.x][head.y]
-        val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
-        val pathDir = Point(pathNext.x - head.x, pathNext.y - head.y)
-
         val foodDist = abs(head.x - food.x) + abs(head.y - food.y)
         if (foodDist <= 3) {
             val p = bfsPath(head, food, snake, dir)
@@ -627,26 +545,108 @@ class SnakeView @JvmOverloads constructor(
                 if (validDirs.contains(nm) && isEatingSafeQuick(head, food)) return nm
             }
         }
-
-        if (validDirs.contains(pathDir)) return pathDir
-        return validDirs.maxByOrNull {
-            val nh = Point(head.x + it.x, head.y + it.y)
+        var best: Point? = null; var bestScore = Int.MIN_VALUE
+        for (d in validDirs) {
+            val nh = Point(head.x + d.x, head.y + d.y)
             val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
-            floodFill(nh, sim)
+            val canReachTail = bfsPath(nh, sim.last(), sim, Point(0, 0)) != null
+            val space = floodFill(nh, sim)
+            var s = space
+            if (canReachTail) s += 100000
+            s -= abs(nh.x - food.x) + abs(nh.y - food.y)
+            if (s > bestScore) { bestScore = s; best = d }
         }
+        return best ?: validDirs.firstOrNull()
     }
 
-    // ============ 纯汉密尔顿（进入前已通过安全检查）============
+    private fun weightedHamStrategy(head: Point, validDirs: List<Point>): Point? {
+        val pathPos = pathIndex[head.x][head.y]
+        val onPath = pathSequence[pathPos].x == head.x && pathSequence[pathPos].y == head.y
+        if (!onPath) return returnToPath(head, validDirs)
+
+        val snakeLen = snake.size
+        val maxShortcut = when {
+            snakeLen < 20 -> 30
+            snakeLen < 30 -> 22
+            snakeLen < 45 -> 15
+            snakeLen < 60 -> 10
+            snakeLen < 85 -> 6
+            else -> 3
+        }
+
+        val pathToFood = bfsPath(head, food, snake, dir)
+        if (pathToFood != null && pathToFood.size in 2..maxShortcut) {
+            val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
+            if (validDirs.contains(nextMove) && isEatingSafeQuick(head, food)) return nextMove
+        }
+
+        val nextPos = (pathPos + 1) % pathSequence.size
+        val nextP = pathSequence[nextPos]
+        val pathDir = Point(nextP.x - head.x, nextP.y - head.y)
+        if (validDirs.contains(pathDir)) {
+            val nh = Point(head.x + pathDir.x, head.y + pathDir.y)
+            val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
+            var hit = false; var skip = true
+            for (p in sim) { if (skip) { skip = false; continue }; if (p.x == nh.x && p.y == nh.y) { hit = true; break } }
+            if (!hit) return pathDir
+        }
+        return safeFallback(head, validDirs)
+    }
+
     private fun pureHamStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
-        val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
-        val pathDir = Point(pathNext.x - head.x, pathNext.y - head.y)
-        if (validDirs.contains(pathDir)) return pathDir
-        return validDirs.maxByOrNull {
-            val nh = Point(head.x + it.x, head.y + it.y)
+        val onPath = pathSequence[pathPos].x == head.x && pathSequence[pathPos].y == head.y
+        if (!onPath) return returnToPath(head, validDirs)
+
+        val nextPos = (pathPos + 1) % pathSequence.size
+        val nextP = pathSequence[nextPos]
+        val pathDir = Point(nextP.x - head.x, nextP.y - head.y)
+        if (!validDirs.contains(pathDir)) return safeFallback(head, validDirs)
+
+        val nh = Point(head.x + pathDir.x, head.y + pathDir.y)
+        val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
+        var hit = false; var skip = true
+        for (p in sim) { if (skip) { skip = false; continue }; if (p.x == nh.x && p.y == nh.y) { hit = true; break } }
+        if (hit) return safeFallback(head, validDirs)
+        return pathDir
+    }
+
+    private fun returnToPath(head: Point, validDirs: List<Point>): Point? {
+        var bestMove: Point? = null
+        var bestDist = Int.MAX_VALUE
+        for (d in validDirs) {
+            val nh = Point(head.x + d.x, head.y + d.y)
             val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
-            floodFill(nh, sim)
+            var closestPath: Point? = null
+            var closestD = Int.MAX_VALUE
+            for (path in pathSequence) {
+                val dist = abs(path.x - nh.x) + abs(path.y - nh.y)
+                if (dist < closestD) { closestD = dist; closestPath = path }
+            }
+            if (closestPath != null) {
+                if (closestD == 0) {
+                    if (0 < bestDist) { bestDist = 0; bestMove = d }
+                } else {
+                    val p = bfsPath(nh, closestPath, sim, Point(0, 0))
+                    if (p != null && p.size < bestDist) { bestDist = p.size; bestMove = d }
+                }
+            }
         }
+        return bestMove ?: safeFallback(head, validDirs)
+    }
+
+    private fun safeFallback(head: Point, validDirs: List<Point>): Point? {
+        var best: Point? = null; var bestScore = Int.MIN_VALUE
+        for (d in validDirs) {
+            val nh = Point(head.x + d.x, head.y + d.y)
+            val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
+            val canReachTail = bfsPath(nh, sim.last(), sim, Point(0, 0)) != null
+            val space = floodFill(nh, sim)
+            var s = space
+            if (canReachTail) s += 100000
+            if (s > bestScore) { bestScore = s; best = d }
+        }
+        return best ?: validDirs.firstOrNull()
     }
 
     private fun isEatingSafeQuick(head: Point, foodPos: Point): Boolean {
@@ -676,7 +676,6 @@ class SnakeView @JvmOverloads constructor(
         dir = Point(dx, dy)
     }
 
-    // ============ 快速 floodFill ============
     private fun floodFill(start: Point, currentSnake: Collection<Point>): Int {
         for (x in 0 until cols) for (y in 0 until rows) ffVisited[x][y] = false
         for (p in currentSnake) ffVisited[p.x][p.y] = true
@@ -696,7 +695,6 @@ class SnakeView @JvmOverloads constructor(
         return count
     }
 
-    // ============ 快速 BFS 路径 ============
     private fun bfsPath(start: Point, target: Point, currentSnake: Collection<Point>, reverseDir: Point): List<Point>? {
         for (x in 0 until cols) for (y in 0 until rows) bfsVisited[x][y] = false
         var head = 0; var tail = 0
@@ -767,23 +765,16 @@ class SnakeView @JvmOverloads constructor(
         val trailColor = if (isRainbowSkin)
             Color.HSVToColor(floatArrayOf((System.currentTimeMillis() / 10f) % 360f, 1f, 1f))
         else bodyColor
-        particles.add(Particle(
-            tailX + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
+        particles.add(Particle(tailX + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
             tailY + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
-            (Random.nextFloat() - 0.5f) * 1.5f,
-            (Random.nextFloat() - 0.5f) * 1.5f,
-            1.0f, trailColor,
-            Random.nextFloat() * 0.8f + 0.5f, 0.003f, true
-        ))
+            (Random.nextFloat() - 0.5f) * 1.5f, (Random.nextFloat() - 0.5f) * 1.5f,
+            1.0f, trailColor, Random.nextFloat() * 0.8f + 0.5f, 0.003f, true))
 
         snake.addFirst(newHead)
         if (isEating) {
             hungerCounter = 0; comboCount++
             val base = 10 + (comboCount - 1) * 5
-            val mult = when {
-                score >= 1000 -> 3.0f; score >= 500 -> 2.0f
-                score >= 200 -> 1.5f; else -> 1.0f
-            }
+            val mult = when { score >= 1000 -> 3.0f; score >= 500 -> 2.0f; score >= 200 -> 1.5f; else -> 1.0f }
             val earned = (base * mult).toInt()
             score += earned
             onScoreChanged?.invoke(score)
@@ -797,17 +788,13 @@ class SnakeView @JvmOverloads constructor(
         vibrate(35)
         val cx = offsetX + food.x * cellSize + cellSize / 2
         val cy = offsetY + food.y * cellSize + cellSize / 2
-        val colors = intArrayOf(
-            Color.rgb(231, 76, 60), Color.rgb(241, 196, 15),
-            Color.rgb(46, 204, 113), Color.rgb(52, 152, 219),
-            Color.WHITE, Color.CYAN
-        )
+        val colors = intArrayOf(Color.rgb(231, 76, 60), Color.rgb(241, 196, 15),
+            Color.rgb(46, 204, 113), Color.rgb(52, 152, 219), Color.WHITE, Color.CYAN)
         for (i in 0 until 15) {
             val a = Random.nextFloat() * 6.2832f
             val sp = Random.nextFloat() * 8f + 2f
             particles.add(Particle(cx, cy, cos(a) * sp, sin(a) * sp, 1.0f,
-                colors[Random.nextInt(colors.size)],
-                Random.nextFloat() * 1.5f + 0.5f, 0.0015f))
+                colors[Random.nextInt(colors.size)], Random.nextFloat() * 1.5f + 0.5f, 0.0015f))
         }
         floats.add(FloatText(cx, cy, 1.0f, "+$scoreGained"))
     }
@@ -853,23 +840,14 @@ class SnakeView @JvmOverloads constructor(
         val breath = (sin(System.currentTimeMillis() / 400.0).toFloat() + 1f) / 2f
         paintGrid.alpha = (60 + 195 * breath).toInt()
         paintGrid.color = gridColor
-        for (i in 0..cols) {
-            val x = offsetX + i * cellSize
-            canvas.drawLine(x, offsetY, x, offsetY + rows * cellSize, paintGrid)
-        }
-        for (i in 0..rows) {
-            val y = offsetY + i * cellSize
-            canvas.drawLine(offsetX, y, offsetX + cols * cellSize, y, paintGrid)
-        }
+        for (i in 0..cols) { val x = offsetX + i * cellSize; canvas.drawLine(x, offsetY, x, offsetY + rows * cellSize, paintGrid) }
+        for (i in 0..rows) { val y = offsetY + i * cellSize; canvas.drawLine(offsetX, y, offsetX + cols * cellSize, y, paintGrid) }
 
         if (aiMode == 2 && !gameOver) {
             for (i in 0 until pathSequence.size - 1) {
                 val p1 = pathSequence[i]; val p2 = pathSequence[i + 1]
-                canvas.drawLine(
-                    offsetX + p1.x * cellSize + cellSize / 2, offsetY + p1.y * cellSize + cellSize / 2,
-                    offsetX + p2.x * cellSize + cellSize / 2, offsetY + p2.y * cellSize + cellSize / 2,
-                    paintHamPath
-                )
+                canvas.drawLine(offsetX + p1.x * cellSize + cellSize / 2, offsetY + p1.y * cellSize + cellSize / 2,
+                    offsetX + p2.x * cellSize + cellSize / 2, offsetY + p2.y * cellSize + cellSize / 2, paintHamPath)
             }
         }
 
@@ -928,11 +906,8 @@ class SnakeView @JvmOverloads constructor(
                 val angle = atan2(tp.y - hp.y, tp.x - hp.x)
                 val to = (System.currentTimeMillis() % 3000) / 3000f
                 val fd = cellSize * 6 * to
-                paintSnakeBody.shader = LinearGradient(
-                    hp.x - cos(angle) * fd, hp.y - sin(angle) * fd,
-                    tp.x - cos(angle) * fd, tp.y - sin(angle) * fd,
-                    rainbow, null, Shader.TileMode.MIRROR
-                )
+                paintSnakeBody.shader = LinearGradient(hp.x - kotlin.math.cos(angle) * fd, hp.y - kotlin.math.sin(angle) * fd,
+                    tp.x - kotlin.math.cos(angle) * fd, tp.y - kotlin.math.sin(angle) * fd, rainbow, null, Shader.TileMode.MIRROR)
                 paintSnakeHead.color = Color.WHITE
                 paintSnakeBody.alpha = 255
                 paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
@@ -998,7 +973,7 @@ class SnakeView @JvmOverloads constructor(
             val modeName: String; val modeDesc: String; val modeColor: Int
             when (strategyMode) {
                 1 -> { modeName = "🔄 追尾保命"; modeDesc = "长蛇优先追尾，等待食物刷到嘴边"; modeColor = Color.rgb(241, 196, 15) }
-                2 -> { modeName = "🛤 加权汉密尔顿"; modeDesc = "沿路径走，允许3格内抄近道吃食物"; modeColor = Color.rgb(52, 152, 219) }
+                2 -> { modeName = "🛤 加权汉密尔顿"; modeDesc = "沿路径走，允许动态抄近道吃食物"; modeColor = Color.rgb(52, 152, 219) }
                 3 -> { modeName = "🛡 纯汉密尔顿"; modeDesc = "严格沿固定路径，理论上永不死亡"; modeColor = Color.rgb(46, 204, 113) }
                 4 -> { modeName = "🧠 深度 Beam"; modeDesc = "深度6+宽度12，运算最大化"; modeColor = Color.rgb(155, 89, 182) }
                 else -> { modeName = "🎯 BFS + Beam"; modeDesc = "单步空间评估，秒级响应"; modeColor = Color.rgb(231, 76, 60) }
