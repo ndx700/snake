@@ -27,10 +27,13 @@ class MainActivity : AppCompatActivity() {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        // --- 修正：使用安全的方式获取屏幕并申请 120Hz 刷新率 ---
         try {
-            val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display else windowManager.defaultDisplay
+            @Suppress("DEPRECATION")
+            val display = windowManager.defaultDisplay
             if (display != null) {
-                val maxMode = display.supportedModes.maxByOrNull { it.refreshRate }
+                val modes = display.supportedModes
+                val maxMode = modes.maxByOrNull { it.refreshRate }
                 if (maxMode != null) {
                     val params = window.attributes
                     params.preferredDisplayModeId = maxMode.modeId
@@ -40,7 +43,10 @@ class MainActivity : AppCompatActivity() {
                     window.attributes = params
                 }
             }
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        // -------------------------------------------------
 
         prefs = getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
         gameView = SnakeView(this)
