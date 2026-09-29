@@ -286,36 +286,37 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ================== 极其严密的 AI 核心逻辑 ==================
+    // ================== 最终版 AI 核心逻辑：物理前置 + 永不掉头 ==================
     private fun autoPilot() {
         if (gameOver) return
         val head = snake.first()
         
-        // 1. 计算所有绝对安全的方向（不撞墙、不撞身体、绝对不掉头）
+        // 1. 获取所有绝对安全的方向（不撞墙、不撞身体、绝对不掉头）
         val allDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
         val validDirs = allDirs.filter { d ->
             val isReverse = (d.x == -dir.x && d.y == -dir.y)
             val newHead = Point(head.x + d.x, head.y + d.y)
             val isWall = newHead.x !in 0 until cols || newHead.y !in 0 until rows
-            // 注意：这里将尾巴视为安全，但如果同时吃到食物，尾巴不会移开，会撞上！这一点在后续模拟中严查
-            val isSelf = snake.dropLast(1).any { it == newHead } 
+            val isSelf = snake.dropLast(1).any { it == newHead }
             !isReverse && !isWall && !isSelf
         }
         
-        if (validDirs.isEmpty()) return // 天罗地网，必死无疑
+        if (validDirs.isEmpty()) return
         
-        // 2. 优先判断能否去吃食物（必须保证吃完后能追到尾巴）
-        val pathToFood = bfsPath(head, food, snake)
+        // 2. 核心修复：BFS寻路时，直接从物理规则层面屏蔽“掉头”这个方向
+        val pathToFood = bfsAvoidReverse(head, food, dir)
         if (pathToFood != null && pathToFood.size > 1) {
             val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
             if (validDirs.contains(nextMove)) {
-                // 模拟吃完食物后，能否安全追到尾巴
-                val simulatedSnake = ArrayDeque(snake)
-                simulatedSnake.addFirst(food) // 蛇头变长
-                // 吃掉食物尾巴不移开
-                val tailAfterEating = simulatedSnake.last()
-                val safeToEat = bfsPath(simulatedSnake.first(), tailAfterEating, simulatedSnake) != null
-                
+                // 短蛇大胆吃，长蛇谨慎吃
+                var safeToEat = snake.size < 20 // 小于20节，绝对安全
+                if (!safeToEat) {
+                    // 模拟吃完食物后的状态，检查能否安全追到尾巴
+                    val simSnake = ArrayDeque(snake)
+                    simSnake.addFirst(food)
+                    val tailAfterEating = simSnake.last()
+                    safeToEat = bfsAvoidReverse(simSnake.first(), tailAfterEating, Point(0, 0)) != null
+                }
                 if (safeToEat) {
                     directionQueue.clear()
                     directionQueue.add(nextMove)
@@ -324,8 +325,8 @@ class SnakeView(context: Context) : View(context) {
             }
         }
         
-        // 3. 无法安全吃食物，则尝试追自己的尾巴（这是保证不死的核心）
-        val pathToTail = bfsPath(head, snake.last(), snake)
+        // 3. 无法安全吃食物，追自己的尾巴（也是用避免掉头的BFS）
+        val pathToTail = bfsAvoidReverse(head, snake.last(), dir)
         if (pathToTail != null && pathToTail.size > 1) {
             val nextMove = Point(pathToTail[1].x - pathToTail[0].x, pathToTail[1].y - pathToTail[0].y)
             if (validDirs.contains(nextMove)) {
@@ -335,7 +336,7 @@ class SnakeView(context: Context) : View(context) {
             }
         }
         
-        // 4. 连尾巴都追不到，在安全方向里寻找最大生存空间，做最后的挣扎
+        // 4. 最后挣扎：在安全方向里找最大生存空间
         var bestMove: Point? = null
         var maxSpace = -1
         for (d in validDirs) {
@@ -352,12 +353,14 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    private fun bfsPath(start: Point, target: Point, currentSnake: Collection<Point>): List<Point>? {
+    // 核心：BFS时从第一步就禁止掉头
+    private fun bfsAvoidReverse(start: Point, target: Point, reverseDir: Point): List<Point>? {
         val queue = ArrayDeque<Point>()
         val visited = mutableSetOf<Point>()
         val parent = mutableMapOf<Point, Point>()
         queue.add(start)
         visited.add(start)
+        
         while (queue.isNotEmpty()) {
             val curr = queue.removeFirst()
             if (curr == target) {
@@ -370,9 +373,12 @@ class SnakeView(context: Context) : View(context) {
                 return path
             }
             for (d in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
+                // 从起点迈出的第一步，绝不允许是反方向
+                if (curr == start && d.x == reverseDir.x && d.y == reverseDir.y) continue
+                
                 val next = Point(curr.x + d.x, curr.y + d.y)
                 if (next.x !in 0 until cols || next.y !in 0 until rows) continue
-                if (currentSnake.any { it == next } && next != target) continue
+                if (snake.any { it == next } && next != target) continue
                 if (visited.contains(next)) continue
                 visited.add(next)
                 parent[next] = curr
@@ -381,7 +387,7 @@ class SnakeView(context: Context) : View(context) {
         }
         return null
     }
-    
+
     private fun floodFill(start: Point): Int {
         val queue = ArrayDeque<Point>()
         val visited = mutableSetOf<Point>()
@@ -411,11 +417,10 @@ class SnakeView(context: Context) : View(context) {
 
         if (directionQueue.isNotEmpty()) {
             val next = directionQueue.removeFirst()
-            // 底层防护：无论外部怎么传，绝对禁止 180 度掉头
             if (dir.x == 0 && dir.y == 0) {
-                dir = next // 初始方向
+                dir = next
             } else if (dir.x != -next.x || dir.y != -next.y) {
-                dir = next // 合法转弯
+                dir = next
             }
         }
 
@@ -424,7 +429,6 @@ class SnakeView(context: Context) : View(context) {
         val head = snake.first()
         val newHead = Point(head.x + dir.x, head.y + dir.y)
 
-        // 1. 撞墙判定
         if (newHead.x < 0 || newHead.x >= cols || newHead.y < 0 || newHead.y >= rows) {
             gameOver = true
             triggerDeathEffects()
@@ -432,16 +436,11 @@ class SnakeView(context: Context) : View(context) {
             return
         }
 
-        // 2. 撞自己判定（核心修复：精准区分尾巴和身体）
         val isEating = newHead == food
         val tail = snake.last()
-        
         val collidedWithSelf = if (newHead == tail) {
-            // 如果头撞到尾：只有“同时吃到食物”时尾巴才不移开，算死亡。
-            // 否则尾会移开，是安全的。
-            isEating 
+            isEating
         } else {
-            // 没撞尾，则检查是否撞到身体的其他部位
             snake.any { it == newHead }
         }
 
@@ -452,7 +451,6 @@ class SnakeView(context: Context) : View(context) {
             return
         }
 
-        // 3. 正式移动
         snake.addFirst(newHead)
         if (isEating) {
             score += 10
@@ -504,7 +502,6 @@ class SnakeView(context: Context) : View(context) {
             particles.add(Particle(headX, headY, cos(angle).toFloat() * speed, sin(angle).toFloat() * speed, 1.5f, Color.rgb(255, 50, 50)))
         }
         
-        // 核心：死亡后自动关闭演示模式，更新按钮状态
         if (isAutoPlay) {
             isAutoPlay = false
             onAutoPlayChanged?.invoke(false)
