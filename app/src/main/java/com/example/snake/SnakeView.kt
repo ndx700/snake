@@ -28,6 +28,12 @@ import kotlin.random.Random
 
 class SnakeView(context: Context) : View(context) {
 
+    companion object {
+        const val AI_MODE_NONE = 0
+        const val AI_MODE_BFS = 1
+        const val AI_MODE_HAMILTONIAN = 2
+    }
+
     private val cols = 15
     private val rows = 15
 
@@ -50,22 +56,23 @@ class SnakeView(context: Context) : View(context) {
     
     private var gameSpeed = 180L
     
-    var isAutoPlay = false
-        private set
+    private var aiMode = AI_MODE_NONE
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
-    var onAutoPlayChanged: ((Boolean) -> Unit)? = null
+    var onAIModeChanged: ((Int) -> Unit)? = null
     
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
-    // --- AI 核心学习与惩罚/奖励机制变量 ---
-    private var aiLevel = 1             // AI 等级 1-10（越高越激进，但也越聪明）
-    private var aiBestScore = 0         // AI 历史最高分
-    private var comboCount = 0          // 连击数（影响倍率）
-    private var currentMultiplier = 1.0f // 当前得分倍率
-    private var hungerCounter = 0       // 饥饿计数器（防止绕圈）
-    private var consecutiveDeaths = 0   // 连续快速死亡计数器（用于惩罚机制）
+    private var aiLevel = 1
+    private var aiBestScore = 0
+    private var comboCount = 0
+    private var currentMultiplier = 1.0f
+    private var hungerCounter = 0
+    private var consecutiveDeaths = 0
+    
+    private val pathIndex = Array(cols) { IntArray(rows) }
+    private val pathSequence = mutableListOf<Point>()
 
     private var currentSkinBodyColor = Color.rgb(46, 204, 113)
     private var currentSkinHeadColor = Color.rgb(39, 174, 96)
@@ -74,7 +81,6 @@ class SnakeView(context: Context) : View(context) {
     
     private var isRainbowSkin = false
     
-    // 预生成 360 种平滑过渡的彩虹色
     private val rainbowColors = IntArray(361) { i ->
         Color.HSVToColor(floatArrayOf(i.toFloat(), 1f, 1f))
     }
@@ -113,7 +119,6 @@ class SnakeView(context: Context) : View(context) {
     private val particles = mutableListOf<Particle>()
     private val floatingTexts = mutableListOf<FloatingText>()
 
-    // --- 画笔定义 ---
     private val paintSnakeBody = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = currentSkinBodyColor
         style = Paint.Style.STROKE
@@ -168,6 +173,12 @@ class SnakeView(context: Context) : View(context) {
 
     private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textAlign = Paint.Align.CENTER }
     private val paintSubText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.LTGRAY; textAlign = Paint.Align.CENTER }
+    
+    private val paintHamPath = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        color = Color.argb(60, 255, 255, 255)
+    }
 
     private var isRainbowBoard = false
     private val paintBoardBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -195,6 +206,7 @@ class SnakeView(context: Context) : View(context) {
     }
 
     init {
+        initHamiltonianPath()
         aiBestScore = prefs.getInt("ai_best_score", 0)
         aiLevel = prefs.getInt("ai_level", 1)
         consecutiveDeaths = prefs.getInt("consecutive_deaths", 0)
@@ -204,9 +216,28 @@ class SnakeView(context: Context) : View(context) {
         reset()
     }
 
-    fun toggleAutoPlay() {
-        isAutoPlay = !isAutoPlay
-        onAutoPlayChanged?.invoke(isAutoPlay)
+    private fun initHamiltonianPath() {
+        pathSequence.clear()
+        for (c in 0 until cols) {
+            if (c % 2 == 0) {
+                for (r in 0 until rows) {
+                    pathIndex[c][r] = pathSequence.size
+                    pathSequence.add(Point(c, r))
+                }
+            } else {
+                for (r in rows - 1 downTo 0) {
+                    pathIndex[c][r] = pathSequence.size
+                    pathSequence.add(Point(c, r))
+                }
+            }
+        }
+    }
+
+    fun getAIMode(): Int = aiMode
+
+    fun setAIMode(mode: Int) {
+        aiMode = mode
+        onAIModeChanged?.invoke(aiMode)
         reset()
     }
 
@@ -288,8 +319,13 @@ class SnakeView(context: Context) : View(context) {
 
     fun reset() {
         snake.clear()
-        snake.add(Point(10, 10))
-        dir = Point(0, 0)
+        if (aiMode == AI_MODE_HAMILTONIAN) {
+            snake.add(Point(0, 0))
+            dir = Point(0, 1)
+        } else {
+            snake.add(Point(10, 10))
+            dir = Point(0, 0)
+        }
         nextDir = Point(0, 0)
         directionQueue.clear()
         score = 0
@@ -395,12 +431,12 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ================== 极限算力 AI 核心：全图推演 + 奖励/惩罚机制 ==================
-    private fun autoPilot() {
+    // ================== 升级版 BFS 智能 AI：追尾可达性预判 ==================
+    private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
         
-        // 1. 物理安全检查：获取所有不会立刻死亡的方向
+        // 第一步：物理安全方向（不撞墙、不反向、不撞身体）
         val allDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
         val validDirs = allDirs.filter { d ->
             val isReverse = (d.x == -dir.x && d.y == -dir.y)
@@ -409,82 +445,72 @@ class SnakeView(context: Context) : View(context) {
             val isSelf = snake.dropLast(1).any { it == newHead }
             !isReverse && !isWall && !isSelf
         }
-        
         if (validDirs.isEmpty()) return
 
-        // 2. 算力压榨：计算每个方向的存活空间（Flood Fill）
-        val dirSpaceMap = mutableMapOf<Point, Int>()
+        // ★★★ 核心升级：模拟走每一步，检查能否到达尾巴 ★★★
+        // 如果能到达尾巴，说明这步有活路；否则这步会通往死亡
+        val tailSafeDirs = mutableListOf<Point>()
         for (d in validDirs) {
             val nextHead = Point(head.x + d.x, head.y + d.y)
-            val simulatedSnake = ArrayDeque(snake)
-            simulatedSnake.addFirst(nextHead)
-            simulatedSnake.removeLast()
-            dirSpaceMap[d] = floodFillWithSnake(nextHead, simulatedSnake)
+            val simSnake = ArrayDeque(snake)
+            simSnake.addFirst(nextHead)
+            simSnake.removeLast() // 尾巴会移开
+            // 从新蛇头出发，能否到达新尾巴？
+            val simTail = simSnake.last()
+            val pathToTail = bfsPathWithSnake(simSnake.first(), simTail, simSnake, Point(0,0))
+            if (pathToTail != null) {
+                tailSafeDirs.add(d)
+            }
         }
-
-        // 3. 全图寻路
-        val pathToFood = bfsAvoidReverse(head, food, dir)
-        val pathToTail = bfsAvoidReverse(head, snake.last(), dir)
-
-        // 4. 风险与收益评估（AI 博弈逻辑）
-        // 越到后期，分数倍率越高，AI 越应该冒险，但它“知道”不能送死。
-        val isStarving = hungerCounter > 20 // 极度饥饿，强制打破死锁
-        val isShortSnake = snake.size < 20 // 短蛇，极度安全
-
+        
+        // 优先从"能到达尾巴"的安全方向中选（这是绝对的活路）
+        // 如果连尾巴都到不了，才降级使用普通合法方向
+        val candidateDirs = if (tailSafeDirs.isNotEmpty()) tailSafeDirs else validDirs
+        
+        // 计算每个候选方向的空间
+        val dirSpaceMap = mutableMapOf<Point, Int>()
+        for (d in candidateDirs) {
+            val nextHead = Point(head.x + d.x, head.y + d.y)
+            val simSnake = ArrayDeque(snake)
+            simSnake.addFirst(nextHead)
+            simSnake.removeLast()
+            dirSpaceMap[d] = floodFillWithSnake(nextHead, simSnake)
+        }
+        
+        // 尝试吃食物（必须在安全方向中，且吃完后能追到尾巴）
+        val pathToFood = bfsPathWithSnake(head, food, snake, dir)
         if (pathToFood != null && pathToFood.size > 1) {
             val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
-            
-            // 铁律：第一步必须是物理安全的
-            if (validDirs.contains(nextMove)) {
-                val spaceAfterMove = dirSpaceMap[nextMove] ?: 0
+            if (candidateDirs.contains(nextMove)) {
+                // 模拟吃完后能否到达尾巴
+                val simSnake = ArrayDeque(snake)
+                simSnake.addFirst(food) // 吃到食物，身体变长，尾巴不移开
+                val tailAfterEating = simSnake.last()
+                val canReachTailAfterEating = bfsPathWithSnake(simSnake.first(), tailAfterEating, simSnake, Point(0,0)) != null
                 
-                // 收益计算：
-                // 基础安全空间 + 连击加成 + 高分冒险加成
-                val safeSpaceRequired = snake.size * (1.0f + (aiLevel * 0.1f)) // AI 等级越高，需要的安全空间越大（要求越苛刻，但也越聪明）
-                
-                // 决定是否去吃
-                var shouldEat = false
-                if (isStarving || isShortSnake) {
-                    shouldEat = true // 强破局或短蛇，直接吃
-                } else if (spaceAfterMove > safeSpaceRequired) {
-                    shouldEat = true // 空间极其充足，直接吃
-                } else {
-                    // 空间吃紧，进行模拟推演：吃完后能否追到尾巴？
-                    val simSnake = ArrayDeque(snake)
-                    simSnake.addFirst(food)
-                    val tailAfterEating = simSnake.last()
-                    if (bfsAvoidReverse(simSnake.first(), tailAfterEating, Point(0, 0)) != null) {
-                        shouldEat = true // 能追到尾巴，吃！
-                    }
-                }
-                
-                if (shouldEat) {
+                if (canReachTailAfterEating) {
                     directionQueue.clear()
                     directionQueue.add(nextMove)
                     return
                 }
             }
         }
-
-        // 5. 如果判断吃食物极其危险，转入"终极生存模式"
-        // 5.1 尝试追自己的尾巴（完美循环，永远不死）
+        
+        // 不能安全吃食物 → 追自己的尾巴（完美循环保命）
+        val pathToTail = bfsPathWithSnake(head, snake.last(), snake, dir)
         if (pathToTail != null && pathToTail.size > 1) {
             val nextMove = Point(pathToTail[1].x - pathToTail[0].x, pathToTail[1].y - pathToTail[0].y)
-            if (validDirs.contains(nextMove)) {
-                val spaceAfterMove = dirSpaceMap[nextMove] ?: 0
-                // 避免追尾巴把自己逼进死角
-                if (spaceAfterMove > snake.size * 0.8) {
-                    directionQueue.clear()
-                    directionQueue.add(nextMove)
-                    return
-                }
+            if (candidateDirs.contains(nextMove)) {
+                directionQueue.clear()
+                directionQueue.add(nextMove)
+                return
             }
         }
-
-        // 5.2 绝境求生：如果连追尾巴都会死，那就选一个空间最大的方向，等待转机
+        
+        // 最后的绝境：在候选方向中选空间最大的（拖延死亡，等待转机）
         var bestMove: Point? = null
         var maxSpace = -1
-        for (d in validDirs) {
+        for (d in candidateDirs) {
             val space = dirSpaceMap[d] ?: 0
             if (space > maxSpace) {
                 maxSpace = space
@@ -496,8 +522,40 @@ class SnakeView(context: Context) : View(context) {
             directionQueue.add(bestMove)
         }
     }
+    // =======================================================
 
-    // 洪水填充：计算当前空间大小
+    // ================== 汉密尔顿路径跟随 ==================
+    private fun autoPilotHamiltonian() {
+        if (gameOver) return
+        val head = snake.first()
+        if (head.x !in 0 until cols || head.y !in 0 until rows) return
+        
+        val currentIndex = pathIndex[head.x][head.y]
+        val nextIndex = (currentIndex + 1) % pathSequence.size
+        val nextPoint = pathSequence[nextIndex]
+        
+        val dx = nextPoint.x - head.x
+        val dy = nextPoint.y - head.y
+        
+        val newHead = Point(head.x + dx, head.y + dy)
+        val isSelfCollision = snake.dropLast(1).any { it == newHead }
+        
+        if (isSelfCollision) {
+            val nextNextIndex = (nextIndex + 1) % pathSequence.size
+            val nextNextPoint = pathSequence[nextNextIndex]
+            val dx2 = nextNextPoint.x - head.x
+            val dy2 = nextNextPoint.y - head.y
+            if (abs(dx2) + abs(dy2) == 1) {
+                dir = Point(dx2, dy2)
+                return
+            }
+            return
+        }
+        
+        dir = Point(dx, dy)
+    }
+    // =======================================================
+
     private fun floodFillWithSnake(start: Point, currentSnake: Collection<Point>): Int {
         val queue = ArrayDeque<Point>()
         val visited = mutableSetOf<Point>()
@@ -517,8 +575,8 @@ class SnakeView(context: Context) : View(context) {
         return visited.size
     }
 
-    // BFS 寻路，严格禁止掉头
-    private fun bfsAvoidReverse(start: Point, target: Point, reverseDir: Point): List<Point>? {
+    // 通用 BFS，使用自定义蛇身和禁止反向
+    private fun bfsPathWithSnake(start: Point, target: Point, customSnake: Collection<Point>, reverseDir: Point): List<Point>? {
         val queue = ArrayDeque<Point>()
         val visited = mutableSetOf<Point>()
         val parent = mutableMapOf<Point, Point>()
@@ -540,7 +598,8 @@ class SnakeView(context: Context) : View(context) {
                 if (curr == start && d.x == reverseDir.x && d.y == reverseDir.y) continue
                 val next = Point(curr.x + d.x, curr.y + d.y)
                 if (next.x !in 0 until cols || next.y !in 0 until rows) continue
-                if (snake.any { it == next } && next != target) continue
+                // 目标格（尾巴）可以走，其他身体格不行
+                if (customSnake.any { it == next } && next != target) continue
                 if (visited.contains(next)) continue
                 visited.add(next)
                 parent[next] = curr
@@ -549,16 +608,29 @@ class SnakeView(context: Context) : View(context) {
         }
         return null
     }
-    // =======================================================
 
     private fun update() {
         if (gameOver) return
-        if (isAutoPlay) autoPilot()
 
-        if (directionQueue.isNotEmpty()) {
-            val next = directionQueue.removeFirst()
-            if (dir.x == 0 && dir.y == 0) dir = next
-            else if (dir.x != -next.x || dir.y != -next.y) dir = next
+        when (aiMode) {
+            AI_MODE_BFS -> {
+                autoPilotBFS()
+                if (directionQueue.isNotEmpty()) {
+                    val next = directionQueue.removeFirst()
+                    if (dir.x == 0 && dir.y == 0) dir = next
+                    else if (dir.x != -next.x || dir.y != -next.y) dir = next
+                }
+            }
+            AI_MODE_HAMILTONIAN -> {
+                autoPilotHamiltonian()
+            }
+            else -> {
+                if (directionQueue.isNotEmpty()) {
+                    val next = directionQueue.removeFirst()
+                    if (dir.x == 0 && dir.y == 0) dir = next
+                    else if (dir.x != -next.x || dir.y != -next.y) dir = next
+                }
+            }
         }
 
         if (dir.x == 0 && dir.y == 0) return
@@ -584,7 +656,6 @@ class SnakeView(context: Context) : View(context) {
             return
         }
 
-        // 拖尾粒子
         val tailX = offsetX + tail.x * cellSize + cellSize / 2
         val tailY = offsetY + tail.y * cellSize + cellSize / 2
         
@@ -609,15 +680,13 @@ class SnakeView(context: Context) : View(context) {
 
         snake.addFirst(newHead)
         if (isEating) {
-            hungerCounter = 0 // 吃到了，饥饿计数器清零
+            hungerCounter = 0
             comboCount++
-            
-            // 激励机制：越往后分越多
             val basePoints = 10 + (comboCount - 1) * 5
             currentMultiplier = when {
-                score >= 1000 -> 3.0f  // 超过1000分，3倍积分
-                score >= 500 -> 2.0f   // 超过500分，2倍积分
-                score >= 200 -> 1.5f   // 超过200分，1.5倍积分
+                score >= 1000 -> 3.0f
+                score >= 500 -> 2.0f
+                score >= 200 -> 1.5f
                 else -> 1.0f
             }
             val earnedPoints = (basePoints * currentMultiplier).toInt()
@@ -627,7 +696,7 @@ class SnakeView(context: Context) : View(context) {
             placeFood()
             gameSpeed = max(70L, gameSpeed - 3L)
         } else {
-            hungerCounter++ // 没吃到，计数器增加
+            hungerCounter++
             snake.removeLast()
         }
     }
@@ -702,13 +771,12 @@ class SnakeView(context: Context) : View(context) {
             )
         }
         
-        if (isAutoPlay) {
-            isAutoPlay = false
-            onAutoPlayChanged?.invoke(false)
+        if (aiMode != AI_MODE_NONE) {
+            aiMode = AI_MODE_NONE
+            onAIModeChanged?.invoke(aiMode)
         }
     }
 
-    // ================== AI 奖励与惩罚机制结算 ==================
     private fun saveScoreAndMoney() {
         if (score > highScore) {
             highScore = score
@@ -719,9 +787,7 @@ class SnakeView(context: Context) : View(context) {
         prefs.edit().putInt("money", currentMoney).apply()
         onMoneyChanged?.invoke(currentMoney)
         
-        // AI 强化学习：奖励与惩罚
         if (score > aiBestScore) {
-            // 破纪录，奖励，升级
             aiBestScore = score
             prefs.edit().putInt("ai_best_score", aiBestScore).apply()
             if (score > 100) {
@@ -731,20 +797,16 @@ class SnakeView(context: Context) : View(context) {
             consecutiveDeaths = 0
             prefs.edit().putInt("consecutive_deaths", 0).apply()
         } else {
-            // 没破纪录。如果这把死得特别快（得分极低），实行惩罚
             if (score < 50) {
                 consecutiveDeaths++
                 prefs.edit().putInt("consecutive_deaths", consecutiveDeaths).apply()
-                
-                // 如果连续死得很快，或者分数远低于历史最高，强制降级（惩罚 AI 太蠢）
                 if (consecutiveDeaths >= 2 || score < aiBestScore * 0.3) {
                     aiLevel = (aiLevel - 1).coerceAtLeast(1)
                     prefs.edit().putInt("ai_level", aiLevel).apply()
-                    consecutiveDeaths = 0 // 降级后重置连败，给予一次新机会
+                    consecutiveDeaths = 0
                     prefs.edit().putInt("consecutive_deaths", 0).apply()
                 }
             } else {
-                // 分数及格，不是速死，消除连败记录
                 consecutiveDeaths = 0
                 prefs.edit().putInt("consecutive_deaths", 0).apply()
             }
@@ -782,6 +844,18 @@ class SnakeView(context: Context) : View(context) {
         for (i in 0..rows) {
             val y = offsetY + i * cellSize
             canvas.drawLine(offsetX, y, offsetX + cols * cellSize, y, paintGrid)
+        }
+
+        if (aiMode == AI_MODE_HAMILTONIAN && !gameOver) {
+            for (i in 0 until pathSequence.size - 1) {
+                val p1 = pathSequence[i]
+                val p2 = pathSequence[i + 1]
+                val x1 = offsetX + p1.x * cellSize + cellSize / 2
+                val y1 = offsetY + p1.y * cellSize + cellSize / 2
+                val x2 = offsetX + p2.x * cellSize + cellSize / 2
+                val y2 = offsetY + p2.y * cellSize + cellSize / 2
+                canvas.drawLine(x1, y1, x2, y2, paintHamPath)
+            }
         }
 
         val foodCenterX = offsetX + food.x * cellSize + cellSize / 2
@@ -954,7 +1028,7 @@ class SnakeView(context: Context) : View(context) {
     private var touchStartY = 0f
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (isAutoPlay && event.action == MotionEvent.ACTION_UP) {
+        if (aiMode != AI_MODE_NONE && event.action == MotionEvent.ACTION_UP) {
             if (gameOver) { reset(); return true }
             return true
         }
