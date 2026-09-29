@@ -121,6 +121,16 @@ class SnakeView @JvmOverloads constructor(
     private var deathTrap = 0
     private var totalGames = 0
 
+    /*
+     * ============================================================
+     * 学习效果追踪
+     * ============================================================
+     */
+    private val recentScores =
+        ArrayDeque<Int>()
+
+    private var bestRecentScore = 0
+
     private val q = Array(20) {
         FloatArray(5)
     }
@@ -239,7 +249,13 @@ class SnakeView @JvmOverloads constructor(
 
     private var beamNodes = 0
 
-    private val autoBeamHunger = 50
+    /*
+     * ============================================================
+     * 饥饿自动切 BEAM 阈值
+     * 120 步没吃到食物就临时改用 BEAM 追食物。
+     * ============================================================
+     */
+    private val autoBeamHunger = 120
 
     private var autoRestartDelay = 250L
 
@@ -1736,6 +1752,21 @@ class SnakeView @JvmOverloads constructor(
 
         totalGames++
 
+        /*
+         * 记录本局分数，用于 HUD 显示
+         */
+        recentScores.addLast(score)
+
+        while (
+            recentScores.size > 50
+        ) {
+            recentScores.removeFirst()
+        }
+
+        if (score > bestRecentScore) {
+            bestRecentScore = score
+        }
+
         aggression =
             when (cause) {
 
@@ -2947,9 +2978,9 @@ class SnakeView @JvmOverloads constructor(
 
         val h =
             if (gameOver)
-                300f
+                320f
             else
-                275f
+                320f
 
         val left =
             (width - w) / 2f
@@ -3198,6 +3229,32 @@ class SnakeView @JvmOverloads constructor(
             text
         )
 
+        /*
+         * 学习效果：近 50 局均分 / 最佳
+         */
+        val avg =
+            if (recentScores.isEmpty())
+                0f
+            else
+                recentScores.average()
+                    .toFloat()
+
+        c.drawText(
+            "近50局均分 ${
+                "%.1f".format(avg)
+            }",
+            left + 410f,
+            top + 150f,
+            text
+        )
+
+        c.drawText(
+            "近50局最佳 $bestRecentScore",
+            left + 410f,
+            top + 174f,
+            text
+        )
+
         text.textSize =
             13f
 
@@ -3235,7 +3292,7 @@ class SnakeView @JvmOverloads constructor(
                     )
                 }",
                 x,
-                top + 176f,
+                top + 198f,
                 text
             )
 
@@ -3252,7 +3309,7 @@ class SnakeView @JvmOverloads constructor(
         c.drawText(
             "选择 ${arrow(ai.chosen)}",
             left + 16f,
-            top + 204f,
+            top + 226f,
             text
         )
 
@@ -3262,7 +3319,7 @@ class SnakeView @JvmOverloads constructor(
         c.drawText(
             "死亡统计  W$deathWall  S$deathSelf  T$deathTrap",
             left + 150f,
-            top + 204f,
+            top + 226f,
             text
         )
 
@@ -3279,14 +3336,14 @@ class SnakeView @JvmOverloads constructor(
         c.drawText(
             "学习：Q/UCB + 多步前瞻",
             left + 16f,
-            top + 228f,
+            top + 250f,
             text
         )
 
         c.drawText(
             "饥饿 ≥ $autoBeamHunger 自动切 BEAM",
             left + 230f,
-            top + 228f,
+            top + 250f,
             text
         )
 
@@ -3304,7 +3361,7 @@ class SnakeView @JvmOverloads constructor(
             c.drawText(
                 "死亡原因：$deathCause",
                 left + 16f,
-                top + 256f,
+                top + 278f,
                 text
             )
 
