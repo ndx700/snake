@@ -100,7 +100,15 @@ class SnakeView @JvmOverloads constructor(
     private var aiMode = 1
     private var forcedStrategy = -1
 
-    private var gameSpeed = 150L
+    /*
+     * ============================================================
+     * 极速自动学习版
+     *
+     * gameSpeed 固定 16ms ≈ 60 步/秒，
+     * 一局平均几秒钟就结束，方便刷数据。
+     * ============================================================
+     */
+    private var gameSpeed = 16L
     private var accumulator = 0L
     private var lastFrame = 0L
 
@@ -227,12 +235,6 @@ class SnakeView @JvmOverloads constructor(
 
     private var flash = 0f
 
-    /*
-     * 15 × 15 = 225
-     *
-     * 所有 BFS 数组的合法下标：
-     * 0..224
-     */
     private val bfsVisited =
         BooleanArray(
             cols * rows
@@ -246,22 +248,21 @@ class SnakeView @JvmOverloads constructor(
     private var beamNodes = 0
 
     /*
-     * ============================================================
-     * 饥饿自动切换阈值
-     *
-     * 当 hunger（连续未吃到食物的步数）达到这个值时，
-     * 无论玩家当前选的是哪种策略（BFS / 追尾 / HAM / AUTO），
-     * 都会临时切换到 BEAM 前瞻策略去追食物，
-     * 直到吃到食物 hunger 归零后自动恢复。
-     *
-     * 想调节灵敏度就改这个值：
-     *   30  → 更敏感
-     *   50  → 默认（约 7.5 秒）
-     *   80  → 更迟钝
-     *   120 → 只在快饿死时才切
-     * ============================================================
+     * 饥饿自动切 BEAM 阈值
      */
     private val autoBeamHunger = 50
+
+    /*
+     * 自动重开之间的等待帧数（毫秒），
+     * 太快会看不到 GAME OVER，
+     * 太慢又拖节奏。
+     */
+    private var autoRestartDelay = 250L
+
+    /*
+     * 自动重开倒计时（毫秒）
+     */
+    private var restartCountdown = 0L
 
     private val frame =
         object : Choreographer.FrameCallback {
@@ -290,16 +291,38 @@ class SnakeView @JvmOverloads constructor(
 
                 lastFrame = ns
 
-                accumulator += dt
+                // ========================================
+                // 死亡后自动重开
+                // ========================================
+                if (gameOver) {
 
-                while (
-                    accumulator >= gameSpeed
-                ) {
+                    restartCountdown -=
+                        dt
 
-                    updateGame()
+                    if (restartCountdown <= 0L) {
 
-                    accumulator -=
-                        gameSpeed
+                        reset()
+
+                        // 立刻继续下一局
+                    }
+
+                } else {
+
+                    accumulator += dt
+
+                    while (
+                        accumulator >= gameSpeed
+                    ) {
+
+                        updateGame()
+
+                        if (gameOver) {
+                            break
+                        }
+
+                        accumulator -=
+                            gameSpeed
+                    }
                 }
 
                 updateEffects(
@@ -418,11 +441,6 @@ class SnakeView @JvmOverloads constructor(
         invalidate()
     }
 
-    /*
-     * 参数 id 为兼容旧调用保留，可为空。
-     * 实际使用的皮肤以 prefs 中的 "equipped_skin" 为准，
-     * 因此无论调用方是否传 id，效果都一致。
-     */
     fun updateCurrentSkin(id: String? = null) {
 
         when (
@@ -555,10 +573,6 @@ class SnakeView @JvmOverloads constructor(
         headPaint.color = head
     }
 
-    /*
-     * 参数 id 为兼容旧调用保留，可为空。
-     * 实际使用的棋盘以 prefs 中的 "equipped_board" 为准。
-     */
     fun updateCurrentBoard(id: String? = null) {
 
         when (
@@ -695,7 +709,10 @@ class SnakeView @JvmOverloads constructor(
         deathCause = "无"
         lastDeathInfo = ""
 
-        gameSpeed = 150L
+        /*
+         * 极速：固定 16ms
+         */
+        gameSpeed = 16L
         accumulator = 0L
         lastFrame = 0L
 
@@ -703,6 +720,8 @@ class SnakeView @JvmOverloads constructor(
         floats.clear()
 
         flash = 0f
+
+        restartCountdown = 0L
 
         ai =
             Snapshot(
@@ -917,14 +936,11 @@ class SnakeView @JvmOverloads constructor(
 
             placeFood()
 
-            gameSpeed =
-                max(
-                    65L,
-                    150L -
-                        (
-                            snake.size / 8
-                            ) * 5L
-                )
+            /*
+             * 极速版不再随长度变慢，
+             * 始终 16ms。
+             */
+            gameSpeed = 16L
 
         } else {
 
@@ -989,12 +1005,6 @@ class SnakeView @JvmOverloads constructor(
                 danger
             )
 
-        // ========================================
-        // ★ 新增：长时间没吃到果实 → 自动切 BEAM
-        // 无论当前是 AUTO 还是玩家强制选的
-        // BFS / 追尾 / HAM，只要 hunger 超过阈值，
-        // 就临时改用 BEAM 前瞻策略去追食物。
-        // ========================================
         val autoBeam =
             hunger >= autoBeamHunger
 
@@ -1024,7 +1034,6 @@ class SnakeView @JvmOverloads constructor(
         val final =
             if (autoBeam) {
 
-                // ★ 饥饿过久时优先级最高：BEAM 前瞻
                 beamBest(legal)
 
             } else if (
@@ -1090,7 +1099,6 @@ class SnakeView @JvmOverloads constructor(
         ai =
             Snapshot(
 
-                // ★ 显示策略名（含饥饿自动切换提示）
                 strategy =
                     if (autoBeam)
                         "BEAM 饥饿自动"
@@ -1104,7 +1112,6 @@ class SnakeView @JvmOverloads constructor(
                                 strategy
                         ),
 
-                // ★ 显示自动切换的原因
                 reason =
                     if (autoBeam)
                         "饥饿 $hunger 步未进食，临时切换 BEAM 追食物"
@@ -1703,6 +1710,10 @@ class SnakeView @JvmOverloads constructor(
                     "money",
                     money
                 )
+                .putInt(
+                    "high_score",
+                    highScore
+                )
 
         for (s in 0 until 20) {
 
@@ -1794,6 +1805,10 @@ class SnakeView @JvmOverloads constructor(
                 "空间=${ai.region} 需求=${(snake.size * safetyMargin).toInt()}  " +
                 "尾巴=${if (ai.tailReachable) "可达" else "不可达"}"
 
+        /*
+         * 极速学习：每死一局立刻存盘，
+         * 这样即使中途关掉应用，Q 表也不丢。
+         */
         saveLearning()
 
         flash = 1f
@@ -1818,6 +1833,13 @@ class SnakeView @JvmOverloads constructor(
                 it.vibrate(120)
             }
         }
+
+        /*
+         * 死亡后自动重开倒计时
+         * （在 frame 回调里倒计时，无需用户点屏）
+         */
+        restartCountdown =
+            autoRestartDelay
 
         invalidate()
     }
@@ -2037,25 +2059,6 @@ class SnakeView @JvmOverloads constructor(
             p.y in 0 until rows
     }
 
-    /*
-     * =========================================================
-     * 修复后的 freeRegion()
-     *
-     * 原来的崩溃：
-     *
-     * ArrayIndexOutOfBoundsException:
-     * length=225; index=225
-     *
-     * 原因：
-     * bfsQueue 只有 225 个元素，
-     * 但 BFS 在某些情况下会继续写入第 226 个位置。
-     *
-     * 这里保证：
-     * 1. 每个格子只入队一次
-     * 2. index 永远在 0..224
-     * 3. tail 永远不会超过 bfsQueue.size
-     * =========================================================
-     */
     private fun freeRegion(
         body: ArrayDeque<P>
     ): Int {
@@ -2072,9 +2075,6 @@ class SnakeView @JvmOverloads constructor(
             false
         )
 
-        /*
-         * 标记蛇身体。
-         */
         for (p in body) {
 
             if (
@@ -2117,9 +2117,6 @@ class SnakeView @JvmOverloads constructor(
             return 0
         }
 
-        /*
-         * 蛇头作为搜索起点。
-         */
         bfsVisited[startIndex] =
             false
 
@@ -2152,11 +2149,6 @@ class SnakeView @JvmOverloads constructor(
 
             count++
 
-            /*
-             * 安全加入 BFS 队列。
-             *
-             * 每个格子只有第一次发现时才能进入。
-             */
             fun addNode(
                 index: Int
             ) {
@@ -2180,1430 +2172,3 @@ class SnakeView @JvmOverloads constructor(
                     tail <
                     bfsQueue.size
                 ) {
-
-                    bfsQueue[tail++] =
-                        index
-                }
-            }
-
-            // 左
-            if (
-                cx > 0
-            ) {
-
-                addNode(
-                    curr - 1
-                )
-            }
-
-            // 右
-            if (
-                cx < cols - 1
-            ) {
-
-                addNode(
-                    curr + 1
-                )
-            }
-
-            // 上
-            if (
-                cy > 0
-            ) {
-
-                addNode(
-                    curr - cols
-                )
-            }
-
-            // 下
-            if (
-                cy < rows - 1
-            ) {
-
-                addNode(
-                    curr + cols
-                )
-            }
-        }
-
-        return count
-    }
-
-    /*
-     * =========================================================
-     * 修复后的 distance()
-     *
-     * distance() 同样使用 bfsQueue，
-     * 因此一起做安全保护。
-     * =========================================================
-     */
-    private fun distance(
-        start: P,
-        target: P,
-        body: Collection<P>,
-        allowTail: Boolean
-    ): Int {
-
-        if (
-            start.x !in 0 until cols ||
-            start.y !in 0 until rows ||
-            target.x !in 0 until cols ||
-            target.y !in 0 until rows
-        ) {
-            return -1
-        }
-
-        if (
-            start == target
-        ) {
-            return 0
-        }
-
-        val total =
-            cols * rows
-
-        java.util.Arrays.fill(
-            bfsVisited,
-            false
-        )
-
-        /*
-         * 标记身体。
-         */
-        for (p in body) {
-
-            if (
-                p.x !in 0 until cols ||
-                p.y !in 0 until rows
-            ) {
-                continue
-            }
-
-            val index =
-                p.y * cols +
-                    p.x
-
-            if (
-                index in 0 until total
-            ) {
-
-                bfsVisited[index] =
-                    true
-            }
-        }
-
-        /*
-         * 尾巴允许作为通路。
-         */
-        if (
-            allowTail &&
-            body.isNotEmpty()
-        ) {
-
-            val last =
-                body.last()
-
-            if (
-                last.x in 0 until cols &&
-                last.y in 0 until rows
-            ) {
-
-                val lastIndex =
-                    last.y * cols +
-                        last.x
-
-                if (
-                    lastIndex in 0 until total
-                ) {
-
-                    bfsVisited[lastIndex] =
-                        false
-                }
-            }
-        }
-
-        val startIndex =
-            start.y * cols +
-                start.x
-
-        if (
-            startIndex !in 0 until total
-        ) {
-            return -1
-        }
-
-        bfsVisited[startIndex] =
-            false
-
-        var head = 0
-        var tail = 0
-
-        bfsQueue[tail++] =
-            startIndex
-
-        var dist = 0
-
-        while (
-            head < tail
-        ) {
-
-            val layerSize =
-                tail - head
-
-            repeat(layerSize) {
-
-                if (
-                    head >= tail
-                ) {
-                    return@repeat
-                }
-
-                val curr =
-                    bfsQueue[head++]
-
-                if (
-                    curr !in 0 until total
-                ) {
-                    return@repeat
-                }
-
-                val cx =
-                    curr % cols
-
-                val cy =
-                    curr / cols
-
-                if (
-                    cx == target.x &&
-                    cy == target.y
-                ) {
-
-                    return dist
-                }
-
-                fun addNode(
-                    index: Int
-                ) {
-
-                    if (
-                        index !in 0 until total
-                    ) {
-                        return
-                    }
-
-                    if (
-                        bfsVisited[index]
-                    ) {
-                        return
-                    }
-
-                    bfsVisited[index] =
-                        true
-
-                    if (
-                        tail <
-                        bfsQueue.size
-                    ) {
-
-                        bfsQueue[tail++] =
-                            index
-                    }
-                }
-
-                // 左
-                if (
-                    cx > 0
-                ) {
-
-                    addNode(
-                        curr - 1
-                    )
-                }
-
-                // 右
-                if (
-                    cx < cols - 1
-                ) {
-
-                    addNode(
-                        curr + 1
-                    )
-                }
-
-                // 上
-                if (
-                    cy > 0
-                ) {
-
-                    addNode(
-                        curr - cols
-                    )
-                }
-
-                // 下
-                if (
-                    cy < rows - 1
-                ) {
-
-                    addNode(
-                        curr + cols
-                    )
-                }
-            }
-
-            dist++
-        }
-
-        return -1
-    }
-
-    private fun countSafeMoves(
-        body: ArrayDeque<P>
-    ): Int {
-
-        if (body.isEmpty()) {
-            return 0
-        }
-
-        val h =
-            body.first()
-
-        return dirs.count { d ->
-
-            val nh =
-                P(
-                    h.x + d.x,
-                    h.y + d.y
-                )
-
-            inside(nh) &&
-                (
-                    !body.contains(nh) ||
-                        (
-                            nh ==
-                                body.last() &&
-                                nh != food
-                            )
-                    ) &&
-                !isReverse(
-                    d,
-                    directionOfFirst(body)
-                )
-        }
-    }
-
-    private fun tailReachable(
-        body: ArrayDeque<P>
-    ): Boolean {
-
-        if (body.isEmpty()) {
-            return false
-        }
-
-        val target =
-            body.last()
-
-        return distance(
-            body.first(),
-            target,
-            body,
-            true
-        ) >= 0
-    }
-
-    private fun calculateDanger(): Int {
-
-        val region =
-            freeRegion(snake)
-
-        val ratio =
-            region.toFloat() /
-                max(
-                    1,
-                    snake.size
-                )
-
-        val mobility =
-            countSafeMoves(snake)
-
-        return when {
-
-            mobility <= 0 ->
-                5
-
-            ratio < 1.5f ->
-                5
-
-            ratio < 2.2f ->
-                4
-
-            ratio < 3.5f ->
-                3
-
-            ratio < 5f ->
-                2
-
-            else ->
-                1
-        }
-    }
-
-    private fun hamIndex(
-        d: P
-    ): Int {
-
-        val h =
-            snake.first()
-
-        val next =
-            P(
-                h.x + d.x,
-                h.y + d.y
-            )
-
-        if (!inside(next)) {
-            return -1
-        }
-
-        return next.x * rows +
-            next.y
-    }
-
-    private fun placeFood() {
-
-        val free =
-            ArrayList<P>()
-
-        for (x in 0 until cols) {
-
-            for (y in 0 until rows) {
-
-                val p =
-                    P(
-                        x,
-                        y
-                    )
-
-                if (
-                    !snake.contains(p)
-                ) {
-
-                    free.add(p)
-                }
-            }
-        }
-
-        if (free.isNotEmpty()) {
-
-            food =
-                free[
-                    Random.nextInt(
-                        free.size
-                    )
-                ]
-        }
-    }
-
-    private fun spawnFoodEffect(
-        p: P
-    ) {
-
-        repeat(14) {
-
-            particles.add(
-                Particle(
-                    p.x.toFloat(),
-                    p.y.toFloat(),
-                    Random.nextFloat() -
-                        0.5f,
-                    Random.nextFloat() -
-                        0.5f,
-                    1f,
-                    Color.YELLOW
-                )
-            )
-        }
-
-        floats.add(
-            FloatText(
-                p.x.toFloat(),
-                p.y.toFloat(),
-                1f,
-                "+10"
-            )
-        )
-    }
-
-    private fun updateEffects(
-        dt: Float
-    ) {
-
-        flash =
-            max(
-                0f,
-                flash -
-                    dt * 0.035f
-            )
-
-        particles.forEach {
-
-            it.x +=
-                it.vx * dt
-
-            it.y +=
-                it.vy * dt
-
-            it.life -=
-                dt * 0.035f
-        }
-
-        particles.removeAll {
-            it.life <= 0f
-        }
-
-        floats.forEach {
-
-            it.y -=
-                dt * 0.04f
-
-            it.life -=
-                dt * 0.025f
-        }
-
-        floats.removeAll {
-            it.life <= 0f
-        }
-    }
-
-    override fun onSizeChanged(
-        w: Int,
-        h: Int,
-        oldw: Int,
-        oldh: Int
-    ) {
-
-        cell =
-            min(
-                w.toFloat() / cols,
-                h.toFloat() / rows
-            )
-
-        ox =
-            (w - cols * cell) /
-                2f
-
-        oy =
-            (h - rows * cell) /
-                2f
-    }
-
-    override fun onDraw(
-        c: Canvas
-    ) {
-
-        super.onDraw(c)
-
-        c.drawColor(
-            bgColor
-        )
-
-        gridPaint.color =
-            gridColor
-
-        gridPaint.style =
-            Paint.Style.STROKE
-
-        gridPaint.strokeWidth =
-            1f
-
-        for (i in 0..cols) {
-
-            c.drawLine(
-                ox + i * cell,
-                oy,
-                ox + i * cell,
-                oy + rows * cell,
-                gridPaint
-            )
-        }
-
-        for (i in 0..rows) {
-
-            c.drawLine(
-                ox,
-                oy + i * cell,
-                ox + cols * cell,
-                oy + i * cell,
-                gridPaint
-            )
-        }
-
-        drawFood(c)
-        drawSnake(c)
-        drawParticles(c)
-        drawDebug(c)
-
-        if (gameOver) {
-            drawGameOver(c)
-        }
-    }
-
-    private fun drawFood(
-        c: Canvas
-    ) {
-
-        val cx =
-            ox +
-                (food.x + 0.5f) *
-                cell
-
-        val cy =
-            oy +
-                (food.y + 0.5f) *
-                cell
-
-        foodPaint.color =
-            Color.argb(
-                90,
-                255,
-                80,
-                80
-            )
-
-        c.drawCircle(
-            cx,
-            cy,
-            cell * 0.38f,
-            foodPaint
-        )
-
-        foodPaint.color =
-            Color.RED
-
-        c.drawCircle(
-            cx,
-            cy,
-            cell * 0.22f,
-            foodPaint
-        )
-
-        foodPaint.color =
-            Color.WHITE
-
-        c.drawCircle(
-            cx,
-            cy,
-            cell * 0.07f,
-            foodPaint
-        )
-    }
-
-    private fun drawSnake(
-        c: Canvas
-    ) {
-
-        if (snake.isEmpty()) {
-            return
-        }
-
-        snakePaint.strokeWidth =
-            max(
-                8f,
-                cell * 0.62f
-            )
-
-        val list =
-            snake.toList()
-
-        for (
-            i in 0 until list.size - 1
-        ) {
-
-            val a =
-                list[i]
-
-            val b =
-                list[i + 1]
-
-            snakePaint.color =
-                if (rainbowSkin) {
-
-                    hsv[
-                        (
-                            i * 23 +
-                                score
-                            ) % 360
-                    ]
-
-                } else {
-
-                    bodyColor
-                }
-
-            c.drawLine(
-                ox +
-                    (a.x + 0.5f) *
-                    cell,
-
-                oy +
-                    (a.y + 0.5f) *
-                    cell,
-
-                ox +
-                    (b.x + 0.5f) *
-                    cell,
-
-                oy +
-                    (b.y + 0.5f) *
-                    cell,
-
-                snakePaint
-            )
-        }
-
-        val h =
-            snake.first()
-
-        headPaint.color =
-            headColor
-
-        c.drawCircle(
-            ox +
-                (h.x + 0.5f) *
-                cell,
-
-            oy +
-                (h.y + 0.5f) *
-                cell,
-
-            cell * 0.36f,
-
-            headPaint
-        )
-
-        val ex =
-            when {
-
-                dir.x > 0 ->
-                    0.12f
-
-                dir.x < 0 ->
-                    -0.12f
-
-                else ->
-                    0f
-            }
-
-        val ey =
-            when {
-
-                dir.y > 0 ->
-                    0.12f
-
-                dir.y < 0 ->
-                    -0.12f
-
-                else ->
-                    0f
-            }
-
-        paint.color =
-            Color.WHITE
-
-        c.drawCircle(
-            ox +
-                (h.x + 0.5f) *
-                cell +
-                cell *
-                (0.13f + ex),
-
-            oy +
-                (h.y + 0.5f) *
-                cell +
-                cell *
-                (0.13f + ey),
-
-            cell * 0.075f,
-
-            paint
-        )
-
-        c.drawCircle(
-            ox +
-                (h.x + 0.5f) *
-                cell -
-                cell *
-                (0.13f - ex),
-
-            oy +
-                (h.y + 0.5f) *
-                cell -
-                cell *
-                (0.13f - ey),
-
-            cell * 0.075f,
-
-            paint
-        )
-    }
-
-    private fun drawParticles(
-        c: Canvas
-    ) {
-
-        particles.forEach {
-
-            paint.color =
-                Color.argb(
-                    (
-                        it.life * 255
-                    )
-                        .toInt()
-                        .coerceIn(
-                            0,
-                            255
-                        ),
-
-                    Color.red(
-                        it.color
-                    ),
-
-                    Color.green(
-                        it.color
-                    ),
-
-                    Color.blue(
-                        it.color
-                    )
-                )
-
-            c.drawCircle(
-                ox +
-                    (it.x + 0.5f) *
-                    cell,
-
-                oy +
-                    (it.y + 0.5f) *
-                    cell,
-
-                max(
-                    2f,
-                    cell * 0.05f
-                ),
-
-                paint
-            )
-        }
-
-        text.textAlign =
-            Paint.Align.CENTER
-
-        text.textSize =
-            cell * 0.3f
-
-        floats.forEach {
-
-            text.color =
-                Color.argb(
-                    (
-                        it.life * 255
-                    )
-                        .toInt()
-                        .coerceIn(
-                            0,
-                            255
-                        ),
-                    255,
-                    215,
-                    0
-                )
-
-            c.drawText(
-                it.text,
-
-                ox +
-                    (it.x + 0.5f) *
-                    cell,
-
-                oy +
-                    (it.y + 0.3f) *
-                    cell,
-
-                text
-            )
-        }
-    }
-
-    private fun drawDebug(
-        c: Canvas
-    ) {
-
-        if (
-            aiMode == 0 &&
-            !gameOver
-        ) {
-            return
-        }
-
-        val w =
-            min(
-                width * 0.97f,
-                620f
-            )
-
-        val h =
-            if (gameOver)
-                300f
-            else
-                275f
-
-        val left =
-            (width - w) / 2f
-
-        val top =
-            if (gameOver) {
-
-                max(
-                    12f,
-                    height - h - 12f
-                )
-
-            } else {
-
-                12f
-            }
-
-        panel.color =
-            Color.argb(
-                220,
-                0,
-                0,
-                0
-            )
-
-        c.drawRoundRect(
-            left,
-            top,
-            left + w,
-            top + h,
-            22f,
-            22f,
-            panel
-        )
-
-        border.color =
-            when (ai.danger) {
-
-                1 ->
-                    Color.GREEN
-
-                2 ->
-                    Color.rgb(
-                        150,
-                        255,
-                        80
-                    )
-
-                3 ->
-                    Color.YELLOW
-
-                4 ->
-                    Color.rgb(
-                        255,
-                        150,
-                        0
-                    )
-
-                else ->
-                    Color.RED
-            }
-
-        border.style =
-            Paint.Style.STROKE
-
-        border.strokeWidth =
-            4f
-
-        c.drawRoundRect(
-            left,
-            top,
-            left + w,
-            top + h,
-            22f,
-            22f,
-            border
-        )
-
-        text.textAlign =
-            Paint.Align.LEFT
-
-        text.isFakeBoldText =
-            true
-
-        text.textSize =
-            20f
-
-        text.color =
-            Color.WHITE
-
-        c.drawText(
-            "🧠 AI  ${ai.strategy}",
-            left + 16f,
-            top + 30f,
-            text
-        )
-
-        text.isFakeBoldText =
-            false
-
-        text.textSize =
-            14f
-
-        text.color =
-            Color.YELLOW
-
-        c.drawText(
-            "正在判断：${ai.reason}",
-            left + 16f,
-            top + 54f,
-            text
-        )
-
-        text.color =
-            Color.WHITE
-
-        val dangerText =
-            "危险 " +
-                "●".repeat(
-                    ai.danger
-                ) +
-                "○".repeat(
-                    5 - ai.danger
-                )
-
-        c.drawText(
-            dangerText,
-            left + 16f,
-            top + 78f,
-            text
-        )
-
-        c.drawText(
-            "空间 ${ai.region}",
-            left + 180f,
-            top + 78f,
-            text
-        )
-
-        c.drawText(
-            "比例 ${
-                "%.1f".format(
-                    ai.spaceRatio
-                )
-            }",
-            left + 310f,
-            top + 78f,
-            text
-        )
-
-        val tailText =
-            if (
-                ai.tailReachable
-            )
-                "✓ 可达"
-            else
-                "✗ 不可达"
-
-        val foodText =
-            if (
-                ai.foodReachable
-            )
-                "✓ 可达"
-            else
-                "✗ 不可达"
-
-        val foodDistanceText =
-            if (
-                ai.foodDistance < 0
-            )
-                "∞"
-            else
-                ai.foodDistance.toString()
-
-        c.drawText(
-            "尾巴 $tailText",
-            left + 16f,
-            top + 102f,
-            text
-        )
-
-        c.drawText(
-            "食物 $foodText",
-            left + 180f,
-            top + 102f,
-            text
-        )
-
-        c.drawText(
-            "距离 $foodDistanceText",
-            left + 340f,
-            top + 102f,
-            text
-        )
-
-        c.drawText(
-            "长度 ${snake.size}",
-            left + 16f,
-            top + 126f,
-            text
-        )
-
-        c.drawText(
-            "饥饿 $hunger",
-            left + 160f,
-            top + 126f,
-            text
-        )
-
-        c.drawText(
-            "分数 $score",
-            left + 290f,
-            top + 126f,
-            text
-        )
-
-        c.drawText(
-            "学习局数 $totalGames",
-            left + 410f,
-            top + 126f,
-            text
-        )
-
-        c.drawText(
-            "探索深度 ${ai.depth}",
-            left + 16f,
-            top + 150f,
-            text
-        )
-
-        c.drawText(
-            "节点 ${ai.nodes}",
-            left + 180f,
-            top + 150f,
-            text
-        )
-
-        c.drawText(
-            "攻击 ${
-                "%.2f".format(
-                    aggression
-                )
-            }",
-            left + 310f,
-            top + 150f,
-            text
-        )
-
-        text.textSize =
-            13f
-
-        var x =
-            left + 16f
-
-        ai.candidates.forEach {
-
-            val label =
-                when (it.d) {
-
-                    P(0, -1) ->
-                        "↑"
-
-                    P(0, 1) ->
-                        "↓"
-
-                    P(-1, 0) ->
-                        "←"
-
-                    else ->
-                        "→"
-                }
-
-            text.color =
-                if (it.legal)
-                    Color.WHITE
-                else
-                    Color.GRAY
-
-            c.drawText(
-                "$label ${
-                    "%.0f".format(
-                        it.score
-                    )
-                }",
-                x,
-                top + 176f,
-                text
-            )
-
-            x +=
-                w / 4f
-        }
-
-        text.textSize =
-            14f
-
-        text.color =
-            Color.CYAN
-
-        c.drawText(
-            "选择 ${arrow(ai.chosen)}",
-            left + 16f,
-            top + 204f,
-            text
-        )
-
-        text.color =
-            Color.LTGRAY
-
-        c.drawText(
-            "死亡统计  W$deathWall  S$deathSelf  T$deathTrap",
-            left + 150f,
-            top + 204f,
-            text
-        )
-
-        text.textSize =
-            12f
-
-        text.color =
-            Color.rgb(
-                180,
-                220,
-                255
-            )
-
-        c.drawText(
-            "学习：Q/UCB + 多步前瞻",
-            left + 16f,
-            top + 228f,
-            text
-        )
-
-        c.drawText(
-            "饥饿 ≥ $autoBeamHunger 自动切 BEAM",
-            left + 230f,
-            top + 228f,
-            text
-        )
-
-        if (gameOver) {
-
-            text.color =
-                Color.RED
-
-            text.isFakeBoldText =
-                true
-
-            text.textSize =
-                17f
-
-            c.drawText(
-                "死亡原因：$deathCause",
-                left + 16f,
-                top + 256f,
-                text
-            )
-
-            text.isFakeBoldText =
-                false
-        }
-    }
-
-    private fun drawGameOver(
-        c: Canvas
-    ) {
-
-        paint.color =
-            Color.argb(
-                150,
-                0,
-                0,
-                0
-            )
-
-        c.drawRect(
-            0f,
-            0f,
-            width.toFloat(),
-            height.toFloat(),
-            paint
-        )
-
-        text.textAlign =
-            Paint.Align.CENTER
-
-        text.isFakeBoldText =
-            true
-
-        text.textSize =
-            30f
-
-        text.color =
-            Color.WHITE
-
-        c.drawText(
-            "GAME OVER",
-            width / 2f,
-            height / 2f - 45,
-            text
-        )
-
-        text.textSize =
-            15f
-
-        text.isFakeBoldText =
-            false
-
-        c.drawText(
-            "分数 $score   " +
-                "最高 $highScore   " +
-                "长度 ${snake.size}",
-            width / 2f,
-            height / 2f - 15,
-            text
-        )
-
-        text.color =
-            Color.YELLOW
-
-        c.drawText(
-            "点击屏幕重新开始",
-            width / 2f,
-            height / 2f + 20,
-            text
-        )
-
-        text.color =
-            Color.LTGRAY
-
-        text.textSize =
-            11f
-
-        c.drawText(
-            lastDeathInfo,
-            width / 2f,
-            height / 2f + 48,
-            text
-        )
-    }
-
-    private fun arrow(
-        p: P
-    ): String {
-
-        return when (p) {
-
-            P(0, -1) ->
-                "↑"
-
-            P(0, 1) ->
-                "↓"
-
-            P(-1, 0) ->
-                "←"
-
-            P(1, 0) ->
-                "→"
-
-            else ->
-                "·"
-        }
-    }
-
-    override fun onTouchEvent(
-        e: MotionEvent
-    ): Boolean {
-
-        if (
-            e.action !=
-            MotionEvent.ACTION_UP
-        ) {
-            return true
-        }
-
-        if (gameOver) {
-
-            reset()
-
-            return true
-        }
-
-        if (aiMode != 0) {
-            return true
-        }
-
-        if (snake.isEmpty()) {
-            return true
-        }
-
-        val dx =
-            e.x -
-                (
-                    ox +
-                        (
-                            snake.first().x +
-                                0.5f
-                            ) *
-                            cell
-                    )
-
-        val dy =
-            e.y -
-                (
-                    oy +
-                        (
-                            snake.first().y +
-                                0.5f
-                            ) *
-                            cell
-                    )
-
-        val d =
-            if (
-                abs(dx) >
-                abs(dy)
-            ) {
-
-                P(
-                    if (dx > 0)
-                        1
-                    else
-                        -1,
-                    0
-                )
-
-            } else {
-
-                P(
-                    0,
-                    if (dy > 0)
-                        1
-                    else
-                        -1
-                )
-            }
-
-        if (
-            !isReverse(
-                d,
-                dir
-            )
-        ) {
-
-            queue.add(d)
-        }
-
-        return true
-    }
-}
