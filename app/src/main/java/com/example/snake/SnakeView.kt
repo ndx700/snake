@@ -121,21 +121,17 @@ class SnakeView @JvmOverloads constructor(
     private var deathTrap = 0
     private var totalGames = 0
 
-    private val q = Array(20) { FloatArray(5) }
-    private val n = Array(20) { IntArray(5) }
+    private val q = Array(20) {
+        FloatArray(5)
+    }
+
+    private val n = Array(20) {
+        IntArray(5)
+    }
 
     private var lastState = -1
     private var lastAction = -1
     private var steps = 0
-
-    /*
-     * 如果程序发生运行时异常，这里保存错误信息。
-     * 不让整个 App 直接闪退，而是在画面上显示。
-     */
-    private var runtimeError = false
-    private var runtimeErrorTitle = ""
-    private var runtimeErrorMessage = ""
-    private var runtimeErrorStack = ""
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
@@ -148,28 +144,48 @@ class SnakeView @JvmOverloads constructor(
 
     private val vibrator: Vibrator? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+
             (
                 context.getSystemService(
                     Context.VIBRATOR_MANAGER_SERVICE
                 ) as? VibratorManager
             )?.defaultVibrator
+
         } else {
+
             @Suppress("DEPRECATION")
+
             context.getSystemService(
                 Context.VIBRATOR_SERVICE
             ) as? Vibrator
         }
 
-    private var bodyColor = Color.rgb(46, 204, 113)
-    private var headColor = Color.rgb(39, 174, 96)
+    private var bodyColor =
+        Color.rgb(
+            46,
+            204,
+            113
+        )
 
-    private var bgColor = Color.BLACK
-    private var gridColor = Color.CYAN
+    private var headColor =
+        Color.rgb(
+            39,
+            174,
+            96
+        )
 
-    private var rainbowSkin = false
+    private var bgColor =
+        Color.BLACK
+
+    private var gridColor =
+        Color.CYAN
+
+    private var rainbowSkin =
+        false
 
     private val hsv =
         IntArray(360) {
+
             Color.HSVToColor(
                 floatArrayOf(
                     it.toFloat(),
@@ -179,8 +195,11 @@ class SnakeView @JvmOverloads constructor(
             )
         }
 
-    private val particles = mutableListOf<Particle>()
-    private val floats = mutableListOf<FloatText>()
+    private val particles =
+        mutableListOf<Particle>()
+
+    private val floats =
+        mutableListOf<FloatText>()
 
     private val paint =
         Paint(Paint.ANTI_ALIAS_FLAG)
@@ -209,78 +228,67 @@ class SnakeView @JvmOverloads constructor(
     private var flash = 0f
 
     private val bfsVisited =
-        BooleanArray(cols * rows)
+        BooleanArray(
+            cols * rows
+        )
 
     private val bfsQueue =
-        IntArray(cols * rows)
+        IntArray(
+            cols * rows
+        )
 
     private var beamNodes = 0
-
-    /*
-     * 防止 BEAM 一次计算太多。
-     * 原来最多会产生大量节点。
-     */
-    private val maxBeamNodes = 120
 
     private val frame =
         object : Choreographer.FrameCallback {
 
-            override fun doFrame(ns: Long) {
+            override fun doFrame(
+                ns: Long
+            ) {
 
-                if (!running) return
-
-                try {
-
-                    if (lastFrame == 0L) {
-                        lastFrame = ns
-                    }
-
-                    val dt =
-                        ((ns - lastFrame) / 1_000_000L)
-                            .coerceAtMost(100L)
-
-                    lastFrame = ns
-                    accumulator += dt
-
-                    /*
-                     * 防止某一帧因为卡顿积累大量 updateGame。
-                     */
-                    var updates = 0
-
-                    while (
-                        accumulator >= gameSpeed &&
-                        updates < 3
-                    ) {
-                        updateGame()
-                        accumulator -= gameSpeed
-                        updates++
-                    }
-
-                    /*
-                     * 如果因为卡顿积累特别多时间，
-                     * 直接丢掉多余时间，避免死循环。
-                     */
-                    if (accumulator > gameSpeed * 3) {
-                        accumulator = gameSpeed
-                    }
-
-                    updateEffects(
-                        dt / 16f
-                    )
-
-                    invalidate()
-
-                    if (running) {
-                        Choreographer
-                            .getInstance()
-                            .postFrameCallback(this)
-                    }
-
-                } catch (e: Throwable) {
-
-                    handleRuntimeError(e)
-
+                if (!running) {
+                    return
                 }
+
+                if (lastFrame == 0L) {
+                    lastFrame = ns
+                }
+
+                val dt =
+                    (
+                        (
+                            ns -
+                                lastFrame
+                            ) /
+                            1_000_000L
+                        )
+                        .coerceAtMost(100L)
+
+                lastFrame = ns
+
+                accumulator += dt
+
+                while (
+                    accumulator >= gameSpeed
+                ) {
+
+                    updateGame()
+
+                    accumulator -=
+                        gameSpeed
+                }
+
+                updateEffects(
+                    dt / 16f
+                )
+
+                invalidate()
+
+                Choreographer
+                    .getInstance()
+                    .postFrameCallback(
+                        this
+                    )
             }
         }
 
@@ -341,6 +349,7 @@ class SnakeView @JvmOverloads constructor(
             )
 
         for (s in 0 until 20) {
+
             for (a in 0 until 5) {
 
                 q[s][a] =
@@ -359,66 +368,28 @@ class SnakeView @JvmOverloads constructor(
 
         updateCurrentSkin()
         updateCurrentBoard()
+
         reset()
-    }
-
-    private fun handleRuntimeError(
-        e: Throwable
-    ) {
-
-        running = false
-
-        runtimeError = true
-
-        runtimeErrorTitle =
-            e.javaClass.simpleName.ifBlank {
-                "UnknownException"
-            }
-
-        runtimeErrorMessage =
-            e.message ?: "没有错误描述"
-
-        val trace =
-            e.stackTraceToString()
-
-        runtimeErrorStack =
-            trace.take(1800)
-
-        try {
-            Choreographer
-                .getInstance()
-                .removeFrameCallback(frame)
-        } catch (_: Throwable) {
-        }
-
-        invalidate()
     }
 
     fun getAIMode(): Int {
         return aiMode
     }
 
-    fun setAIMode(m: Int) {
+    fun setAIMode(
+        m: Int
+    ) {
 
-        aiMode =
-            m.coerceIn(0, 1)
-
-        runtimeError = false
-        runtimeErrorTitle = ""
-        runtimeErrorMessage = ""
-        runtimeErrorStack = ""
+        aiMode = m
 
         reset()
     }
 
-    fun setForcedStrategy(s: Int) {
+    fun setForcedStrategy(
+        s: Int
+    ) {
 
         forcedStrategy = s
-
-        runtimeError = false
-        runtimeErrorTitle = ""
-        runtimeErrorMessage = ""
-        runtimeErrorStack = ""
 
         invalidate()
     }
@@ -433,38 +404,75 @@ class SnakeView @JvmOverloads constructor(
         ) {
 
             "blue" -> {
+
                 setSnakeColors(
-                    Color.rgb(52, 152, 219),
-                    Color.rgb(41, 128, 185),
+                    Color.rgb(
+                        52,
+                        152,
+                        219
+                    ),
+                    Color.rgb(
+                        41,
+                        128,
+                        185
+                    ),
                     false
                 )
             }
 
             "red" -> {
+
                 setSnakeColors(
-                    Color.rgb(231, 76, 60),
-                    Color.rgb(192, 57, 43),
+                    Color.rgb(
+                        231,
+                        76,
+                        60
+                    ),
+                    Color.rgb(
+                        192,
+                        57,
+                        43
+                    ),
                     false
                 )
             }
 
             "purple" -> {
+
                 setSnakeColors(
-                    Color.rgb(155, 89, 182),
-                    Color.rgb(142, 68, 173),
+                    Color.rgb(
+                        155,
+                        89,
+                        182
+                    ),
+                    Color.rgb(
+                        142,
+                        68,
+                        173
+                    ),
                     false
                 )
             }
 
             "gold" -> {
+
                 setSnakeColors(
-                    Color.rgb(241, 196, 15),
-                    Color.rgb(243, 156, 18),
+                    Color.rgb(
+                        241,
+                        196,
+                        15
+                    ),
+                    Color.rgb(
+                        243,
+                        156,
+                        18
+                    ),
                     false
                 )
             }
 
             "rainbow" -> {
+
                 setSnakeColors(
                     Color.WHITE,
                     Color.WHITE,
@@ -473,9 +481,18 @@ class SnakeView @JvmOverloads constructor(
             }
 
             else -> {
+
                 setSnakeColors(
-                    Color.rgb(46, 204, 113),
-                    Color.rgb(39, 174, 96),
+                    Color.rgb(
+                        46,
+                        204,
+                        113
+                    ),
+                    Color.rgb(
+                        39,
+                        174,
+                        96
+                    ),
                     false
                 )
             }
@@ -495,9 +512,15 @@ class SnakeView @JvmOverloads constructor(
         rainbowSkin = rainbow
 
         snakePaint.color = body
-        snakePaint.style = Paint.Style.STROKE
-        snakePaint.strokeCap = Paint.Cap.ROUND
-        snakePaint.strokeJoin = Paint.Join.ROUND
+        snakePaint.style =
+            Paint.Style.STROKE
+
+        snakePaint.strokeCap =
+            Paint.Cap.ROUND
+
+        snakePaint.strokeJoin =
+            Paint.Join.ROUND
+
         snakePaint.strokeWidth = 0f
 
         headPaint.color = head
@@ -513,57 +536,81 @@ class SnakeView @JvmOverloads constructor(
         ) {
 
             "light" -> {
-                bgColor = Color.rgb(
-                    240,
-                    240,
-                    240
-                )
-                gridColor = Color.rgb(
-                    200,
-                    200,
-                    200
-                )
+
+                bgColor =
+                    Color.rgb(
+                        240,
+                        240,
+                        240
+                    )
+
+                gridColor =
+                    Color.rgb(
+                        200,
+                        200,
+                        200
+                    )
             }
 
             "neon" -> {
-                bgColor = Color.rgb(
-                    10,
-                    25,
-                    47
-                )
-                gridColor = Color.CYAN
+
+                bgColor =
+                    Color.rgb(
+                        10,
+                        25,
+                        47
+                    )
+
+                gridColor =
+                    Color.CYAN
             }
 
             "forest" -> {
-                bgColor = Color.rgb(
-                    27,
-                    46,
-                    26
-                )
-                gridColor = Color.rgb(
-                    46,
-                    74,
-                    45
-                )
+
+                bgColor =
+                    Color.rgb(
+                        27,
+                        46,
+                        26
+                    )
+
+                gridColor =
+                    Color.rgb(
+                        46,
+                        74,
+                        45
+                    )
             }
 
             "cyberpunk" -> {
-                bgColor = Color.rgb(
-                    43,
-                    15,
-                    59
-                )
-                gridColor = Color.MAGENTA
+
+                bgColor =
+                    Color.rgb(
+                        43,
+                        15,
+                        59
+                    )
+
+                gridColor =
+                    Color.MAGENTA
             }
 
             "rainbow_board" -> {
-                bgColor = Color.BLACK
-                gridColor = Color.WHITE
+
+                bgColor =
+                    Color.BLACK
+
+                gridColor =
+                    Color.WHITE
             }
 
             else -> {
-                bgColor = Color.BLACK
-                gridColor = Color.CYAN
+
+                bgColor =
+                    Color.BLACK
+
+                gridColor =
+                    Color.CYAN
             }
         }
 
@@ -572,27 +619,38 @@ class SnakeView @JvmOverloads constructor(
 
     fun reset() {
 
-        runtimeError = false
-        runtimeErrorTitle = ""
-        runtimeErrorMessage = ""
-        runtimeErrorStack = ""
-
         snake.clear()
         queue.clear()
 
         if (aiMode == 2) {
+
             snake.add(
-                P(0, 0)
+                P(
+                    0,
+                    0
+                )
             )
-            dir = P(0, 1)
+
+            dir =
+                P(
+                    0,
+                    1
+                )
+
         } else {
+
             snake.add(
                 P(
                     cols / 2,
                     rows / 2
                 )
             )
-            dir = P(1, 0)
+
+            dir =
+                P(
+                    1,
+                    0
+                )
         }
 
         score = 0
@@ -613,24 +671,23 @@ class SnakeView @JvmOverloads constructor(
 
         flash = 0f
 
-        beamNodes = 0
-
-        ai = Snapshot(
-            chosen = dir
-        )
+        ai =
+            Snapshot(
+                chosen = dir
+            )
 
         placeFood()
 
-        onScoreChanged?.invoke(score)
+        onScoreChanged?.invoke(
+            score
+        )
 
         invalidate()
     }
 
     fun resume() {
 
-        if (running) return
-
-        if (runtimeError) {
+        if (running) {
             return
         }
 
@@ -639,7 +696,9 @@ class SnakeView @JvmOverloads constructor(
 
         Choreographer
             .getInstance()
-            .postFrameCallback(frame)
+            .postFrameCallback(
+                frame
+            )
     }
 
     fun pause() {
@@ -648,32 +707,27 @@ class SnakeView @JvmOverloads constructor(
 
         Choreographer
             .getInstance()
-            .removeFrameCallback(frame)
+            .removeFrameCallback(
+                frame
+            )
     }
 
     private fun updateGame() {
 
-        if (gameOver) return
-
-        if (snake.isEmpty()) {
-            reset()
+        if (gameOver) {
             return
         }
 
         if (aiMode != 0) {
 
             val chosen =
-                try {
-                    chooseMove()
-                } catch (e: Throwable) {
-
-                    handleRuntimeError(e)
-
-                    return
-                }
+                chooseMove()
 
             queue.clear()
-            queue.add(chosen)
+
+            queue.add(
+                chosen
+            )
         }
 
         if (queue.isNotEmpty()) {
@@ -686,21 +740,38 @@ class SnakeView @JvmOverloads constructor(
                     requested,
                     dir
                 ) &&
-                legalDirection(requested)
+                legalDirection(
+                    requested
+                )
             ) {
+
                 dir = requested
             }
         }
 
-        if (dir == P(0, 0)) return
+        if (
+            dir ==
+            P(
+                0,
+                0
+            )
+        ) {
+            return
+        }
 
-        val nh = P(
-            snake.first().x + dir.x,
-            snake.first().y + dir.y
-        )
+        val nh =
+            P(
+                snake.first().x +
+                    dir.x,
+
+                snake.first().y +
+                    dir.y
+            )
 
         if (!inside(nh)) {
+
             die("WALL")
+
             return
         }
 
@@ -718,7 +789,10 @@ class SnakeView @JvmOverloads constructor(
 
         if (
             hitIndex >= 0 &&
-            !(nh == tail && !ate)
+            !(
+                nh == tail &&
+                    !ate
+                )
         ) {
 
             val simulated =
@@ -742,8 +816,11 @@ class SnakeView @JvmOverloads constructor(
                         ).toInt()
                 )
             ) {
+
                 die("TRAP")
+
             } else {
+
                 die("SELF")
             }
 
@@ -755,19 +832,24 @@ class SnakeView @JvmOverloads constructor(
         if (ate) {
 
             score +=
-                10 + min(
-                    combo,
-                    20
-                )
+                10 +
+                    min(
+                        combo,
+                        20
+                    )
 
             combo++
 
             hunger = 0
             money++
 
-            if (score > highScore) {
+            if (
+                score >
+                highScore
+            ) {
 
-                highScore = score
+                highScore =
+                    score
 
                 prefs.edit()
                     .putInt(
@@ -777,8 +859,13 @@ class SnakeView @JvmOverloads constructor(
                     .apply()
             }
 
-            onScoreChanged?.invoke(score)
-            onMoneyChanged?.invoke(money)
+            onScoreChanged?.invoke(
+                score
+            )
+
+            onMoneyChanged?.invoke(
+                money
+            )
 
             prefs.edit()
                 .putInt(
@@ -789,7 +876,8 @@ class SnakeView @JvmOverloads constructor(
 
             learn(
                 2.5f +
-                    combo * 0.05f
+                    combo *
+                    0.05f
             )
 
             spawnFoodEffect(nh)
@@ -800,7 +888,9 @@ class SnakeView @JvmOverloads constructor(
                 max(
                     65L,
                     150L -
-                        (snake.size / 8) * 5L
+                        (
+                            snake.size / 8
+                            ) * 5L
                 )
 
         } else {
@@ -815,7 +905,9 @@ class SnakeView @JvmOverloads constructor(
                     combo - 1
                 )
 
-            learn(0.025f)
+            learn(
+                0.025f
+            )
         }
 
         steps++
@@ -835,14 +927,16 @@ class SnakeView @JvmOverloads constructor(
 
         if (legal.isEmpty()) {
 
-            ai = Snapshot(
-                strategy = "NO MOVE",
-                reason =
-                    "四个方向都无法安全前进",
-                danger = 5,
-                chosen = dir,
-                candidates = candidates
-            )
+            ai =
+                Snapshot(
+                    strategy = "NO MOVE",
+                    reason =
+                        "四个方向都无法安全前进",
+                    danger = 5,
+                    chosen = dir,
+                    candidates =
+                        candidates
+                )
 
             return dir
         }
@@ -882,15 +976,20 @@ class SnakeView @JvmOverloads constructor(
 
                 else ->
                     beamBest(legal)
-            }
-                ?: legal.first()
+
+            } ?: legal.first()
 
         val final =
-            if (forcedStrategy >= 0) {
+            if (
+                forcedStrategy >= 0
+            ) {
 
                 val fs =
                     forcedStrategy
-                        .coerceIn(0, 4)
+                        .coerceIn(
+                            0,
+                            4
+                        )
 
                 when (fs) {
 
@@ -918,6 +1017,7 @@ class SnakeView @JvmOverloads constructor(
                 } ?: scored
 
             } else {
+
                 scored
             }
 
@@ -940,61 +1040,65 @@ class SnakeView @JvmOverloads constructor(
                 true
             )
 
-        ai = Snapshot(
+        ai =
+            Snapshot(
 
-            strategy =
-                strategyName(
-                    if (forcedStrategy >= 0)
-                        forcedStrategy
-                    else
-                        strategy
-                ),
-
-            reason =
-                reasonFor(
-                    final,
-                    strategy,
-                    danger
-                ),
-
-            danger = danger,
-
-            region = region,
-
-            spaceRatio =
-                region.toFloat() /
-                    max(
-                        1,
-                        snake.size
+                strategy =
+                    strategyName(
+                        if (
+                            forcedStrategy >= 0
+                        )
+                            forcedStrategy
+                        else
+                            strategy
                     ),
 
-            tailReachable =
-                tailReachable(snake),
+                reason =
+                    reasonFor(
+                        final,
+                        strategy,
+                        danger
+                    ),
 
-            foodReachable =
-                foodDistance >= 0,
+                danger = danger,
 
-            foodDistance =
-                foodDistance,
+                region = region,
 
-            hunger = hunger,
+                spaceRatio =
+                    region.toFloat() /
+                        max(
+                            1,
+                            snake.size
+                        ),
 
-            chosen = final.d,
+                tailReachable =
+                    tailReachable(snake),
 
-            candidates = candidates,
+                foodReachable =
+                    foodDistance >= 0,
 
-            depth =
-                if (strategy == 3)
-                    4
-                else
-                    2,
+                foodDistance =
+                    foodDistance,
 
-            nodes =
-                if (strategy == 3)
-                    beamNodes
-                else
-                    candidates.size
-        )
+                hunger = hunger,
+
+                chosen = final.d,
+
+                candidates =
+                    candidates,
+
+                depth =
+                    if (strategy == 3)
+                        4
+                    else
+                        2,
+
+                nodes =
+                    if (strategy == 3)
+                        beamNodes
+                    else
+                        candidates.size
+            )
 
         return final.d
     }
@@ -1003,7 +1107,9 @@ class SnakeView @JvmOverloads constructor(
         d: P
     ): Candidate {
 
-        if (!legalDirection(d)) {
+        if (
+            !legalDirection(d)
+        ) {
 
             return Candidate(
                 d,
@@ -1050,23 +1156,32 @@ class SnakeView @JvmOverloads constructor(
                 mobility * 35f
 
         if (tail) {
+
             s += 180f
+
         } else {
+
             s -= 250f
         }
 
         if (foodDist >= 0) {
+
             s +=
                 aggression *
                     (
                         300f /
-                            (foodDist + 1)
+                            (
+                                foodDist + 1
+                                )
                         )
+
         } else {
+
             s -= 450f
         }
 
         if (ate) {
+
             s +=
                 850f *
                     aggression
@@ -1095,12 +1210,14 @@ class SnakeView @JvmOverloads constructor(
         val spacePenalty =
             max(
                 0f,
-                snake.size * safetyMargin -
+                snake.size *
+                    safetyMargin -
                     region.toFloat()
             )
 
         s -=
-            spacePenalty * 30f
+            spacePenalty *
+                30f
 
         val reason =
             when {
@@ -1147,8 +1264,11 @@ class SnakeView @JvmOverloads constructor(
                     ).body
                 )
             ) {
+
                 350f
+
             } else {
+
                 -500f
             }
     }
@@ -1165,9 +1285,12 @@ class SnakeView @JvmOverloads constructor(
 
         return c.score +
             if (next) {
+
                 140f *
                     shortcutBonus
+
             } else {
+
                 -80f
             }
     }
@@ -1212,22 +1335,17 @@ class SnakeView @JvmOverloads constructor(
 
         repeat(3) {
 
-            if (layer.isEmpty()) {
-                return@repeat
-            }
-
             val next =
                 ArrayList<Node>()
 
             for (nod in layer) {
 
-                if (beamNodes >= maxBeamNodes) {
-                    break
-                }
-
                 beamNodes++
 
-                if (nod.score > bestScore) {
+                if (
+                    nod.score >
+                    bestScore
+                ) {
 
                     bestScore =
                         nod.score
@@ -1240,10 +1358,6 @@ class SnakeView @JvmOverloads constructor(
                 }
 
                 for (d in dirs) {
-
-                    if (beamNodes >= maxBeamNodes) {
-                        break
-                    }
 
                     if (
                         isReverse(
@@ -1298,9 +1412,12 @@ class SnakeView @JvmOverloads constructor(
                                 -140f
 
                     if (fd >= 0) {
+
                         sc +=
                             100f /
-                                (fd + 1)
+                                (
+                                    fd + 1
+                                    )
                     }
 
                     if (sm.ate) {
@@ -1323,7 +1440,7 @@ class SnakeView @JvmOverloads constructor(
                     .sortedByDescending {
                         it.score
                     }
-                    .take(6)
+                    .take(8)
         }
 
         return best
@@ -1334,11 +1451,17 @@ class SnakeView @JvmOverloads constructor(
         danger: Int
     ): Int {
 
-        if (forcedStrategy >= 0) {
+        if (
+            forcedStrategy >= 0
+        ) {
 
             return forcedStrategy
-                .coerceIn(0, 4)
+                .coerceIn(
+                    0,
+                    4
+                )
                 .let {
+
                     if (it == 4)
                         3
                     else
@@ -1361,7 +1484,9 @@ class SnakeView @JvmOverloads constructor(
         val prior =
             floatArrayOf(
 
-                if (snake.size < 35)
+                if (
+                    snake.size < 35
+                )
                     1.2f +
                         hungerBias
                 else
@@ -1370,12 +1495,16 @@ class SnakeView @JvmOverloads constructor(
                 1f +
                     dangerBias,
 
-                if (snake.size >= 35)
+                if (
+                    snake.size >= 35
+                )
                     1.8f
                 else
                     0.4f,
 
-                if (snake.size < 100)
+                if (
+                    snake.size < 100
+                )
                     1.3f
                 else
                     0.7f,
@@ -1395,9 +1524,12 @@ class SnakeView @JvmOverloads constructor(
                     q[state][a]
 
             val ucb =
-                bonus + prior[a]
+                bonus +
+                    prior[a]
 
-            if (ucb > value) {
+            if (
+                ucb > value
+            ) {
 
                 value = ucb
                 best = a
@@ -1429,8 +1561,12 @@ class SnakeView @JvmOverloads constructor(
             }
 
         return stage * 5 +
-            (danger - 1)
-                .coerceIn(0, 4)
+            (
+                danger - 1
+            ).coerceIn(
+                0,
+                4
+            )
     }
 
     private fun learn(
@@ -1447,14 +1583,6 @@ class SnakeView @JvmOverloads constructor(
         val s = lastState
         val a = lastAction
 
-        if (s !in 0 until 20) {
-            return
-        }
-
-        if (a !in 0 until 5) {
-            return
-        }
-
         val alpha =
             when {
 
@@ -1470,13 +1598,16 @@ class SnakeView @JvmOverloads constructor(
 
         q[s][a] +=
             alpha *
-                (reward - q[s][a])
+                (
+                    reward -
+                        q[s][a]
+                    )
 
         n[s][a]++
 
-        steps++
-
-        if (steps % 20 == 0) {
+        if (
+            ++steps % 20 == 0
+        ) {
             saveLearning()
         }
     }
@@ -1547,17 +1678,23 @@ class SnakeView @JvmOverloads constructor(
         when (cause) {
 
             "WALL" -> {
+
                 deathWall++
+
                 learn(-6f)
             }
 
             "SELF" -> {
+
                 deathSelf++
+
                 learn(-7f)
             }
 
             else -> {
+
                 deathTrap++
+
                 learn(-8f)
             }
         }
@@ -1586,7 +1723,9 @@ class SnakeView @JvmOverloads constructor(
                     )
             }
 
-        if (cause == "TRAP") {
+        if (
+            cause == "TRAP"
+        ) {
 
             safetyMargin =
                 min(
@@ -1606,25 +1745,22 @@ class SnakeView @JvmOverloads constructor(
 
         vibrator?.let {
 
-            try {
+            if (
+                Build.VERSION.SDK_INT >= 26
+            ) {
 
-                if (Build.VERSION.SDK_INT >= 26) {
-
-                    it.vibrate(
-                        VibrationEffect.createOneShot(
-                            120,
-                            VibrationEffect.DEFAULT_AMPLITUDE
-                        )
+                it.vibrate(
+                    VibrationEffect.createOneShot(
+                        120,
+                        VibrationEffect.DEFAULT_AMPLITUDE
                     )
+                )
 
-                } else {
+            } else {
 
-                    @Suppress("DEPRECATION")
-                    it.vibrate(120)
-                }
+                @Suppress("DEPRECATION")
 
-            } catch (_: Throwable) {
-                // 某些设备没有正常振动服务时忽略
+                it.vibrate(120)
             }
         }
 
@@ -1708,6 +1844,7 @@ class SnakeView @JvmOverloads constructor(
             ArrayDeque(src)
 
         if (b.isEmpty()) {
+
             return Sim(
                 b,
                 false
@@ -1716,11 +1853,15 @@ class SnakeView @JvmOverloads constructor(
 
         val nh =
             P(
-                b.first().x + d.x,
-                b.first().y + d.y
+                b.first().x +
+                    d.x,
+
+                b.first().y +
+                    d.y
             )
 
         if (!inside(nh)) {
+
             return Sim(
                 b,
                 false
@@ -1732,7 +1873,10 @@ class SnakeView @JvmOverloads constructor(
 
         if (
             b.contains(nh) &&
-            !(nh == b.last() && !ate)
+            !(
+                nh == b.last() &&
+                    !ate
+                )
         ) {
 
             return Sim(
@@ -1789,8 +1933,15 @@ class SnakeView @JvmOverloads constructor(
         d: P
     ): Boolean {
 
-        return d != P(0, 0) &&
-            !isReverse(d, dir) &&
+        return d !=
+            P(
+                0,
+                0
+            ) &&
+            !isReverse(
+                d,
+                dir
+            ) &&
             canSim(
                 snake,
                 d
@@ -1846,22 +1997,18 @@ class SnakeView @JvmOverloads constructor(
 
         for (p in body) {
 
-            if (inside(p)) {
-                bfsVisited[
-                    p.y * cols + p.x
-                ] = true
-            }
+            bfsVisited[
+                p.y * cols +
+                    p.x
+            ] = true
         }
 
         val start =
             body.first()
 
-        if (!inside(start)) {
-            return 0
-        }
-
         bfsVisited[
-            start.y * cols + start.x
+            start.y * cols +
+                start.x
         ] = false
 
         var head = 0
@@ -1874,8 +2021,7 @@ class SnakeView @JvmOverloads constructor(
         var count = 0
 
         while (
-            head < tail &&
-            tail <= bfsQueue.size
+            head < tail
         ) {
 
             val curr =
@@ -1894,28 +2040,34 @@ class SnakeView @JvmOverloads constructor(
                 val nx =
                     curr - 1
 
-                if (!bfsVisited[nx]) {
+                if (
+                    !bfsVisited[nx]
+                ) {
 
-                    bfsVisited[nx] = true
+                    bfsVisited[nx] =
+                        true
 
-                    if (tail < bfsQueue.size) {
-                        bfsQueue[tail++] = nx
-                    }
+                    bfsQueue[tail++] =
+                        nx
                 }
             }
 
-            if (cx < cols - 1) {
+            if (
+                cx < cols - 1
+            ) {
 
                 val nx =
                     curr + 1
 
-                if (!bfsVisited[nx]) {
+                if (
+                    !bfsVisited[nx]
+                ) {
 
-                    bfsVisited[nx] = true
+                    bfsVisited[nx] =
+                        true
 
-                    if (tail < bfsQueue.size) {
-                        bfsQueue[tail++] = nx
-                    }
+                    bfsQueue[tail++] =
+                        nx
                 }
             }
 
@@ -1924,28 +2076,34 @@ class SnakeView @JvmOverloads constructor(
                 val nx =
                     curr - cols
 
-                if (!bfsVisited[nx]) {
+                if (
+                    !bfsVisited[nx]
+                ) {
 
-                    bfsVisited[nx] = true
+                    bfsVisited[nx] =
+                        true
 
-                    if (tail < bfsQueue.size) {
-                        bfsQueue[tail++] = nx
-                    }
+                    bfsQueue[tail++] =
+                        nx
                 }
             }
 
-            if (cy < rows - 1) {
+            if (
+                cy < rows - 1
+            ) {
 
                 val nx =
                     curr + cols
 
-                if (!bfsVisited[nx]) {
+                if (
+                    !bfsVisited[nx]
+                ) {
 
-                    bfsVisited[nx] = true
+                    bfsVisited[nx] =
+                        true
 
-                    if (tail < bfsQueue.size) {
-                        bfsQueue[tail++] = nx
-                    }
+                    bfsQueue[tail++] =
+                        nx
                 }
             }
         }
@@ -1976,7 +2134,8 @@ class SnakeView @JvmOverloads constructor(
                 (
                     !body.contains(nh) ||
                         (
-                            nh == body.last() &&
+                            nh ==
+                                body.last() &&
                                 nh != food
                             )
                     ) &&
@@ -2013,10 +2172,6 @@ class SnakeView @JvmOverloads constructor(
         allowTail: Boolean
     ): Int {
 
-        if (!inside(start) || !inside(target)) {
-            return -1
-        }
-
         if (start == target) {
             return 0
         }
@@ -2028,11 +2183,10 @@ class SnakeView @JvmOverloads constructor(
 
         for (p in body) {
 
-            if (inside(p)) {
-                bfsVisited[
-                    p.y * cols + p.x
-                ] = true
-            }
+            bfsVisited[
+                p.y * cols +
+                    p.x
+            ] = true
         }
 
         if (
@@ -2043,15 +2197,15 @@ class SnakeView @JvmOverloads constructor(
             val last =
                 body.last()
 
-            if (inside(last)) {
-                bfsVisited[
-                    last.y * cols + last.x
-                ] = false
-            }
+            bfsVisited[
+                last.y * cols +
+                    last.x
+            ] = false
         }
 
         bfsVisited[
-            start.y * cols + start.x
+            start.y * cols +
+                start.x
         ] = false
 
         var head = 0
@@ -2063,16 +2217,14 @@ class SnakeView @JvmOverloads constructor(
 
         var dist = 0
 
-        while (head < tail) {
+        while (
+            head < tail
+        ) {
 
             val layerSize =
                 tail - head
 
             repeat(layerSize) {
-
-                if (head >= bfsQueue.size) {
-                    return@repeat
-                }
 
                 val curr =
                     bfsQueue[head++]
@@ -2087,6 +2239,7 @@ class SnakeView @JvmOverloads constructor(
                     cx == target.x &&
                     cy == target.y
                 ) {
+
                     return dist
                 }
 
@@ -2095,28 +2248,34 @@ class SnakeView @JvmOverloads constructor(
                     val nx =
                         curr - 1
 
-                    if (!bfsVisited[nx]) {
+                    if (
+                        !bfsVisited[nx]
+                    ) {
 
-                        bfsVisited[nx] = true
+                        bfsVisited[nx] =
+                            true
 
-                        if (tail < bfsQueue.size) {
-                            bfsQueue[tail++] = nx
-                        }
+                        bfsQueue[tail++] =
+                            nx
                     }
                 }
 
-                if (cx < cols - 1) {
+                if (
+                    cx < cols - 1
+                ) {
 
                     val nx =
                         curr + 1
 
-                    if (!bfsVisited[nx]) {
+                    if (
+                        !bfsVisited[nx]
+                    ) {
 
-                        bfsVisited[nx] = true
+                        bfsVisited[nx] =
+                            true
 
-                        if (tail < bfsQueue.size) {
-                            bfsQueue[tail++] = nx
-                        }
+                        bfsQueue[tail++] =
+                            nx
                     }
                 }
 
@@ -2125,28 +2284,34 @@ class SnakeView @JvmOverloads constructor(
                     val nx =
                         curr - cols
 
-                    if (!bfsVisited[nx]) {
+                    if (
+                        !bfsVisited[nx]
+                    ) {
 
-                        bfsVisited[nx] = true
+                        bfsVisited[nx] =
+                            true
 
-                        if (tail < bfsQueue.size) {
-                            bfsQueue[tail++] = nx
-                        }
+                        bfsQueue[tail++] =
+                            nx
                     }
                 }
 
-                if (cy < rows - 1) {
+                if (
+                    cy < rows - 1
+                ) {
 
                     val nx =
                         curr + cols
 
-                    if (!bfsVisited[nx]) {
+                    if (
+                        !bfsVisited[nx]
+                    ) {
 
-                        bfsVisited[nx] = true
+                        bfsVisited[nx] =
+                            true
 
-                        if (tail < bfsQueue.size) {
-                            bfsQueue[tail++] = nx
-                        }
+                        bfsQueue[tail++] =
+                            nx
                     }
                 }
             }
@@ -2198,10 +2363,6 @@ class SnakeView @JvmOverloads constructor(
         d: P
     ): Int {
 
-        if (snake.isEmpty()) {
-            return -1
-        }
-
         val h =
             snake.first()
 
@@ -2221,10 +2382,6 @@ class SnakeView @JvmOverloads constructor(
 
     private fun placeFood() {
 
-        if (snake.size >= cols * rows) {
-            return
-        }
-
         val free =
             ArrayList<P>()
 
@@ -2233,9 +2390,15 @@ class SnakeView @JvmOverloads constructor(
             for (y in 0 until rows) {
 
                 val p =
-                    P(x, y)
+                    P(
+                        x,
+                        y
+                    )
 
-                if (!snake.contains(p)) {
+                if (
+                    !snake.contains(p)
+                ) {
+
                     free.add(p)
                 }
             }
@@ -2262,8 +2425,10 @@ class SnakeView @JvmOverloads constructor(
                 Particle(
                     p.x.toFloat(),
                     p.y.toFloat(),
-                    Random.nextFloat() - 0.5f,
-                    Random.nextFloat() - 0.5f,
+                    Random.nextFloat() -
+                        0.5f,
+                    Random.nextFloat() -
+                        0.5f,
                     1f,
                     Color.YELLOW
                 )
@@ -2335,10 +2500,12 @@ class SnakeView @JvmOverloads constructor(
             )
 
         ox =
-            (w - cols * cell) / 2f
+            (w - cols * cell) /
+                2f
 
         oy =
-            (h - rows * cell) / 2f
+            (h - rows * cell) /
+                2f
     }
 
     override fun onDraw(
@@ -2347,7 +2514,9 @@ class SnakeView @JvmOverloads constructor(
 
         super.onDraw(c)
 
-        c.drawColor(bgColor)
+        c.drawColor(
+            bgColor
+        )
 
         gridPaint.color =
             gridColor
@@ -2355,7 +2524,8 @@ class SnakeView @JvmOverloads constructor(
         gridPaint.style =
             Paint.Style.STROKE
 
-        gridPaint.strokeWidth = 1f
+        gridPaint.strokeWidth =
+            1f
 
         for (i in 0..cols) {
 
@@ -2386,10 +2556,6 @@ class SnakeView @JvmOverloads constructor(
 
         if (gameOver) {
             drawGameOver(c)
-        }
-
-        if (runtimeError) {
-            drawRuntimeError(c)
         }
     }
 
@@ -2472,11 +2638,16 @@ class SnakeView @JvmOverloads constructor(
 
             snakePaint.color =
                 if (rainbowSkin) {
+
                     hsv[
-                        (i * 23 + score) %
-                            360
+                        (
+                            i * 23 +
+                                score
+                            ) % 360
                     ]
+
                 } else {
+
                     bodyColor
                 }
 
@@ -2604,9 +2775,17 @@ class SnakeView @JvmOverloads constructor(
                             255
                         ),
 
-                    Color.red(it.color),
-                    Color.green(it.color),
-                    Color.blue(it.color)
+                    Color.red(
+                        it.color
+                    ),
+
+                    Color.green(
+                        it.color
+                    ),
+
+                    Color.blue(
+                        it.color
+                    )
                 )
 
             c.drawCircle(
@@ -2666,6 +2845,10 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
+    // =========================================================
+    // AI 实时面板
+    // =========================================================
+
     private fun drawDebug(
         c: Canvas
     ) {
@@ -2677,34 +2860,40 @@ class SnakeView @JvmOverloads constructor(
             return
         }
 
-        if (runtimeError) {
-            return
-        }
-
+        // 面板明显放大
         val w =
             min(
-                width * 0.94f,
-                520f
+                width * 0.97f,
+                620f
             )
 
         val h =
             if (gameOver)
-                220f
+                300f
             else
-                205f
+                275f
 
         val left =
-            width - w - 12f
+            (width - w) / 2f
 
+        // AI 正常运行时放在上方
+        // 游戏结束时放在下方
         val top =
-            if (gameOver)
-                height - h - 12f
-            else
+            if (gameOver) {
+
+                max(
+                    12f,
+                    height - h - 12f
+                )
+
+            } else {
+
                 12f
+            }
 
         panel.color =
             Color.argb(
-                205,
+                220,
                 0,
                 0,
                 0
@@ -2715,8 +2904,8 @@ class SnakeView @JvmOverloads constructor(
             top,
             left + w,
             top + h,
-            18f,
-            18f,
+            22f,
+            22f,
             panel
         )
 
@@ -2750,17 +2939,22 @@ class SnakeView @JvmOverloads constructor(
         border.style =
             Paint.Style.STROKE
 
-        border.strokeWidth = 3f
+        border.strokeWidth =
+            4f
 
         c.drawRoundRect(
             left,
             top,
             left + w,
             top + h,
-            18f,
-            18f,
+            22f,
+            22f,
             border
         )
+
+        // =========================
+        // 标题
+        // =========================
 
         text.textAlign =
             Paint.Align.LEFT
@@ -2768,101 +2962,199 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText =
             true
 
-        text.textSize = 16f
+        text.textSize =
+            20f
 
         text.color =
             Color.WHITE
 
         c.drawText(
-            "AI  ${ai.strategy}",
-            left + 12,
-            top + 24,
+            "🧠 AI  ${ai.strategy}",
+            left + 16f,
+            top + 30f,
             text
         )
 
         text.isFakeBoldText =
             false
 
-        text.textSize = 12f
+        // =========================
+        // AI 正在判断
+        // =========================
+
+        text.textSize =
+            14f
 
         text.color =
             Color.YELLOW
 
         c.drawText(
             "正在判断：${ai.reason}",
-            left + 12,
-            top + 43,
+            left + 16f,
+            top + 54f,
             text
         )
+
+        // =========================
+        // 危险 / 空间
+        // =========================
 
         text.color =
             Color.WHITE
 
-        c.drawText(
+        val dangerText =
             "危险 " +
-                "●".repeat(ai.danger) +
-                "○".repeat(
-                    (5 - ai.danger).coerceAtLeast(0)
+                "●".repeat(
+                    ai.danger
                 ) +
-                "   空间 ${ai.region}" +
-                "   比例 ${"%.1f".format(ai.spaceRatio)}",
+                "○".repeat(
+                    5 - ai.danger
+                )
 
-            left + 12,
-            top + 61,
+        c.drawText(
+            dangerText,
+            left + 16f,
+            top + 78f,
             text
         )
 
+        c.drawText(
+            "空间 ${ai.region}",
+            left + 180f,
+            top + 78f,
+            text
+        )
+
+        c.drawText(
+            "比例 ${
+                "%.1f".format(
+                    ai.spaceRatio
+                )
+            }",
+            left + 310f,
+            top + 78f,
+            text
+        )
+
+        // =========================
+        // 尾巴 / 食物
+        // =========================
+
         val tailText =
-            if (ai.tailReachable)
+            if (
+                ai.tailReachable
+            )
                 "✓ 可达"
             else
                 "✗ 不可达"
 
         val foodText =
-            if (ai.foodReachable)
+            if (
+                ai.foodReachable
+            )
                 "✓ 可达"
             else
                 "✗ 不可达"
 
         val foodDistanceText =
-            if (ai.foodDistance < 0)
+            if (
+                ai.foodDistance < 0
+            )
                 "∞"
             else
                 ai.foodDistance.toString()
 
         c.drawText(
-            "尾巴 $tailText   食物 $foodText   距离 $foodDistanceText",
-
-            left + 12,
-            top + 78,
+            "尾巴 $tailText",
+            left + 16f,
+            top + 102f,
             text
         )
 
         c.drawText(
-            "长度 ${snake.size}   " +
-                "饥饿 $hunger   " +
-                "分数 $score   " +
-                "学习局数 $totalGames",
-
-            left + 12,
-            top + 95,
+            "食物 $foodText",
+            left + 180f,
+            top + 102f,
             text
         )
 
         c.drawText(
-            "探索深度 ${ai.depth}   " +
-                "节点 ${ai.nodes}   " +
-                "攻 ${"%.2f".format(aggression)}",
-
-            left + 12,
-            top + 112,
+            "距离 $foodDistanceText",
+            left + 340f,
+            top + 102f,
             text
         )
 
-        text.textSize = 11f
+        // =========================
+        // 长度 / 饥饿 / 分数
+        // =========================
+
+        c.drawText(
+            "长度 ${snake.size}",
+            left + 16f,
+            top + 126f,
+            text
+        )
+
+        c.drawText(
+            "饥饿 $hunger",
+            left + 160f,
+            top + 126f,
+            text
+        )
+
+        c.drawText(
+            "分数 $score",
+            left + 290f,
+            top + 126f,
+            text
+        )
+
+        c.drawText(
+            "学习局数 $totalGames",
+            left + 410f,
+            top + 126f,
+            text
+        )
+
+        // =========================
+        // AI 前瞻
+        // =========================
+
+        c.drawText(
+            "探索深度 ${ai.depth}",
+            left + 16f,
+            top + 150f,
+            text
+        )
+
+        c.drawText(
+            "节点 ${ai.nodes}",
+            left + 180f,
+            top + 150f,
+            text
+        )
+
+        c.drawText(
+            "攻击 ${
+                "%.2f".format(
+                    aggression
+                )
+            }",
+            left + 310f,
+            top + 150f,
+            text
+        )
+
+        // =========================
+        // 四方向评分
+        // =========================
+
+        text.textSize =
+            13f
 
         var x =
-            left + 12f
+            left + 16f
 
         ai.candidates.forEach {
 
@@ -2889,9 +3181,13 @@ class SnakeView @JvmOverloads constructor(
                     Color.GRAY
 
             c.drawText(
-                "$label ${"%.0f".format(it.score)}",
+                "$label ${
+                    "%.0f".format(
+                        it.score
+                    )
+                }",
                 x,
-                top + 132,
+                top + 176f,
                 text
             )
 
@@ -2899,16 +3195,20 @@ class SnakeView @JvmOverloads constructor(
                 w / 4f
         }
 
+        // =========================
+        // AI 最终选择
+        // =========================
+
+        text.textSize =
+            14f
+
         text.color =
             Color.CYAN
 
         c.drawText(
-            "选择 ${arrow(ai.chosen)}     " +
-                "死亡统计 W$deathWall " +
-                "S$deathSelf T$deathTrap",
-
-            left + 12,
-            top + 150,
+            "选择 ${arrow(ai.chosen)}",
+            left + 16f,
+            top + 204f,
             text
         )
 
@@ -2916,11 +3216,43 @@ class SnakeView @JvmOverloads constructor(
             Color.LTGRAY
 
         c.drawText(
-            "学习：Q/UCB + 多步前瞻；死亡后自动调整安全策略",
-            left + 12,
-            top + 168,
+            "死亡统计  W$deathWall  S$deathSelf  T$deathTrap",
+            left + 150f,
+            top + 204f,
             text
         )
+
+        // =========================
+        // 学习状态
+        // =========================
+
+        text.textSize =
+            12f
+
+        text.color =
+            Color.rgb(
+                180,
+                220,
+                255
+            )
+
+        c.drawText(
+            "学习：Q/UCB + 多步前瞻",
+            left + 16f,
+            top + 228f,
+            text
+        )
+
+        c.drawText(
+            "死亡后自动调整安全策略",
+            left + 230f,
+            top + 228f,
+            text
+        )
+
+        // =========================
+        // 游戏结束信息
+        // =========================
 
         if (gameOver) {
 
@@ -2930,12 +3262,13 @@ class SnakeView @JvmOverloads constructor(
             text.isFakeBoldText =
                 true
 
-            text.textSize = 15f
+            text.textSize =
+                17f
 
             c.drawText(
                 "死亡原因：$deathCause",
-                left + 12,
-                top + 190,
+                left + 16f,
+                top + 256f,
                 text
             )
 
@@ -2970,7 +3303,8 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText =
             true
 
-        text.textSize = 30f
+        text.textSize =
+            30f
 
         text.color =
             Color.WHITE
@@ -2982,7 +3316,8 @@ class SnakeView @JvmOverloads constructor(
             text
         )
 
-        text.textSize = 15f
+        text.textSize =
+            15f
 
         text.isFakeBoldText =
             false
@@ -2991,7 +3326,6 @@ class SnakeView @JvmOverloads constructor(
             "分数 $score   " +
                 "最高 $highScore   " +
                 "长度 ${snake.size}",
-
             width / 2f,
             height / 2f - 15,
             text
@@ -3010,124 +3344,13 @@ class SnakeView @JvmOverloads constructor(
         text.color =
             Color.LTGRAY
 
-        text.textSize = 11f
+        text.textSize =
+            11f
 
         c.drawText(
             lastDeathInfo,
             width / 2f,
             height / 2f + 48,
-            text
-        )
-    }
-
-    private fun drawRuntimeError(
-        c: Canvas
-    ) {
-
-        paint.color =
-            Color.argb(
-                245,
-                0,
-                0,
-                0
-            )
-
-        c.drawRect(
-            0f,
-            0f,
-            width.toFloat(),
-            height.toFloat(),
-            paint
-        )
-
-        text.textAlign =
-            Paint.Align.LEFT
-
-        text.isFakeBoldText =
-            true
-
-        text.textSize = 19f
-        text.color = Color.RED
-
-        c.drawText(
-            "游戏运行异常",
-            16f,
-            32f,
-            text
-        )
-
-        text.isFakeBoldText =
-            false
-
-        text.textSize = 14f
-        text.color = Color.WHITE
-
-        c.drawText(
-            "异常类型：$runtimeErrorTitle",
-            16f,
-            60f,
-            text
-        )
-
-        text.color = Color.YELLOW
-
-        val msg =
-            runtimeErrorMessage
-                .replace("\n", " ")
-                .take(90)
-
-        c.drawText(
-            "错误：$msg",
-            16f,
-            84f,
-            text
-        )
-
-        text.color = Color.CYAN
-
-        c.drawText(
-            "请把下面这段内容发给我：",
-            16f,
-            112f,
-            text
-        )
-
-        text.color = Color.LTGRAY
-        text.textSize = 10f
-
-        val lines =
-            runtimeErrorStack
-                .replace("\r", "")
-                .split("\n")
-
-        var y = 132f
-
-        for (line in lines.take(18)) {
-
-            val safe =
-                line.take(100)
-
-            c.drawText(
-                safe,
-                16f,
-                y,
-                text
-            )
-
-            y += 14f
-
-            if (y > height - 30f) {
-                break
-            }
-        }
-
-        text.textSize = 13f
-        text.color = Color.GREEN
-
-        c.drawText(
-            "点击屏幕可重新开始",
-            16f,
-            height - 15f,
             text
         )
     }
@@ -3166,25 +3389,9 @@ class SnakeView @JvmOverloads constructor(
             return true
         }
 
-        /*
-         * 如果发生了运行时异常，
-         * 点击屏幕直接重新初始化。
-         */
-        if (runtimeError) {
-
-            reset()
-            resume()
-
-            return true
-        }
-
         if (gameOver) {
 
             reset()
-
-            if (!running) {
-                resume()
-            }
 
             return true
         }
@@ -3201,16 +3408,22 @@ class SnakeView @JvmOverloads constructor(
             e.x -
                 (
                     ox +
-                        (snake.first().x + 0.5f) *
-                        cell
+                        (
+                            snake.first().x +
+                                0.5f
+                            ) *
+                            cell
                     )
 
         val dy =
             e.y -
                 (
                     oy +
-                        (snake.first().y + 0.5f) *
-                        cell
+                        (
+                            snake.first().y +
+                                0.5f
+                            ) *
+                            cell
                     )
 
         val d =
@@ -3224,7 +3437,6 @@ class SnakeView @JvmOverloads constructor(
                         1
                     else
                         -1,
-
                     0
                 )
 
@@ -3232,7 +3444,6 @@ class SnakeView @JvmOverloads constructor(
 
                 P(
                     0,
-
                     if (dy > 0)
                         1
                     else
@@ -3240,7 +3451,13 @@ class SnakeView @JvmOverloads constructor(
                 )
             }
 
-        if (!isReverse(d, dir)) {
+        if (
+            !isReverse(
+                d,
+                dir
+            )
+        ) {
+
             queue.add(d)
         }
 
