@@ -43,7 +43,17 @@ class SnakeView(context: Context) : View(context) {
     private var gameSpeed = 160L
 
     var onScoreChanged: ((Int) -> Unit)? = null
+    var onMoneyChanged: ((Int) -> Unit)? = null
+    
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
+
+    // --- 皮肤系统 ---
+    private var currentSkinBodyColor = Color.rgb(46, 204, 113)
+    private var currentSkinHeadColor = Color.rgb(39, 174, 96)
+
+    // --- 棋盘系统 ---
+    private var currentBoardBgColor = Color.rgb(17, 17, 17)
+    private var currentBoardGridColor = Color.rgb(30, 30, 30)
 
     // --- 震动马达初始化 ---
     private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -60,7 +70,6 @@ class SnakeView(context: Context) : View(context) {
     private var shakeOffsetX = 0f
     private var shakeOffsetY = 0f
 
-    // --- 特效数据类 ---
     private data class Particle(
         var x: Float, var y: Float,
         var vx: Float, var vy: Float,
@@ -76,16 +85,16 @@ class SnakeView(context: Context) : View(context) {
 
     // --- 画笔定义 ---
     private val paintSnakeBody = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(46, 204, 113)
+        color = currentSkinBodyColor
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
         pathEffect = CornerPathEffect(20f)
-        setShadowLayer(10f, 0f, 0f, Color.rgb(46, 204, 113))
+        setShadowLayer(10f, 0f, 0f, currentSkinBodyColor)
     }
 
     private val paintSnakeHead = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(39, 174, 96)
+        color = currentSkinHeadColor
         style = Paint.Style.FILL
     }
 
@@ -107,7 +116,7 @@ class SnakeView(context: Context) : View(context) {
     }
 
     private val paintGrid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(30, 30, 30)
+        color = currentBoardGridColor
         strokeWidth = 1f
     }
 
@@ -150,7 +159,39 @@ class SnakeView(context: Context) : View(context) {
     init {
         setLayerType(LAYER_TYPE_SOFTWARE, null)
         highScore = prefs.getInt("high_score", 0)
+        updateCurrentSkin()
+        updateCurrentBoard()
         reset()
+    }
+
+    // 读取并应用当前装备的皮肤
+    fun updateCurrentSkin() {
+        val currentSkinId = prefs.getString("equipped_skin", "green") ?: "green"
+        when (currentSkinId) {
+            "blue" -> { currentSkinBodyColor = Color.rgb(52, 152, 219); currentSkinHeadColor = Color.rgb(41, 128, 185) }
+            "red" -> { currentSkinBodyColor = Color.rgb(231, 76, 60); currentSkinHeadColor = Color.rgb(192, 57, 43) }
+            "purple" -> { currentSkinBodyColor = Color.rgb(155, 89, 182); currentSkinHeadColor = Color.rgb(142, 68, 173) }
+            "gold" -> { currentSkinBodyColor = Color.rgb(241, 196, 15); currentSkinHeadColor = Color.rgb(243, 156, 18) }
+            else -> { currentSkinBodyColor = Color.rgb(46, 204, 113); currentSkinHeadColor = Color.rgb(39, 174, 96) }
+        }
+        paintSnakeBody.color = currentSkinBodyColor
+        paintSnakeBody.setShadowLayer(10f, 0f, 0f, currentSkinBodyColor)
+        paintSnakeHead.color = currentSkinHeadColor
+        invalidate()
+    }
+
+    // 读取并应用当前装备的棋盘
+    fun updateCurrentBoard() {
+        val currentBoardId = prefs.getString("equipped_board", "dark") ?: "dark"
+        when (currentBoardId) {
+            "light" -> { currentBoardBgColor = Color.rgb(240, 240, 240); currentBoardGridColor = Color.rgb(220, 220, 220) }
+            "neon" -> { currentBoardBgColor = Color.rgb(10, 25, 47); currentBoardGridColor = Color.rgb(23, 58, 94) }
+            "forest" -> { currentBoardBgColor = Color.rgb(27, 46, 26); currentBoardGridColor = Color.rgb(46, 74, 45) }
+            "cyberpunk" -> { currentBoardBgColor = Color.rgb(43, 15, 59); currentBoardGridColor = Color.rgb(74, 30, 92) }
+            else -> { currentBoardBgColor = Color.rgb(17, 17, 17); currentBoardGridColor = Color.rgb(30, 30, 30) }
+        }
+        paintGrid.color = currentBoardGridColor
+        invalidate()
     }
 
     fun reset() {
@@ -172,9 +213,9 @@ class SnakeView(context: Context) : View(context) {
         particles.clear()
         floatingTexts.clear()
 
-        paintSnakeBody.color = Color.rgb(46, 204, 113)
-        paintSnakeBody.setShadowLayer(10f, 0f, 0f, Color.rgb(46, 204, 113))
-        paintSnakeHead.color = Color.rgb(39, 174, 96)
+        paintSnakeBody.color = currentSkinBodyColor
+        paintSnakeBody.setShadowLayer(10f, 0f, 0f, currentSkinBodyColor)
+        paintSnakeHead.color = currentSkinHeadColor
 
         placeFood()
         onScoreChanged?.invoke(score)
@@ -205,7 +246,6 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // --- 震动工具函数 ---
     private fun vibrate(duration: Long, amplitude: Int = VibrationEffect.DEFAULT_AMPLITUDE) {
         vibrator?.let {
             if (!it.hasVibrator()) return
@@ -270,14 +310,14 @@ class SnakeView(context: Context) : View(context) {
         if (newHead.x < 0 || newHead.x >= cols || newHead.y < 0 || newHead.y >= rows) {
             gameOver = true
             triggerDeathEffects()
-            saveHighScore()
+            saveScoreAndMoney()
             return
         }
 
         if (snake.any { it == newHead }) {
             gameOver = true
             triggerDeathEffects()
-            saveHighScore()
+            saveScoreAndMoney()
             return
         }
 
@@ -295,9 +335,7 @@ class SnakeView(context: Context) : View(context) {
     }
 
     private fun triggerEatEffects() {
-        // 吃到食物：短促的轻震动
         vibrate(35, 100)
-
         val foodCenterX = offsetX + food.x * cellSize + cellSize / 2
         val foodCenterY = offsetY + food.y * cellSize + cellSize / 2
 
@@ -321,7 +359,6 @@ class SnakeView(context: Context) : View(context) {
     }
 
     private fun triggerDeathEffects() {
-        // 死亡：沉重的长震动（心跳停止的感觉）
         vibrator?.let {
             if (it.hasVibrator()) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -359,17 +396,22 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    private fun saveHighScore() {
+    private fun saveScoreAndMoney() {
         if (score > highScore) {
             highScore = score
             prefs.edit().putInt("high_score", highScore).apply()
         }
+        var currentMoney = prefs.getInt("money", 0)
+        currentMoney += score
+        prefs.edit().putInt("money", currentMoney).apply()
+        onMoneyChanged?.invoke(currentMoney)
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        canvas.drawColor(Color.rgb(17, 17, 17))
+        // 棋盘背景色
+        canvas.drawColor(currentBoardBgColor)
 
         cellSize = minOf(width / cols.toFloat(), height / rows.toFloat())
         offsetX = (width - cellSize * cols) / 2f
@@ -479,10 +521,10 @@ class SnakeView(context: Context) : View(context) {
             }
         } else if (dir.x == 0 && dir.y == 0) {
             paintSubText.textSize = 32f
-            paintSubText.color = Color.WHITE
+            paintSubText.color = if (currentBoardBgColor == Color.rgb(240, 240, 240)) Color.DKGRAY else Color.WHITE
             canvas.drawText("滑动屏幕开始", width / 2f, height / 2f, paintSubText)
             paintSubText.textSize = 20f
-            paintSubText.color = Color.GRAY
+            paintSubText.color = if (currentBoardBgColor == Color.rgb(240, 240, 240)) Color.GRAY else Color.LTGRAY
             canvas.drawText("(滑动控制方向)", width / 2f, height / 2f + 50, paintSubText)
         }
     }
@@ -497,18 +539,14 @@ class SnakeView(context: Context) : View(context) {
                 touchStartY = event.y
                 return true
             }
-
             MotionEvent.ACTION_UP -> {
                 if (gameOver) {
                     reset()
                     return true
                 }
-
                 val dx = event.x - touchStartX
                 val dy = event.y - touchStartY
-
                 if (abs(dx) < 20 && abs(dy) < 20) return true
-
                 if (abs(dx) > abs(dy)) {
                     nextDir = if (dx > 0) Point(1, 0) else Point(-1, 0)
                 } else {
