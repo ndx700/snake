@@ -251,11 +251,18 @@ class SnakeView @JvmOverloads constructor(
 
     /*
      * ============================================================
-     * 饥饿自动切 BEAM 阈值
-     * 120 步没吃到食物就临时改用 BEAM 追食物。
+     * 饥饿阈值
+     *
+     * autoBeamHunger：
+     *   hunger ≥ 120 自动切 BEAM 追食物
+     *
+     * hungerKillLimit：
+     *   hunger ≥ 500 直接判死重开
      * ============================================================
      */
     private val autoBeamHunger = 120
+
+    private val hungerKillLimit = 500
 
     private var autoRestartDelay = 250L
 
@@ -756,6 +763,17 @@ class SnakeView @JvmOverloads constructor(
     private fun updateGame() {
 
         if (gameOver) {
+            return
+        }
+
+        /*
+         * 饥饿达到上限，判定为卡死，
+         * 直接 die("HUNGER")，由 frame() 自动重开。
+         */
+        if (hunger >= hungerKillLimit) {
+
+            die("HUNGER")
+
             return
         }
 
@@ -1742,6 +1760,13 @@ class SnakeView @JvmOverloads constructor(
                 learn(-7f)
             }
 
+            "HUNGER" -> {
+
+                deathTrap++
+
+                learn(-9f)
+            }
+
             else -> {
 
                 deathTrap++
@@ -1752,9 +1777,6 @@ class SnakeView @JvmOverloads constructor(
 
         totalGames++
 
-        /*
-         * 记录本局分数，用于 HUD 显示
-         */
         recentScores.addLast(score)
 
         while (
@@ -1780,6 +1802,12 @@ class SnakeView @JvmOverloads constructor(
                     max(
                         0.5f,
                         aggression * 0.99f
+                    )
+
+                "HUNGER" ->
+                    max(
+                        0.5f,
+                        aggression * 1.02f
                     )
 
                 else ->
@@ -3229,9 +3257,6 @@ class SnakeView @JvmOverloads constructor(
             text
         )
 
-        /*
-         * 学习效果：近 50 局均分 / 最佳
-         */
         val avg =
             if (recentScores.isEmpty())
                 0f
@@ -3341,7 +3366,7 @@ class SnakeView @JvmOverloads constructor(
         )
 
         c.drawText(
-            "饥饿 ≥ $autoBeamHunger 自动切 BEAM",
+            "饥饿 ≥ $autoBeamHunger 切 BEAM，≥ $hungerKillLimit 重开",
             left + 230f,
             top + 250f,
             text
