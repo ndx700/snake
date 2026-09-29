@@ -425,7 +425,29 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ================== 终极 BFS：贪婪优先 + 追尾贪心 + 饥饿破循环 ==================
+    // ★★★ 核心安全评估函数：模拟吃完食物后是否还能活 ★★★
+    // 返回 true 表示吃完后安全，false 表示吃完必死
+    private fun isEatingSafe(head: Point, foodPos: Point): Boolean {
+        // 模拟蛇吃到食物后的状态（身体加长 1 格，尾巴不移开）
+        val simSnake = ArrayDeque(snake)
+        simSnake.addFirst(foodPos)
+        // 注意：吃到食物，尾巴不移开，所以不 removeLast
+        
+        val newHead = simSnake.first()
+        val newTail = simSnake.last()
+        
+        // 检查 1：能否到达尾巴（追尾可达性）
+        val canReachTail = bfsPathWithSnake(newHead, newTail, simSnake, Point(0, 0)) != null
+        if (!canReachTail) return false
+        
+        // 检查 2：吃完后活动空间是否足够大（防止被闷死）
+        val spaceAfterEating = floodFillWithSnake(newHead, simSnake)
+        if (spaceAfterEating < simSnake.size) return false
+        
+        return true
+    }
+
+    // ================== 终极 BFS：安全优先 + 追尾贪心 + 饥饿破循环 ==================
     private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
@@ -441,32 +463,41 @@ class SnakeView(context: Context) : View(context) {
         }
         if (validDirs.isEmpty()) return
 
-        // ★★★ 修复1：贪婪优先——食物就在蛇头旁边，直接吃！★★★
+        // ★★★ 贪婪优先（但加了安全网！）★★★
+        // 食物就在蛇头旁边时，只有"吃完后能活"才去吃，否则放弃！
         val foodDx = food.x - head.x
         val foodDy = food.y - head.y
         if (abs(foodDx) + abs(foodDy) == 1) {
             val foodDir = Point(foodDx, foodDy)
             if (validDirs.contains(foodDir)) {
-                directionQueue.clear()
-                directionQueue.add(foodDir)
-                return
+                // ★ 安全检查：吃完后能不能活？
+                if (isEatingSafe(head, food)) {
+                    directionQueue.clear()
+                    directionQueue.add(foodDir)
+                    return
+                }
+                // 不安全！食物是个陷阱，放弃它，走后面的策略
             }
         }
 
-        // ★★★ 修复2：饥饿强制破循环——连续 8 步没吃到食物，跳过所有评估，直接去吃 ★★★
+        // ★★★ 饥饿强制破循环（同样有安全网）★★★
         if (hungerCounter > 8) {
             val pathToFood = bfsPathWithSnake(head, food, snake, dir)
             if (pathToFood != null && pathToFood.size > 1) {
                 val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
                 if (validDirs.contains(nextMove)) {
-                    directionQueue.clear()
-                    directionQueue.add(nextMove)
-                    return
+                    // ★ 安全检查：吃完后能不能活？
+                    if (isEatingSafe(head, food)) {
+                        directionQueue.clear()
+                        directionQueue.add(nextMove)
+                        return
+                    }
+                    // 不安全！哪怕是饿死也不去吃这个陷阱食物
                 }
             }
         }
 
-        // Step 2: 筛选"能追到尾巴"的方向（这是活路）
+        // Step 2: 筛选"能追到尾巴"的方向
         val tailSafeDirs = mutableListOf<Point>()
         for (d in validDirs) {
             val nextHead = Point(head.x + d.x, head.y + d.y)
@@ -496,12 +527,7 @@ class SnakeView(context: Context) : View(context) {
         if (pathToFood != null && pathToFood.size > 1) {
             val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
             if (candidateDirs.contains(nextMove)) {
-                val simSnake = ArrayDeque(snake)
-                simSnake.addFirst(food)
-                val tailAfterEating = simSnake.last()
-                val canReachTailAfterEating = bfsPathWithSnake(simSnake.first(), tailAfterEating, simSnake, Point(0,0)) != null
-                
-                if (canReachTailAfterEating) {
+                if (isEatingSafe(head, food)) {
                     directionQueue.clear()
                     directionQueue.add(nextMove)
                     return
@@ -509,8 +535,7 @@ class SnakeView(context: Context) : View(context) {
             }
         }
         
-        // ★★★ 修复3：追尾时贪心——在能追到尾巴的方向中，选离食物最近的那个 ★★★
-        // 这样它会主动绕圈靠近食物，最终触发"贪婪优先"，把食物吃掉
+        // Step 4: 追尾时贪心——在能追到尾巴的方向中，选离食物最近的那个
         if (candidateDirs.isNotEmpty()) {
             val bestDir = candidateDirs.minByOrNull { d ->
                 val newHead = Point(head.x + d.x, head.y + d.y)
