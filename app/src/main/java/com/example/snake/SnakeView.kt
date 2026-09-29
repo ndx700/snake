@@ -347,7 +347,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // ==================== AI 决策 ====================
     private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
@@ -975,27 +974,27 @@ class SnakeView @JvmOverloads constructor(
             val modeColor: Int
             when (strategyMode) {
                 1 -> {
-                    modeName = "🔄 追尾保命 (TAIL CHASE)"
+                    modeName = "🔄 追尾保命"
                     modeDesc = "长蛇优先追尾，等待食物刷到嘴边"
                     modeColor = Color.rgb(241, 196, 15)
                 }
                 2 -> {
-                    modeName = "🛤 加权汉密尔顿 (WEIGHTED HAM)"
+                    modeName = "🛤 加权汉密尔顿"
                     modeDesc = "沿路径走，允许3格内抄近道吃食物"
                     modeColor = Color.rgb(52, 152, 219)
                 }
                 3 -> {
-                    modeName = "🛡 纯汉密尔顿 (PURE HAM)"
+                    modeName = "🛡 纯汉密尔顿"
                     modeDesc = "严格沿固定路径，理论上永不死亡"
                     modeColor = Color.rgb(46, 204, 113)
                 }
                 4 -> {
-                    modeName = "🧠 MCTS 深推 (MCTS)"
+                    modeName = "🧠 MCTS 深推"
                     modeDesc = "每方向6次rollout，深度30步"
                     modeColor = Color.rgb(155, 89, 182)
                 }
                 else -> {
-                    modeName = "🎯 BFS + Beam Search"
+                    modeName = "🎯 BFS + Beam"
                     modeDesc = "3步前瞻，每条分支保留空间最大方向"
                     modeColor = Color.rgb(231, 76, 60)
                 }
@@ -1003,7 +1002,7 @@ class SnakeView @JvmOverloads constructor(
 
             val panelX = width / 2f
             val panelY = height - 90f
-            val panelW = 640f
+            val panelW = 620f
             val panelH = 90f
 
             canvas.drawRoundRect(
