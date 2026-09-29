@@ -47,15 +47,16 @@ class SnakeView(context: Context) : View(context) {
     private var highScore = 0
     private var gameOver = false
     private var running = false
-    
+
     private var gameSpeed = 180L
-    
+
+    // AI 模式：0 = 手动, 1 = BFS, 2 = HAM
     private var aiMode = 0
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
     var onAIModeChanged: ((Int) -> Unit)? = null
-    
+
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
     private var aiLevel = 1
@@ -64,7 +65,7 @@ class SnakeView(context: Context) : View(context) {
     private var currentMultiplier = 1.0f
     private var hungerCounter = 0
     private var consecutiveDeaths = 0
-    
+
     private val pathIndex = Array(cols) { IntArray(rows) }
     private val pathSequence = mutableListOf<Point>()
 
@@ -72,9 +73,9 @@ class SnakeView(context: Context) : View(context) {
     private var currentSkinHeadColor = Color.rgb(39, 174, 96)
     private var currentBoardBgColor = Color.BLACK
     private var currentBoardGridColor = Color.rgb(0, 255, 255)
-    
+
     private var isRainbowSkin = false
-    
+
     private val rainbowColors = IntArray(361) { i ->
         Color.HSVToColor(floatArrayOf(i.toFloat(), 1f, 1f))
     }
@@ -91,7 +92,7 @@ class SnakeView(context: Context) : View(context) {
     private var shakeTime = 0f
     private var shakeOffsetX = 0f
     private var shakeOffsetY = 0f
-    
+
     private var shockwaveX = 0f
     private var shockwaveY = 0f
     private var shockwaveRadius = 0f
@@ -105,6 +106,7 @@ class SnakeView(context: Context) : View(context) {
         var decay: Float = 0.002f,
         var isTrail: Boolean = false
     )
+
     private data class FloatingText(
         var x: Float, var y: Float,
         var life: Float, val text: String
@@ -127,7 +129,7 @@ class SnakeView(context: Context) : View(context) {
         style = Paint.Style.FILL
         setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
     }
-    
+
     private val paintSnakeHighlight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.FILL
@@ -138,7 +140,10 @@ class SnakeView(context: Context) : View(context) {
     private val paintEyeBlack = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
 
     private val paintFoodGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val paintFoodCore = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
+    private val paintFoodCore = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+    }
     private val paintFoodCross = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.STROKE
@@ -158,16 +163,22 @@ class SnakeView(context: Context) : View(context) {
         strokeWidth = 2f
         setShadowLayer(8f, 0f, 0f, Color.CYAN)
     }
-    
+
     private val paintShockwave = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 8f
         color = Color.RED
     }
 
-    private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textAlign = Paint.Align.CENTER }
-    private val paintSubText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.LTGRAY; textAlign = Paint.Align.CENTER }
-    
+    private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textAlign = Paint.Align.CENTER
+    }
+    private val paintSubText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.LTGRAY
+        textAlign = Paint.Align.CENTER
+    }
+
     private val paintHamPath = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 3f
@@ -239,17 +250,32 @@ class SnakeView(context: Context) : View(context) {
         val currentSkinId = prefs.getString("equipped_skin", "green") ?: "green"
         isRainbowSkin = false
         when (currentSkinId) {
-            "blue" -> { currentSkinBodyColor = Color.rgb(52, 152, 219); currentSkinHeadColor = Color.rgb(41, 128, 185) }
-            "red" -> { currentSkinBodyColor = Color.rgb(231, 76, 60); currentSkinHeadColor = Color.rgb(192, 57, 43) }
-            "purple" -> { currentSkinBodyColor = Color.rgb(155, 89, 182); currentSkinHeadColor = Color.rgb(142, 68, 173) }
-            "gold" -> { currentSkinBodyColor = Color.rgb(241, 196, 15); currentSkinHeadColor = Color.rgb(243, 156, 18) }
+            "blue" -> {
+                currentSkinBodyColor = Color.rgb(52, 152, 219)
+                currentSkinHeadColor = Color.rgb(41, 128, 185)
+            }
+            "red" -> {
+                currentSkinBodyColor = Color.rgb(231, 76, 60)
+                currentSkinHeadColor = Color.rgb(192, 57, 43)
+            }
+            "purple" -> {
+                currentSkinBodyColor = Color.rgb(155, 89, 182)
+                currentSkinHeadColor = Color.rgb(142, 68, 173)
+            }
+            "gold" -> {
+                currentSkinBodyColor = Color.rgb(241, 196, 15)
+                currentSkinHeadColor = Color.rgb(243, 156, 18)
+            }
             "rainbow" -> {
                 isRainbowSkin = true
                 currentSkinBodyColor = Color.WHITE
                 currentSkinHeadColor = Color.WHITE
                 paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
             }
-            else -> { currentSkinBodyColor = Color.rgb(46, 204, 113); currentSkinHeadColor = Color.rgb(39, 174, 96) }
+            else -> {
+                currentSkinBodyColor = Color.rgb(46, 204, 113)
+                currentSkinHeadColor = Color.rgb(39, 174, 96)
+            }
         }
         if (!isRainbowSkin) {
             paintSnakeBody.shader = null
@@ -264,28 +290,28 @@ class SnakeView(context: Context) : View(context) {
     fun updateCurrentBoard() {
         val currentBoardId = prefs.getString("equipped_board", "dark") ?: "dark"
         when (currentBoardId) {
-            "light" -> { 
+            "light" -> {
                 isRainbowBoard = false
                 paintBoardBg.shader = null
                 currentBoardBgColor = Color.rgb(240, 240, 240)
                 currentBoardGridColor = Color.rgb(200, 200, 200)
                 paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
             }
-            "neon" -> { 
+            "neon" -> {
                 isRainbowBoard = false
                 paintBoardBg.shader = null
                 currentBoardBgColor = Color.rgb(10, 25, 47)
                 currentBoardGridColor = Color.rgb(0, 255, 255)
                 paintGrid.setShadowLayer(8f, 0f, 0f, Color.CYAN)
             }
-            "forest" -> { 
+            "forest" -> {
                 isRainbowBoard = false
                 paintBoardBg.shader = null
                 currentBoardBgColor = Color.rgb(27, 46, 26)
                 currentBoardGridColor = Color.rgb(46, 74, 45)
                 paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
             }
-            "cyberpunk" -> { 
+            "cyberpunk" -> {
                 isRainbowBoard = false
                 paintBoardBg.shader = null
                 currentBoardBgColor = Color.rgb(43, 15, 59)
@@ -300,7 +326,7 @@ class SnakeView(context: Context) : View(context) {
                 val shader = LinearGradient(0f, 0f, 2000f, 2000f, rainbowColors, null, Shader.TileMode.MIRROR)
                 paintBoardBg.shader = shader
             }
-            else -> { 
+            else -> {
                 isRainbowBoard = false
                 paintBoardBg.shader = null
                 currentBoardBgColor = Color.BLACK
@@ -338,7 +364,7 @@ class SnakeView(context: Context) : View(context) {
         shockwaveAlpha = 0f
         particles.clear()
         floatingTexts.clear()
-        
+
         if (isRainbowSkin) {
             paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
         } else {
@@ -347,7 +373,7 @@ class SnakeView(context: Context) : View(context) {
             paintSnakeHead.color = currentSkinHeadColor
             paintSnakeHead.setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
         }
-        
+
         placeFood()
         onScoreChanged?.invoke(score)
         invalidate()
@@ -425,34 +451,12 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ★★★ 核心安全评估函数：模拟吃完食物后是否还能活 ★★★
-    // 返回 true 表示吃完后安全，false 表示吃完必死
-    private fun isEatingSafe(head: Point, foodPos: Point): Boolean {
-        // 模拟蛇吃到食物后的状态（身体加长 1 格，尾巴不移开）
-        val simSnake = ArrayDeque(snake)
-        simSnake.addFirst(foodPos)
-        // 注意：吃到食物，尾巴不移开，所以不 removeLast
-        
-        val newHead = simSnake.first()
-        val newTail = simSnake.last()
-        
-        // 检查 1：能否到达尾巴（追尾可达性）
-        val canReachTail = bfsPathWithSnake(newHead, newTail, simSnake, Point(0, 0)) != null
-        if (!canReachTail) return false
-        
-        // 检查 2：吃完后活动空间是否足够大（防止被闷死）
-        val spaceAfterEating = floodFillWithSnake(newHead, simSnake)
-        if (spaceAfterEating < simSnake.size) return false
-        
-        return true
-    }
-
-    // ================== 终极 BFS：安全优先 + 追尾贪心 + 饥饿破循环 ==================
+    // ================== 最终版 BFS：多维度评估 + 四重安全网 ==================
     private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
-        
-        // Step 1: 物理安全方向
+
+        // 第一步：物理安全方向
         val allDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
         val validDirs = allDirs.filter { d ->
             val isReverse = (d.x == -dir.x && d.y == -dir.y)
@@ -463,123 +467,140 @@ class SnakeView(context: Context) : View(context) {
         }
         if (validDirs.isEmpty()) return
 
-        // ★★★ 贪婪优先（但加了安全网！）★★★
-        // 食物就在蛇头旁边时，只有"吃完后能活"才去吃，否则放弃！
+        // 优先级 1：食物贴脸，且物理安全 → 直接吃
         val foodDx = food.x - head.x
         val foodDy = food.y - head.y
         if (abs(foodDx) + abs(foodDy) == 1) {
             val foodDir = Point(foodDx, foodDy)
             if (validDirs.contains(foodDir)) {
-                // ★ 安全检查：吃完后能不能活？
-                if (isEatingSafe(head, food)) {
-                    directionQueue.clear()
-                    directionQueue.add(foodDir)
-                    return
-                }
-                // 不安全！食物是个陷阱，放弃它，走后面的策略
+                directionQueue.clear()
+                directionQueue.add(foodDir)
+                return
             }
         }
 
-        // ★★★ 饥饿强制破循环（同样有安全网）★★★
-        if (hungerCounter > 8) {
+        // 优先级 2：极度饥饿（>15步没吃到）→ 强制直奔食物，不管安全模拟
+        if (hungerCounter > 15) {
             val pathToFood = bfsPathWithSnake(head, food, snake, dir)
             if (pathToFood != null && pathToFood.size > 1) {
                 val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
                 if (validDirs.contains(nextMove)) {
-                    // ★ 安全检查：吃完后能不能活？
-                    if (isEatingSafe(head, food)) {
-                        directionQueue.clear()
-                        directionQueue.add(nextMove)
-                        return
-                    }
-                    // 不安全！哪怕是饿死也不去吃这个陷阱食物
-                }
-            }
-        }
-
-        // Step 2: 筛选"能追到尾巴"的方向
-        val tailSafeDirs = mutableListOf<Point>()
-        for (d in validDirs) {
-            val nextHead = Point(head.x + d.x, head.y + d.y)
-            val simSnake = ArrayDeque(snake)
-            simSnake.addFirst(nextHead)
-            simSnake.removeLast()
-            val simTail = simSnake.last()
-            val pathToTail = bfsPathWithSnake(simSnake.first(), simTail, simSnake, Point(0,0))
-            if (pathToTail != null) {
-                tailSafeDirs.add(d)
-            }
-        }
-        
-        val candidateDirs = if (tailSafeDirs.isNotEmpty()) tailSafeDirs else validDirs
-        
-        val dirSpaceMap = mutableMapOf<Point, Int>()
-        for (d in candidateDirs) {
-            val nextHead = Point(head.x + d.x, head.y + d.y)
-            val simSnake = ArrayDeque(snake)
-            simSnake.addFirst(nextHead)
-            simSnake.removeLast()
-            dirSpaceMap[d] = floodFillWithSnake(nextHead, simSnake)
-        }
-        
-        // Step 3: 正常吃食物（在安全方向中，且吃完后能追到尾巴）
-        val pathToFood = bfsPathWithSnake(head, food, snake, dir)
-        if (pathToFood != null && pathToFood.size > 1) {
-            val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
-            if (candidateDirs.contains(nextMove)) {
-                if (isEatingSafe(head, food)) {
                     directionQueue.clear()
                     directionQueue.add(nextMove)
                     return
                 }
             }
         }
-        
-        // Step 4: 追尾时贪心——在能追到尾巴的方向中，选离食物最近的那个
-        if (candidateDirs.isNotEmpty()) {
-            val bestDir = candidateDirs.minByOrNull { d ->
-                val newHead = Point(head.x + d.x, head.y + d.y)
-                abs(newHead.x - food.x) + abs(newHead.y - food.y)
+
+        // 优先级 3：对所有合法方向进行多维度评估打分
+        var bestDir: Point? = null
+        var bestScoreVal = Int.MIN_VALUE
+        var bestDist = Int.MAX_VALUE
+
+        for (d in validDirs) {
+            val newHead = Point(head.x + d.x, head.y + d.y)
+            val simSnake = ArrayDeque(snake)
+            simSnake.addFirst(newHead)
+            simSnake.removeLast()
+
+            // 评估项 A：走完后食物可达吗？
+            val foodPath = bfsPathWithSnake(newHead, food, simSnake, Point(0, 0))
+            val foodReachable = foodPath != null
+            val distToFood = foodPath?.size ?: Int.MAX_VALUE
+
+            // 评估项 B：走完后能追到尾巴吗？
+            val canReachTail = bfsPathWithSnake(newHead, simSnake.last(), simSnake, Point(0, 0)) != null
+
+            // 评估项 C：走完后活动空间有多大？
+            val space = floodFillWithSnake(newHead, simSnake)
+
+            // 综合打分
+            var localScore = 0
+            if (foodReachable) localScore += 40
+            if (canReachTail) localScore += 30
+            if (space > snake.size * 1.5f) localScore += 30
+
+            // 饥饿程度越高，越重视"离食物更近"
+            if (hungerCounter > 8) {
+                if (distToFood < 10) localScore += 20
+                else if (distToFood < 20) localScore += 10
             }
-            if (bestDir != null) {
-                directionQueue.clear()
-                directionQueue.add(bestDir)
-                return
+
+            // 极端危险方向（食物不可达 + 追不到尾巴 + 空间小）：直接排除
+            val isDeadEnd = !foodReachable && !canReachTail && space < snake.size
+            if (isDeadEnd) continue
+
+            // 比较：优先总分高，其次离食物近
+            val better = when {
+                localScore > bestScoreVal -> true
+                localScore < bestScoreVal -> false
+                distToFood < bestDist -> true
+                else -> false
+            }
+            if (better) {
+                bestScoreVal = localScore
+                bestDir = d
+                bestDist = distToFood
             }
         }
-        
-        // Step 5: 最后的绝境：选空间最大的方向
-        var bestMove: Point? = null
+
+        if (bestDir != null) {
+            directionQueue.clear()
+            directionQueue.add(bestDir)
+            return
+        }
+
+        // 兜底：如果所有方向都被评估为"死路"，选空间最大的那个拖延时间
+        var fallbackMove: Point? = null
         var maxSpace = -1
         for (d in validDirs) {
-            val space = dirSpaceMap[d] ?: 0
+            val newHead = Point(head.x + d.x, head.y + d.y)
+            val simSnake = ArrayDeque(snake)
+            simSnake.addFirst(newHead)
+            simSnake.removeLast()
+            val space = floodFillWithSnake(newHead, simSnake)
             if (space > maxSpace) {
                 maxSpace = space
-                bestMove = d
+                fallbackMove = d
             }
         }
-        if (bestMove != null) {
+        if (fallbackMove != null) {
             directionQueue.clear()
-            directionQueue.add(bestMove)
+            directionQueue.add(fallbackMove)
         }
     }
     // =======================================================
 
+    // 吃完食物后是否安全（用于"食物贴脸"时的二次验证——只在蛇很长时用）
+    private fun isEatingSafe(head: Point, foodPos: Point): Boolean {
+        val simSnake = ArrayDeque(snake)
+        simSnake.addFirst(foodPos)
+
+        val newHead = simSnake.first()
+        val newTail = simSnake.last()
+
+        val spaceAfterEating = floodFillWithSnake(newHead, simSnake)
+        if (spaceAfterEating > simSnake.size * 1.2f) return true
+        if (spaceAfterEating < simSnake.size * 0.7f) return false
+        return bfsPathWithSnake(newHead, newTail, simSnake, Point(0, 0)) != null
+    }
+
+    // ================== 汉密尔顿路径跟随 ==================
     private fun autoPilotHamiltonian() {
         if (gameOver) return
         val head = snake.first()
         if (head.x !in 0 until cols || head.y !in 0 until rows) return
-        
+
         val currentIndex = pathIndex[head.x][head.y]
         val nextIndex = (currentIndex + 1) % pathSequence.size
         val nextPoint = pathSequence[nextIndex]
-        
+
         val dx = nextPoint.x - head.x
         val dy = nextPoint.y - head.y
-        
+
         val newHead = Point(head.x + dx, head.y + dy)
         val isSelfCollision = snake.dropLast(1).any { it == newHead }
-        
+
         if (isSelfCollision) {
             val nextNextIndex = (nextIndex + 1) % pathSequence.size
             val nextNextPoint = pathSequence[nextNextIndex]
@@ -591,9 +612,10 @@ class SnakeView(context: Context) : View(context) {
             }
             return
         }
-        
+
         dir = Point(dx, dy)
     }
+    // =======================================================
 
     private fun floodFillWithSnake(start: Point, currentSnake: Collection<Point>): Int {
         val queue = ArrayDeque<Point>()
@@ -620,7 +642,7 @@ class SnakeView(context: Context) : View(context) {
         val parent = mutableMapOf<Point, Point>()
         queue.add(start)
         visited.add(start)
-        
+
         while (queue.isNotEmpty()) {
             val curr = queue.removeFirst()
             if (curr == target) {
@@ -693,15 +715,16 @@ class SnakeView(context: Context) : View(context) {
             return
         }
 
+        // 拖尾粒子
         val tailX = offsetX + tail.x * cellSize + cellSize / 2
         val tailY = offsetY + tail.y * cellSize + cellSize / 2
-        
+
         val trailColor = if (isRainbowSkin) {
             Color.HSVToColor(floatArrayOf((System.currentTimeMillis() / 10f) % 360f, 1f, 1f))
         } else {
             currentSkinBodyColor
         }
-        
+
         particles.add(
             Particle(
                 x = tailX + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
@@ -780,14 +803,14 @@ class SnakeView(context: Context) : View(context) {
         }
         shakeTime = 400f
         deathFlashAlpha = 255f
-        
+
         val headX = offsetX + snake.first().x * cellSize + cellSize / 2
         val headY = offsetY + snake.first().y * cellSize + cellSize / 2
         shockwaveX = headX
         shockwaveY = headY
         shockwaveRadius = cellSize
         shockwaveAlpha = 255f
-        
+
         paintSnakeBody.color = Color.rgb(200, 50, 50)
         paintSnakeBody.setShadowLayer(20f, 0f, 0f, Color.rgb(200, 50, 50))
         paintSnakeHead.color = Color.rgb(150, 0, 0)
@@ -807,7 +830,7 @@ class SnakeView(context: Context) : View(context) {
                 )
             )
         }
-        
+
         if (aiMode != 0) {
             aiMode = 0
             onAIModeChanged?.invoke(aiMode)
@@ -823,7 +846,7 @@ class SnakeView(context: Context) : View(context) {
         currentMoney += score
         prefs.edit().putInt("money", currentMoney).apply()
         onMoneyChanged?.invoke(currentMoney)
-        
+
         if (score > aiBestScore) {
             aiBestScore = score
             prefs.edit().putInt("ai_best_score", aiBestScore).apply()
@@ -852,7 +875,7 @@ class SnakeView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        
+
         cellSize = minOf(width / cols.toFloat(), height / rows.toFloat())
         offsetX = (width - cellSize * cols) / 2f
         offsetY = (height - cellSize * rows) / 2f
@@ -873,7 +896,7 @@ class SnakeView(context: Context) : View(context) {
         val gridAlpha = (60 + 195 * breath).toInt()
         paintGrid.alpha = gridAlpha
         paintGrid.color = currentBoardGridColor
-        
+
         for (i in 0..cols) {
             val x = offsetX + i * cellSize
             canvas.drawLine(x, offsetY, x, offsetY + rows * cellSize, paintGrid)
@@ -960,16 +983,16 @@ class SnakeView(context: Context) : View(context) {
                 val headY = points.first().y
                 val tailX = points.last().x
                 val tailY = points.last().y
-                
+
                 val angle = atan2(tailY - headY, tailX - headX)
                 val timeOffset = (System.currentTimeMillis() % 3000) / 3000f
                 val flowDistance = cellSize * 6 * timeOffset
-                
+
                 val startX = headX - cos(angle) * flowDistance
                 val startY = headY - sin(angle) * flowDistance
                 val endX = tailX - cos(angle) * flowDistance
                 val endY = tailY - sin(angle) * flowDistance
-                
+
                 val shader = LinearGradient(
                     startX, startY,
                     endX, endY,
@@ -985,11 +1008,11 @@ class SnakeView(context: Context) : View(context) {
                 paintSnakeBody.alpha = 255
                 paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
             }
-            
+
             paintSnakeBody.strokeWidth = cellSize * 0.8f
             paintSnakeBody.alpha = if (isRainbowSkin) 150 else 120
             canvas.drawPath(path, paintSnakeBody)
-            
+
             paintSnakeBody.strokeWidth = cellSize * 0.65f
             paintSnakeBody.alpha = 255
             canvas.drawPath(path, paintSnakeBody)
@@ -1018,7 +1041,7 @@ class SnakeView(context: Context) : View(context) {
                 canvas.drawCircle(p.x, p.y, cellSize * 0.15f * p.life * p.size, paintParticle)
             }
         }
-        
+
         if (shockwaveAlpha > 0) {
             paintShockwave.alpha = shockwaveAlpha.toInt().coerceIn(0, 255)
             canvas.drawCircle(shockwaveX, shockwaveY, shockwaveRadius, paintShockwave)
@@ -1066,7 +1089,10 @@ class SnakeView(context: Context) : View(context) {
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (aiMode != 0 && event.action == MotionEvent.ACTION_UP) {
-            if (gameOver) { reset(); return true }
+            if (gameOver) {
+                reset()
+                return true
+            }
             return true
         }
         when (event.action) {
@@ -1076,7 +1102,10 @@ class SnakeView(context: Context) : View(context) {
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                if (gameOver) { reset(); return true }
+                if (gameOver) {
+                    reset()
+                    return true
+                }
                 val dx = event.x - touchStartX
                 val dy = event.y - touchStartY
                 if (abs(dx) < 15 && abs(dy) < 15) return true
