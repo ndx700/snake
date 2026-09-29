@@ -110,13 +110,15 @@ class SnakeView @JvmOverloads constructor(
     private val text = Paint(Paint.ANTI_ALIAS_FLAG)
     private val panel = Paint(Paint.ANTI_ALIAS_FLAG)
     private val border = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val pathPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val snakePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val headPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val foodPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val debugRoute = Paint(Paint.ANTI_ALIAS_FLAG)
     private var flash = 0f
+
+    // ===== 性能优化：用数组替代 HashSet/ArrayDeque，避免 GC 导致卡顿 =====
+    private val bfsVisited = BooleanArray(cols * rows)
+    private val bfsQueue = IntArray(cols * rows)
 
     private val frame = object : Choreographer.FrameCallback {
         override fun doFrame(ns: Long) {
@@ -494,21 +496,39 @@ class SnakeView @JvmOverloads constructor(
     }
     private fun inside(p:P)=p.x in 0 until cols&&p.y in 0 until rows
 
+    // ===== 优化：免费区域计算不再用 HashSet，改用数组 =====
     private fun freeRegion(body:ArrayDeque<P>):Int {
         if(body.isEmpty())return 0
-        val blocked=HashSet(body)
-        val start=body.first()
-        blocked.remove(start)
-        val seen=HashSet<P>(); val qu=ArrayDeque<P>()
-        qu.add(start);seen.add(start)
-        while(qu.isNotEmpty()){
-            val p=qu.removeFirst()
-            for(d in dirs){
-                val n=P(p.x+d.x,p.y+d.y)
-                if(inside(n)&&!blocked.contains(n)&&seen.add(n))qu.add(n)
+        java.util.Arrays.fill(bfsVisited, false)
+        for (p in body) bfsVisited[p.y * cols + p.x] = true
+        val start = body.first()
+        bfsVisited[start.y * cols + start.x] = false
+        var head = 0; var tail = 1
+        bfsQueue[0] = start.y * cols + start.x
+        var count = 0
+        while (head < tail) {
+            val curr = bfsQueue[head++]
+            val cx = curr % cols
+            val cy = curr / cols
+            count++
+            if (cx > 0) {
+                val nx = curr - 1
+                if (!bfsVisited[nx]) { bfsVisited[nx] = true; bfsQueue[tail++] = nx }
+            }
+            if (cx < cols - 1) {
+                val nx = curr + 1
+                if (!bfsVisited[nx]) { bfsVisited[nx] = true; bfsQueue[tail++] = nx }
+            }
+            if (cy > 0) {
+                val nx = curr - cols
+                if (!bfsVisited[nx]) { bfsVisited[nx] = true; bfsQueue[tail++] = nx }
+            }
+            if (cy < rows - 1) {
+                val nx = curr + cols
+                if (!bfsVisited[nx]) { bfsVisited[nx] = true; bfsQueue[tail++] = nx }
             }
         }
-        return seen.size
+        return count
     }
 
     private fun countSafeMoves(body:ArrayDeque<P>):Int {
@@ -525,20 +545,44 @@ class SnakeView @JvmOverloads constructor(
         return distance(body.first(),target,body,allowTail=true)>=0
     }
 
+    // ===== 优化：距离计算不再用 HashSet，改用数组 =====
     private fun distance(start:P,target:P,body:Collection<P>,allowTail:Boolean):Int {
         if(start==target)return 0
-        val blocked=HashSet(body)
-        if(allowTail)blocked.remove(body.last())
-        blocked.remove(start)
-        val q=ArrayDeque<Pair<P,Int>>();val seen=HashSet<P>()
-        q.add(start to 0);seen.add(start)
-        while(q.isNotEmpty()){
-            val (p,dd)=q.removeFirst()
-            for(d in dirs){
-                val n=P(p.x+d.x,p.y+d.y)
-                if(n==target)return dd+1
-                if(inside(n)&&!blocked.contains(n)&&seen.add(n))q.add(n to dd+1)
+        java.util.Arrays.fill(bfsVisited, false)
+        for (p in body) bfsVisited[p.y * cols + p.x] = true
+        if (allowTail && body.isNotEmpty()) {
+            val last = body.last()
+            bfsVisited[last.y * cols + last.x] = false
+        }
+        bfsVisited[start.y * cols + start.x] = false
+        var head = 0; var tail = 1
+        bfsQueue[0] = start.y * cols + start.x
+        var dist = 0
+        while (head < tail) {
+            val layerSize = tail - head
+            for (i in 0 until layerSize) {
+                val curr = bfsQueue[head++]
+                val cx = curr % cols
+                val cy = curr / cols
+                if (cx == target.x && cy == target.y) return dist
+                if (cx > 0) {
+                    val nx = curr - 1
+                    if (!bfsVisited[nx]) { bfsVisited[nx] = true; bfsQueue[tail++] = nx }
+                }
+                if (cx < cols - 1) {
+                    val nx = curr + 1
+                    if (!bfsVisited[nx]) { bfsVisited[nx] = true; bfsQueue[tail++] = nx }
+                }
+                if (cy > 0) {
+                    val nx = curr - cols
+                    if (!bfsVisited[nx]) { bfsVisited[nx] = true; bfsQueue[tail++] = nx }
+                }
+                if (cy < rows - 1) {
+                    val nx = curr + cols
+                    if (!bfsVisited[nx]) { bfsVisited[nx] = true; bfsQueue[tail++] = nx }
+                }
             }
+            dist++
         }
         return -1
     }
@@ -616,14 +660,7 @@ class SnakeView @JvmOverloads constructor(
     private fun drawSnake(c:Canvas){
         if(snake.isEmpty())return
         snakePaint.strokeWidth=max(8f,cell*.62f)
-        val path=Path()
-        var first=true
-        snake.forEachIndexed { i,p ->
-            val x=ox+(p.x+.5f)*cell;val y=oy+(p.y+.5f)*cell
-            if(first){path.moveTo(x,y);first=false}else path.lineTo(x,y)
-            if(rainbowSkin)snakePaint.color=hsv[(i*17+score)%360] else snakePaint.color=bodyColor
-        }
-        // 用线段逐段绘制，保证彩虹皮肤每段不同
+        // 删除了原来无用的 Path 循环，直接使用 drawLine 绘制
         val list=snake.toList()
         for(i in 0 until list.size-1){
             val a=list[i];val b=list[i+1]
