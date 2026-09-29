@@ -59,6 +59,16 @@ class SnakeView @JvmOverloads constructor(
     private var hungerCounter = 0
     private var foodUnreachableStreak = 0
 
+    // ===== 学习参数：这些值会随死亡变化，影响决策 =====
+    private var aggression = 1.0f       // 激进程度：食物吸引力倍数
+    private var safetyMargin = 1.2f     // 安全余量：危险判定的严格程度
+    private var shortcutBonus = 1.0f    // 抄近道倍数：HAM 抄近道距离
+    private var deathByWall = 0
+    private var deathBySelf = 0
+    private var deathByTrap = 0
+    private var totalGames = 0
+    private var lastDeathInfo = ""
+
     private var forcedStrategy = -1
     private var strategyMode = 0
     private var lastReason = "初始化"
@@ -105,8 +115,6 @@ class SnakeView @JvmOverloads constructor(
     private val bfsParentX = Array(cols) { IntArray(rows) }
     private val bfsParentY = Array(cols) { IntArray(rows) }
     private val bfsQueue = IntArray(cols * rows + 10)
-    private val regionVisited = Array(cols) { BooleanArray(rows) }
-    private val regionQueue = IntArray(cols * rows + 10)
 
     private val pathBuf = Path()
     private val pointsBuf = Array(300) { PointF() }
@@ -156,16 +164,16 @@ class SnakeView @JvmOverloads constructor(
         style = Paint.Style.STROKE; strokeWidth = 3f
     }
     private val paintModeName = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textSize = 24f; textAlign = Paint.Align.CENTER; isFakeBoldText = true
+        textSize = 22f; textAlign = Paint.Align.CENTER; isFakeBoldText = true
     }
     private val paintModeDesc = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE; textSize = 15f; textAlign = Paint.Align.CENTER
+        color = Color.WHITE; textSize = 13f; textAlign = Paint.Align.CENTER
     }
     private val paintReason = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(255, 215, 0); textSize = 14f; textAlign = Paint.Align.CENTER
+        color = Color.rgb(255, 215, 0); textSize = 13f; textAlign = Paint.Align.LEFT
     }
-    private val paintModeInfo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(180, 180, 180); textSize = 13f; textAlign = Paint.Align.LEFT
+    private val paintLearn = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(120, 255, 180); textSize = 12f; textAlign = Paint.Align.LEFT
     }
     private val paintBoardBg = Paint(Paint.ANTI_ALIAS_FLAG)
     private val boardMatrix = Matrix()
@@ -190,7 +198,7 @@ class SnakeView @JvmOverloads constructor(
 
     init {
         initHamPath()
-        highScore = prefs.getInt("high_score", 0)
+        loadAllPrefs()
         updateCurrentSkin()
         updateCurrentBoard()
         reset()
@@ -202,6 +210,29 @@ class SnakeView @JvmOverloads constructor(
             if (c % 2 == 0) for (r in 0 until rows) { pathIndex[c][r] = pathSequence.size; pathSequence.add(Point(c, r)) }
             else for (r in rows - 1 downTo 0) { pathIndex[c][r] = pathSequence.size; pathSequence.add(Point(c, r)) }
         }
+    }
+
+    private fun loadAllPrefs() {
+        highScore = prefs.getInt("high_score", 0)
+        aggression = prefs.getFloat("learn_aggression", 1.0f)
+        safetyMargin = prefs.getFloat("learn_safety", 1.2f)
+        shortcutBonus = prefs.getFloat("learn_shortcut", 1.0f)
+        deathByWall = prefs.getInt("stat_wall", 0)
+        deathBySelf = prefs.getInt("stat_self", 0)
+        deathByTrap = prefs.getInt("stat_trap", 0)
+        totalGames = prefs.getInt("stat_total", 0)
+    }
+
+    private fun saveLearning() {
+        prefs.edit()
+            .putFloat("learn_aggression", aggression)
+            .putFloat("learn_safety", safetyMargin)
+            .putFloat("learn_shortcut", shortcutBonus)
+            .putInt("stat_wall", deathByWall)
+            .putInt("stat_self", deathBySelf)
+            .putInt("stat_trap", deathByTrap)
+            .putInt("stat_total", totalGames)
+            .apply()
     }
 
     fun getAIMode() = aiMode
@@ -328,20 +359,92 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // =============================================================
-    // ================= 决策核心 =================
-    // =============================================================
+    // ============================================================
+    // ============ 学习系统：死因分析 + 参数进化 ============
+    // ============================================================
+
+    /**
+     * 分类死因：
+     *  WALL  撞墙（蛇头贴边）
+     *  TRAP  被围死（空间太小）
+     *  SELF  撞自己
+     */
+    private fun classifyDeath(): String {
+        val head = snake.first()
+        if (head.x == 0 || head.x == cols - 1 || head.y == 0 || head.y == rows - 1) {
+            return "WALL"
+        }
+        // 死亡前的位置空间
+        val space = regionSize(head, snake)
+        if (space < snake.size * 1.2f) return "TRAP"
+        return "SELF"
+    }
+
+    /**
+     * 死因 → 参数调整：
+     *  撞墙     → 更保守（激进↓，抄近道↓）
+     *  撞自己   → 更保守（安全余量↑）
+     *  被围死   → 更保守（安全余量↑，激进↓）
+     *  高分      → 奖励（激进↑，抄近道↑）
+     *  速死      → 惩罚（激进↓）
+     */
+    private fun analyzeAndLearn() {
+        val reason = classifyDeath()
+        val snakeLen = snake.size
+        val space = regionSize(snake.first(), snake)
+        val ratio = space.toFloat() / snakeLen
+
+        when (reason) {
+            "WALL" -> {
+                deathByWall++
+                aggression = (aggression * 0.88f).coerceAtLeast(0.5f)
+                shortcutBonus = (shortcutBonus * 0.93f).coerceAtLeast(0.5f)
+                lastDeathInfo = "撞墙死了 → 激进↓ 抄近道↓"
+            }
+            "SELF" -> {
+                deathBySelf++
+                safetyMargin = (safetyMargin * 1.10f).coerceAtMost(3.0f)
+                lastDeathInfo = "撞自己了 → 安全余量↑"
+            }
+            "TRAP" -> {
+                deathByTrap++
+                safetyMargin = (safetyMargin * 1.15f).coerceAtMost(3.0f)
+                aggression = (aggression * 0.90f).coerceAtLeast(0.5f)
+                lastDeathInfo = "被围死了 → 安全余量↑ 激进↓"
+            }
+        }
+
+        // 高分加成
+        if (score > 5000) {
+            aggression = (aggression * 1.06f).coerceAtMost(2.0f)
+            shortcutBonus = (shortcutBonus * 1.06f).coerceAtMost(2.0f)
+            lastDeathInfo += " | 高分奖励"
+        }
+        // 速死惩罚
+        if (score < 200) {
+            aggression = (aggression * 0.88f).coerceAtLeast(0.5f)
+            lastDeathInfo += " | 速死惩罚"
+        }
+
+        totalGames++
+        saveLearning()
+    }
+
+    // ============================================================
+    // =============== 决策核心（使用学习参数）===============
+    // ============================================================
 
     private fun analyzeAndDecide(head: Point): Decision {
         val snakeLen = snake.size
         val space = floodFill(head, snake)
         val spaceRatio = space.toFloat() / snakeLen
 
+        // ★ 学习参数参与决策：安全余量越高，越早进入危险等级
         val danger = when {
-            spaceRatio < 1.1 -> 5
-            spaceRatio < 1.5 -> 4
-            spaceRatio < 2.5 -> 3
-            spaceRatio < 4.0 -> 2
+            spaceRatio < 1.0f * safetyMargin -> 5
+            spaceRatio < 1.4f * safetyMargin -> 4
+            spaceRatio < 2.5f * safetyMargin -> 3
+            spaceRatio < 4.0f * safetyMargin -> 2
             else -> 1
         }
         val hunger = when {
@@ -369,10 +472,9 @@ class SnakeView @JvmOverloads constructor(
             else -> 3
         }
 
-        // 优先级：保命 > 吃饭 > 稳分 > 长分
-        if (danger >= 5) return Decision(3, "空间${spaceRatio.toInt()}x极危→纯HAM")
+        if (danger >= 5) return Decision(3, "空间${"%.1f".format(spaceRatio)}x 极危→纯HAM")
         if (hunger >= 5 && foodReachable) return Decision(0, "饿了${hungerCounter}步→BFS冲食")
-        if (danger >= 4) return Decision(1, "空间${spaceRatio.toInt()}x紧张→追尾")
+        if (danger >= 4) return Decision(1, "空间${"%.1f".format(spaceRatio)}x 紧张→追尾")
         if (foodState >= 5 && danger >= 3) return Decision(1, "食物${foodUnreachableStreak}步不可达→追尾")
         if (stage >= 3) return Decision(3, "蛇长${snakeLen}→纯HAM")
         if (stage >= 2) return Decision(2, "中期${snakeLen}节→加权HAM")
@@ -380,46 +482,6 @@ class SnakeView @JvmOverloads constructor(
         if (stage == 0 && danger <= 2 && hunger <= 2) return Decision(4, "前期空闲→深度Beam")
         if (danger <= 2) return Decision(0, "空间充裕→BFS吃食")
         return Decision(0, "默认BFS")
-    }
-
-    /**
-     * 通用安全检测：模拟走一步后，从新蛇头出发
-     *  - 食物是否可达（除非极度饥饿）
-     *  - 尾巴是否可达
-     *  - 连通区域是否 >= 蛇长
-     */
-    private fun stepIsSafe(head: Point, d: Point): Boolean {
-        val nh = Point(head.x + d.x, head.y + d.y)
-        val ate = nh.x == food.x && nh.y == food.y
-        val sim = ArrayDeque(snake)
-        sim.addFirst(nh)
-        if (!ate) sim.removeLast()
-        val region = regionSize(nh, sim)
-        val canReachFood = bfsPath(nh, food, sim, Point(0, 0)) != null
-        val canReachTail = bfsPath(nh, sim.last(), sim, Point(0, 0)) != null
-        if (region < sim.size) return false
-        if (!canReachTail && region < sim.size * 2) return false
-        if (!canReachFood && hungerCounter < 12 && region < sim.size * 2) return false
-        return true
-    }
-
-    private fun regionSize(start: Point, currentSnake: Collection<Point>): Int {
-        for (x in 0 until cols) for (y in 0 until rows) regionVisited[x][y] = false
-        for (p in currentSnake) regionVisited[p.x][p.y] = true
-        var h = 0; var t = 0
-        regionQueue[t++] = start.x * rows + start.y
-        regionVisited[start.x][start.y] = true
-        var cnt = 0
-        while (h < t) {
-            val c = regionQueue[h++]
-            val cx = c / rows; val cy = c % rows
-            cnt++
-            if (cx > 0 && !regionVisited[cx - 1][cy]) { regionVisited[cx - 1][cy] = true; regionQueue[t++] = (cx - 1) * rows + cy }
-            if (cx < cols - 1 && !regionVisited[cx + 1][cy]) { regionVisited[cx + 1][cy] = true; regionQueue[t++] = (cx + 1) * rows + cy }
-            if (cy > 0 && !regionVisited[cx][cy - 1]) { regionVisited[cx][cy - 1] = true; regionQueue[t++] = cx * rows + (cy - 1) }
-            if (cy < rows - 1 && !regionVisited[cx][cy + 1]) { regionVisited[cx][cy + 1] = true; regionQueue[t++] = cx * rows + (cy + 1) }
-        }
-        return cnt
     }
 
     private fun canSafelyEnterHam(head: Point, validDirs: List<Point>): Pair<Boolean, String> {
@@ -476,7 +538,6 @@ class SnakeView @JvmOverloads constructor(
         if (chosen != null) { directionQueue.clear(); directionQueue.add(chosen) }
     }
 
-    // ============ BFS + 分区安全过滤 ============
     private fun fastBfsStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 12) {
             val p = bfsPath(head, food, snake, dir)
@@ -504,19 +565,17 @@ class SnakeView @JvmOverloads constructor(
             val sim = ArrayDeque(snake); sim.addFirst(nh)
             val ate = nh.x == food.x && nh.y == food.y
             if (!ate) sim.removeLast()
-
             val region = regionSize(nh, sim)
-            val space = floodFill(nh, sim)
             val dist = abs(nh.x - food.x) + abs(nh.y - food.y)
             val canReachTail = bfsPath(nh, sim.last(), sim, Point(0, 0)) != null
             val canReachFood = bfsPath(nh, food, sim, Point(0, 0)) != null
 
-            var s = region * 15 + space * 5 - dist * 4
-            if (ate) s += 3000
+            // ★ 学习参数影响打分
+            var s = region * 15 - (dist * 4 / aggression).toInt()
+            if (ate) s += (3000 * aggression).toInt()
             if (canReachTail) s += 2000
             if (canReachFood) s += 1000
-            // 分区隔离重罚
-            if (region < sim.size) s -= 50000
+            if (region < sim.size * safetyMargin) s -= 50000
             if (!canReachTail && !canReachFood) s -= 10000
             if (nh.x == 0 || nh.x == cols - 1 || nh.y == 0 || nh.y == rows - 1) s -= 100
 
@@ -525,7 +584,6 @@ class SnakeView @JvmOverloads constructor(
         return bestDir
     }
 
-    // ============ 深度 Beam ============
     private fun deepBeamStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
             val p = bfsPath(head, food, snake, dir)
@@ -540,7 +598,7 @@ class SnakeView @JvmOverloads constructor(
             if (validDirs.contains(fd) && isEatingSafeQuick(head, food)) return fd
         }
 
-        val beamWidth = 12; val depth = 6
+        val beamWidth = 10; val depth = 5
         var beam = ArrayList<BeamNode>(validDirs.size)
         for (d in validDirs) {
             val nh = Point(head.x + d.x, head.y + d.y)
@@ -580,19 +638,17 @@ class SnakeView @JvmOverloads constructor(
     private fun fullScoreNode(node: BeamNode): Int {
         val nh = node.simSnake.first()
         val region = regionSize(nh, node.simSnake)
-        val space = floodFill(nh, node.simSnake)
         val reachTail = bfsPath(nh, node.simSnake.last(), node.simSnake, Point(0, 0)) != null
         val reachFood = bfsPath(nh, food, node.simSnake, Point(0, 0)) != null
         val distToFood = abs(nh.x - food.x) + abs(nh.y - food.y)
-        var s = region * 12 + space * 5 - distToFood * 3
+        var s = region * 12 - (distToFood * 3 / aggression).toInt()
         if (reachTail) s += 2500
-        if (reachFood) s += 800
-        s += node.foodCount * 800
-        if (region < node.simSnake.size) s -= 100000
+        if (reachFood) s += (800 * aggression).toInt()
+        s += (node.foodCount * 800 * aggression).toInt()
+        if (region < node.simSnake.size * safetyMargin) s -= 100000
         return s
     }
 
-    // ============ 追尾保命（融合吃食）============
     private fun tailChaseStrategy(head: Point, validDirs: List<Point>): Point? {
         val foodDist = abs(head.x - food.x) + abs(head.y - food.y)
         if (foodDist <= 4) {
@@ -616,14 +672,13 @@ class SnakeView @JvmOverloads constructor(
         return best ?: validDirs.firstOrNull()
     }
 
-    // ============ 加权汉密尔顿（动态抄近道）============
     private fun weightedHamStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val onPath = pathSequence[pathPos].x == head.x && pathSequence[pathPos].y == head.y
         if (!onPath) return returnToPath(head, validDirs)
 
         val snakeLen = snake.size
-        val maxShortcut = when {
+        val baseMaxShortcut = when {
             snakeLen < 20 -> 30
             snakeLen < 30 -> 25
             snakeLen < 45 -> 18
@@ -631,15 +686,15 @@ class SnakeView @JvmOverloads constructor(
             snakeLen < 85 -> 7
             else -> 4
         }
+        // ★ 学习参数影响抄近道距离
+        val maxShortcut = (baseMaxShortcut * shortcutBonus).toInt().coerceAtLeast(3)
 
         val pathToFood = bfsPath(head, food, snake, dir)
         if (pathToFood != null && pathToFood.size in 2..maxShortcut) {
             val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
             if (validDirs.contains(nextMove) && isEatingSafeQuick(head, food)) {
-                // 检查走完后能否回到路径
                 val sim = ArrayDeque(snake); sim.addFirst(food)
-                val back = canReturnToPath(sim)
-                if (back) return nextMove
+                if (canReturnToPath(sim)) return nextMove
             }
         }
 
@@ -661,7 +716,6 @@ class SnakeView @JvmOverloads constructor(
         return bfsPath(sh, p, sim, Point(0, 0)) != null
     }
 
-    // ============ 纯汉密尔顿（严格+回归）============
     private fun pureHamStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val onPath = pathSequence[pathPos].x == head.x && pathSequence[pathPos].y == head.y
@@ -687,7 +741,6 @@ class SnakeView @JvmOverloads constructor(
             val pathPos = pathIndex[nh.x][nh.y]
             val pathPoint = pathSequence[pathPos]
             if (pathPoint.x == nh.x && pathPoint.y == nh.y) {
-                // 已到路径，评分最高
                 if (bestScore < 0) { bestScore = 0; bestMove = d }
                 continue
             }
@@ -741,7 +794,7 @@ class SnakeView @JvmOverloads constructor(
         dir = Point(dx, dy)
     }
 
-    private fun floodFill(start: Point, currentSnake: Collection<Point>): Int {
+    private fun regionSize(start: Point, currentSnake: Collection<Point>): Int {
         for (x in 0 until cols) for (y in 0 until rows) ffVisited[x][y] = false
         for (p in currentSnake) ffVisited[p.x][p.y] = true
         var h = 0; var t = 0
@@ -758,6 +811,10 @@ class SnakeView @JvmOverloads constructor(
             if (cy < rows - 1 && !ffVisited[cx][cy + 1]) { ffVisited[cx][cy + 1] = true; ffQueue[t++] = cx * rows + (cy + 1) }
         }
         return cnt
+    }
+
+    private fun floodFill(start: Point, currentSnake: Collection<Point>): Int {
+        return regionSize(start, currentSnake)
     }
 
     private fun bfsPath(start: Point, target: Point, currentSnake: Collection<Point>, reverseDir: Point): List<Point>? {
@@ -883,6 +940,10 @@ class SnakeView @JvmOverloads constructor(
         val cm = prefs.getInt("money", 0) + score
         prefs.edit().putInt("money", cm).apply()
         onMoneyChanged?.invoke(cm)
+
+        // ★★★ 关键：分析死因并调整参数 ★★★
+        analyzeAndLearn()
+
         aiMode = 0
     }
 
@@ -1022,27 +1083,35 @@ class SnakeView @JvmOverloads constructor(
             canvas.drawColor(Color.argb(deathFlashAlpha.toInt().coerceIn(0, 255), 180, 0, 0))
             paintText.textSize = 80f; paintText.color = Color.RED
             paintText.setShadowLayer(20f, 0f, 0f, Color.BLACK)
-            canvas.drawText("GAME OVER", width / 2f, height / 2f - 60, paintText)
-            paintText.textSize = 40f; paintText.color = Color.WHITE
-            canvas.drawText("最终得分: $score", width / 2f, height / 2f + 10, paintText)
-            paintSubText.textSize = 30f; paintSubText.color = Color.rgb(241, 196, 15)
-            canvas.drawText("最高分: $highScore", width / 2f, height / 2f + 60, paintSubText)
+            canvas.drawText("GAME OVER", width / 2f, height / 2f - 100, paintText)
+            paintText.textSize = 34f; paintText.color = Color.WHITE
+            canvas.drawText("得分: $score  最高: $highScore", width / 2f, height / 2f - 40, paintText)
+            // ★ 显示学习信息 ★
+            paintLearn.color = Color.rgb(120, 255, 180)
+            paintLearn.textSize = 16f
+            canvas.drawText("AI学习: $lastDeathInfo", width / 2f, height / 2f + 10, paintLearn)
+            paintLearn.textSize = 14f
+            paintLearn.color = Color.rgb(255, 200, 100)
+            canvas.drawText("参数 → 激进:${"%.2f".format(aggression)} 安全:${"%.2f".format(safetyMargin)} 抄近道:${"%.2f".format(shortcutBonus)}", width / 2f, height / 2f + 40, paintLearn)
+            paintLearn.textSize = 13f
+            paintLearn.color = Color.rgb(200, 200, 200)
+            canvas.drawText("已训练 ${totalGames} 局 | 撞墙:${deathByWall} 撞自己:${deathBySelf} 被围:${deathByTrap}", width / 2f, height / 2f + 70, paintLearn)
             if ((System.currentTimeMillis() / 500) % 2 == 0L) {
-                paintSubText.textSize = 32f; paintSubText.color = Color.WHITE
-                canvas.drawText("点击屏幕重新开始", width / 2f, height / 2f + 150, paintSubText)
+                paintSubText.textSize = 28f; paintSubText.color = Color.WHITE
+                canvas.drawText("点击屏幕重新开始", width / 2f, height / 2f + 130, paintSubText)
             }
         } else if (dir.x == 0 && dir.y == 0) {
             paintSubText.textSize = 32f; paintSubText.color = Color.WHITE
             canvas.drawText("滑动屏幕开始", width / 2f, height / 2f, paintSubText)
             paintSubText.textSize = 20f; paintSubText.color = Color.LTGRAY
-            canvas.drawText("(滑动控制方向)", width / 2f, height / 2f + 50, paintSubText)
+            canvas.drawText("(AI会从每局死亡中学习)", width / 2f, height / 2f + 50, paintSubText)
         } else if (aiMode == 1) {
             val modeName: String; val modeDesc: String; val modeColor: Int
             when (strategyMode) {
-                1 -> { modeName = "🔄 追尾保命"; modeDesc = "沿身体循环，等待食物；3格内顺手吃"; modeColor = Color.rgb(241, 196, 15) }
-                2 -> { modeName = "🛤 加权汉密尔顿"; modeDesc = "动态抄近道：蛇短30格，蛇长4格"; modeColor = Color.rgb(52, 152, 219) }
+                1 -> { modeName = "🔄 追尾保命"; modeDesc = "沿身体循环，等待食物"; modeColor = Color.rgb(241, 196, 15) }
+                2 -> { modeName = "🛤 加权汉密尔顿"; modeDesc = "动态抄近道：学习参数 ${"%.1f".format(shortcutBonus)}x"; modeColor = Color.rgb(52, 152, 219) }
                 3 -> { modeName = "🛡 纯汉密尔顿"; modeDesc = "严格沿固定路径，绝对不死"; modeColor = Color.rgb(46, 204, 113) }
-                4 -> { modeName = "🧠 深度 Beam"; modeDesc = "深度6+宽度12+分区评估"; modeColor = Color.rgb(155, 89, 182) }
+                4 -> { modeName = "🧠 深度 Beam"; modeDesc = "深度5+宽度10+分区评估"; modeColor = Color.rgb(155, 89, 182) }
                 else -> { modeName = "🎯 BFS + Beam"; modeDesc = "全方向分区评估，防隔离"; modeColor = Color.rgb(231, 76, 60) }
             }
             val panelX = width / 2f; val panelY = height - 110f
@@ -1055,12 +1124,16 @@ class SnakeView @JvmOverloads constructor(
             paintModeName.color = modeColor
             canvas.drawText(modeName, panelX, panelY - 35f, paintModeName)
             canvas.drawText(modeDesc, panelX, panelY - 12f, paintModeDesc)
-            canvas.drawText("💡 $lastReason", panelX, panelY + 10f, paintReason)
+            paintReason.textSize = 12f
+            canvas.drawText("💡 $lastReason", panelX - panelW / 2 + 15f, panelY + 10f, paintReason)
+            paintLearn.textSize = 12f
+            paintLearn.color = Color.rgb(120, 255, 180)
+            canvas.drawText("🧬 激进:${"%.2f".format(aggression)} 安全:${"%.2f".format(safetyMargin)} 抄近道:${"%.2f".format(shortcutBonus)}", panelX - panelW / 2 + 15f, panelY + 30f, paintLearn)
             val snakeLen = snake.size
             val freeSpace = cols * rows - snakeLen
-            val forceTag = if (forcedStrategy >= 0) " [强制]" else ""
-            val infoText = "LEN:$snakeLen  SPACE:$freeSpace  HUNGER:$hungerCounter  STRK:$foodUnreachableStreak$forceTag"
-            canvas.drawText(infoText, panelX - panelW / 2 + 15f, panelY + 35f, paintModeInfo)
+            paintLearn.color = Color.rgb(180, 180, 180)
+            paintLearn.textSize = 11f
+            canvas.drawText("LEN:$snakeLen SPACE:$freeSpace HUNGER:$hungerCounter STRK:$foodUnreachableStreak", panelX - panelW / 2 + 15f, panelY + 48f, paintLearn)
         }
     }
 
