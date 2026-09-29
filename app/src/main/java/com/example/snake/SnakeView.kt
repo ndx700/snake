@@ -109,9 +109,14 @@ class SnakeView(context: Context) : View(context) {
     private fun update() {
         if (gameOver) return
 
+        // 修复后的方向控制逻辑：防止瞬间掉头撞到自己
         if (nextDir.x != 0 || nextDir.y != 0) {
-            if (nextDir.x != -dir.x || nextDir.y != -dir.y) {
-                dir = nextDir
+            if (dir.x == 0 && dir.y == 0) {
+                dir = nextDir // 初始状态，允许开始
+            } else if (dir.x != 0 && nextDir.y != 0) {
+                dir = nextDir // 水平移动中，只能上下转弯
+            } else if (dir.y != 0 && nextDir.x != 0) {
+                dir = nextDir // 垂直移动中，只能左右转弯
             }
         }
 
