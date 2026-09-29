@@ -43,8 +43,10 @@ class SnakeView(context: Context) : View(context) {
     private var gameOver = false
     private var running = false
     
-    // 初始很慢 180ms，最低 70ms
     private var gameSpeed = 180L
+    
+    var isAutoPlay = false
+        private set
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
@@ -53,9 +55,8 @@ class SnakeView(context: Context) : View(context) {
 
     private var currentSkinBodyColor = Color.rgb(46, 204, 113)
     private var currentSkinHeadColor = Color.rgb(39, 174, 96)
-
-    private var currentBoardBgColor = Color.rgb(17, 17, 17)
-    private var currentBoardGridColor = Color.rgb(30, 30, 30)
+    private var currentBoardBgColor = Color.BLACK
+    private var currentBoardGridColor = Color.rgb(20, 20, 20)
 
     private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -135,19 +136,15 @@ class SnakeView(context: Context) : View(context) {
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!running) return
-
             val currentTime = System.nanoTime()
             if (lastFrameTime == 0L) lastFrameTime = currentTime
-
             val deltaTime = (currentTime - lastFrameTime) / 1_000_000f
             lastFrameTime = currentTime
-
             timeAccumulator += deltaTime.toLong()
             if (timeAccumulator >= gameSpeed) {
                 update()
                 timeAccumulator -= gameSpeed
             }
-
             updateEffects(deltaTime)
             invalidate()
             Choreographer.getInstance().postFrameCallback(this)
@@ -155,10 +152,14 @@ class SnakeView(context: Context) : View(context) {
     }
 
     init {
-        // 注意：这里删除了 setLayerType(LAYER_TYPE_SOFTWARE, null)，默认开启硬件加速，最高可跑满 120 帧
         highScore = prefs.getInt("high_score", 0)
         updateCurrentSkin()
         updateCurrentBoard()
+        reset()
+    }
+
+    fun toggleAutoPlay() {
+        isAutoPlay = !isAutoPlay
         reset()
     }
 
@@ -184,7 +185,7 @@ class SnakeView(context: Context) : View(context) {
             "neon" -> { currentBoardBgColor = Color.rgb(10, 25, 47); currentBoardGridColor = Color.rgb(23, 58, 94) }
             "forest" -> { currentBoardBgColor = Color.rgb(27, 46, 26); currentBoardGridColor = Color.rgb(46, 74, 45) }
             "cyberpunk" -> { currentBoardBgColor = Color.rgb(43, 15, 59); currentBoardGridColor = Color.rgb(74, 30, 92) }
-            else -> { currentBoardBgColor = Color.rgb(17, 17, 17); currentBoardGridColor = Color.rgb(30, 30, 30) }
+            else -> { currentBoardBgColor = Color.BLACK; currentBoardGridColor = Color.rgb(20, 20, 20) }
         }
         paintGrid.color = currentBoardGridColor
         invalidate()
@@ -201,19 +202,15 @@ class SnakeView(context: Context) : View(context) {
         gameSpeed = 180L
         lastFrameTime = 0L
         timeAccumulator = 0L
-
         deathFlashAlpha = 0f
         shakeTime = 0f
         shakeOffsetX = 0f
         shakeOffsetY = 0f
-
         particles.clear()
         floatingTexts.clear()
-
         paintSnakeBody.color = currentSkinBodyColor
         paintSnakeBody.setShadowLayer(10f, 0f, 0f, currentSkinBodyColor)
         paintSnakeHead.color = currentSkinHeadColor
-
         placeFood()
         onScoreChanged?.invoke(score)
         invalidate()
@@ -261,7 +258,6 @@ class SnakeView(context: Context) : View(context) {
         } else {
             if (deathFlashAlpha > 0) deathFlashAlpha = max(0f, deathFlashAlpha - deltaTime * 0.5f)
         }
-
         if (shakeTime > 0) {
             shakeTime -= deltaTime
             shakeOffsetX = (Random.nextFloat() - 0.5f) * 30f * (shakeTime / 400f)
@@ -270,7 +266,6 @@ class SnakeView(context: Context) : View(context) {
             shakeOffsetX = 0f
             shakeOffsetY = 0f
         }
-
         val iterator = particles.iterator()
         while (iterator.hasNext()) {
             val p = iterator.next()
@@ -280,7 +275,6 @@ class SnakeView(context: Context) : View(context) {
             p.life -= deltaTime * 0.002f
             if (p.life <= 0) iterator.remove()
         }
-
         val textIterator = floatingTexts.iterator()
         while (textIterator.hasNext()) {
             val t = textIterator.next()
@@ -290,8 +284,135 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
+    // ================== 顶级 AI 核心逻辑 ==================
+    
+    private fun autoPilot() {
+        if (gameOver) return
+        
+        val currentHead = snake.first()
+        
+        // 1. 尝试寻找去食物的路径
+        val pathToFood = bfsPath(currentHead, food, snake)
+        
+        if (pathToFood != null && pathToFood.size > 1) {
+            // 2. 模拟吃完食物后的状态
+            val simulatedSnake = ArrayDeque(snake)
+            simulatedSnake.addFirst(food) // 假设吃到食物
+            simulatedSnake.removeLast() // 去掉尾巴
+            
+            // 3. 安全检查：吃完后还能找到尾巴吗？
+            val tailAfterEating = simulatedSnake.last()
+            val pathToTailAfterEating = bfsPath(simulatedSnake.first(), tailAfterEating, simulatedSnake)
+            
+            if (pathToTailAfterEating != null) {
+                // 安全！去吃食物
+                val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
+                directionQueue.clear()
+                directionQueue.add(nextMove)
+                return
+            }
+        }
+        
+        // 4. 如果吃食物不安全，转入求生模式：追自己的尾巴
+        val pathToTail = bfsPath(currentHead, snake.last(), snake)
+        if (pathToTail != null && pathToTail.size > 1) {
+            val nextMove = Point(pathToTail[1].x - pathToTail[0].x, pathToTail[1].y - pathToTail[0].y)
+            directionQueue.clear()
+            directionQueue.add(nextMove)
+            return
+        }
+        
+        // 5. 连尾巴都追不到（极度危险），用洪泛填充寻找最大的生存空间
+        val bestMove = findMoveWithMaxSpace()
+        if (bestMove != null) {
+            directionQueue.clear()
+            directionQueue.add(bestMove)
+        }
+    }
+
+    // 洪泛填充算法 (Flood Fill)：计算每个可走方向能到达的空格数量，选择最大的
+    private fun findMoveWithMaxSpace(): Point? {
+        val head = snake.first()
+        val directions = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
+        var bestMove: Point? = null
+        var maxSpace = -1
+        
+        for (d in directions) {
+            val newHead = Point(head.x + d.x, head.y + d.y)
+            if (newHead.x !in 0 until cols || newHead.y !in 0 until rows) continue
+            if (snake.any { it == newHead }) continue
+            if (d.x == -dir.x && d.y == -dir.y) continue
+            
+            val space = floodFill(newHead)
+            if (space > maxSpace) {
+                maxSpace = space
+                bestMove = d
+            }
+        }
+        return bestMove
+    }
+
+    // BFS 辅助函数
+    private fun bfsPath(start: Point, target: Point, currentSnake: Collection<Point>): List<Point>? {
+        val queue = ArrayDeque<Point>()
+        val visited = mutableSetOf<Point>()
+        val parent = mutableMapOf<Point, Point>()
+        queue.add(start)
+        visited.add(start)
+        
+        while (queue.isNotEmpty()) {
+            val curr = queue.removeFirst()
+            if (curr == target) {
+                val path = mutableListOf<Point>()
+                var node = curr
+                while (node != start) {
+                    path.add(0, node)
+                    node = parent[node]!!
+                }
+                return path
+            }
+            for (d in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
+                val next = Point(curr.x + d.x, curr.y + d.y)
+                if (next.x !in 0 until cols || next.y !in 0 until rows) continue
+                // 注意：目标格子（尾巴）虽然当前被占据，但在下一回合是空的，可以走
+                if (currentSnake.any { it == next } && next != target) continue
+                if (visited.contains(next)) continue
+                visited.add(next)
+                parent[next] = curr
+                queue.add(next)
+            }
+        }
+        return null
+    }
+    
+    // 洪泛填充辅助函数
+    private fun floodFill(start: Point): Int {
+        val queue = ArrayDeque<Point>()
+        val visited = mutableSetOf<Point>()
+        queue.add(start)
+        visited.add(start)
+        
+        while (queue.isNotEmpty()) {
+            val curr = queue.removeFirst()
+            for (d in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
+                val next = Point(curr.x + d.x, curr.y + d.y)
+                if (next.x !in 0 until cols || next.y !in 0 until rows) continue
+                if (snake.any { it == next }) continue
+                if (visited.contains(next)) continue
+                visited.add(next)
+                queue.add(next)
+            }
+        }
+        return visited.size
+    }
+    // =======================================================
+
     private fun update() {
         if (gameOver) return
+
+        if (isAutoPlay) {
+            autoPilot()
+        }
 
         if (directionQueue.isNotEmpty()) {
             val next = directionQueue.removeFirst()
@@ -313,7 +434,6 @@ class SnakeView(context: Context) : View(context) {
             saveScoreAndMoney()
             return
         }
-
         if (snake.any { it == newHead }) {
             gameOver = true
             triggerDeathEffects()
@@ -322,7 +442,6 @@ class SnakeView(context: Context) : View(context) {
         }
 
         snake.addFirst(newHead)
-
         if (newHead == food) {
             score += 10
             onScoreChanged?.invoke(score)
@@ -338,22 +457,11 @@ class SnakeView(context: Context) : View(context) {
         vibrate(35, 100)
         val foodCenterX = offsetX + food.x * cellSize + cellSize / 2
         val foodCenterY = offsetY + food.y * cellSize + cellSize / 2
-
-        val colors = intArrayOf(
-            Color.rgb(231, 76, 60), Color.rgb(241, 196, 15),
-            Color.rgb(46, 204, 113), Color.rgb(52, 152, 219)
-        )
+        val colors = intArrayOf(Color.rgb(231, 76, 60), Color.rgb(241, 196, 15), Color.rgb(46, 204, 113), Color.rgb(52, 152, 219))
         for (i in 0 until 15) {
             val angle = Random.nextFloat() * 2 * PI
             val speed = Random.nextFloat() * 6f + 2f
-            particles.add(
-                Particle(
-                    x = foodCenterX, y = foodCenterY,
-                    vx = cos(angle).toFloat() * speed,
-                    vy = sin(angle).toFloat() * speed,
-                    life = 1.0f, color = colors[Random.nextInt(colors.size)]
-                )
-            )
+            particles.add(Particle(foodCenterX, foodCenterY, cos(angle).toFloat() * speed, sin(angle).toFloat() * speed, 1.0f, colors[Random.nextInt(colors.size)]))
         }
         floatingTexts.add(FloatingText(foodCenterX, foodCenterY, 1.0f, "+10"))
     }
@@ -371,28 +479,17 @@ class SnakeView(context: Context) : View(context) {
                 }
             }
         }
-
         shakeTime = 400f
         deathFlashAlpha = 255f
-
         paintSnakeBody.color = Color.rgb(200, 50, 50)
         paintSnakeBody.setShadowLayer(10f, 0f, 0f, Color.rgb(200, 50, 50))
         paintSnakeHead.color = Color.rgb(150, 0, 0)
-
         val headX = offsetX + snake.first().x * cellSize + cellSize / 2
         val headY = offsetY + snake.first().y * cellSize + cellSize / 2
-
         for (i in 0 until 40) {
             val angle = Random.nextFloat() * 2 * PI
             val speed = Random.nextFloat() * 8f + 3f
-            particles.add(
-                Particle(
-                    x = headX, y = headY,
-                    vx = cos(angle).toFloat() * speed,
-                    vy = sin(angle).toFloat() * speed,
-                    life = 1.5f, color = Color.rgb(255, 50, 50)
-                )
-            )
+            particles.add(Particle(headX, headY, cos(angle).toFloat() * speed, sin(angle).toFloat() * speed, 1.5f, Color.rgb(255, 50, 50)))
         }
     }
 
@@ -409,17 +506,13 @@ class SnakeView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-
         canvas.drawColor(currentBoardBgColor)
-
         cellSize = minOf(width / cols.toFloat(), height / rows.toFloat())
         offsetX = (width - cellSize * cols) / 2f
         offsetY = (height - cellSize * rows) / 2f
 
         canvas.save()
-        if (gameOver && shakeTime > 0) {
-            canvas.translate(shakeOffsetX, shakeOffsetY)
-        }
+        if (gameOver && shakeTime > 0) canvas.translate(shakeOffsetX, shakeOffsetY)
 
         for (i in 0..cols) {
             val x = offsetX + i * cellSize
@@ -431,21 +524,14 @@ class SnakeView(context: Context) : View(context) {
         }
 
         val pulse = 1f + 0.15f * sin(System.currentTimeMillis() / 150.0).toFloat()
-        canvas.drawCircle(
-            offsetX + food.x * cellSize + cellSize / 2,
-            offsetY + food.y * cellSize + cellSize / 2,
-            cellSize * 0.35f * pulse,
-            paintFood
-        )
+        canvas.drawCircle(offsetX + food.x * cellSize + cellSize / 2, offsetY + food.y * cellSize + cellSize / 2, cellSize * 0.35f * pulse, paintFood)
 
         if (snake.isNotEmpty()) {
             val progress = if (gameOver) 0f else (timeAccumulator.toFloat() / gameSpeed).coerceIn(0f, 1f)
-            
             val path = Path()
             val points = snake.mapIndexed { index, p ->
                 var baseX = offsetX + p.x * cellSize + cellSize / 2
                 var baseY = offsetY + p.y * cellSize + cellSize / 2
-
                 if (index == 0 && !gameOver) {
                     val prevP = if (snake.size > 1) snake[1] else Point(snake[0].x - dir.x, snake[0].y - dir.y)
                     val prevX = offsetX + prevP.x * cellSize + cellSize / 2
@@ -453,26 +539,19 @@ class SnakeView(context: Context) : View(context) {
                     baseX = prevX + (baseX - prevX) * progress
                     baseY = prevY + (baseY - prevY) * progress
                 }
-
                 val t = System.currentTimeMillis() / 200.0
                 val swingAmplitude = if (dir.x != 0) cellSize * 0.08f else cellSize * 0.04f
                 val swingX = sin(t + index * 0.5).toFloat() * swingAmplitude
                 val swingY = cos(t + index * 0.5).toFloat() * swingAmplitude
-
                 PointF(baseX + swingX, baseY + swingY)
             }
-
             path.moveTo(points[0].x, points[0].y)
             for (i in 1 until points.size) {
                 val prev = points[i - 1]
                 val curr = points[i]
-                val midX = (prev.x + curr.x) / 2f
-                val midY = (prev.y + curr.y) / 2f
-                path.quadTo(prev.x, prev.y, midX, midY)
+                path.quadTo(prev.x, prev.y, (prev.x + curr.x) / 2f, (prev.y + curr.y) / 2f)
             }
-            if (points.size > 1) {
-                path.lineTo(points.last().x, points.last().y)
-            }
+            if (points.size > 1) path.lineTo(points.last().x, points.last().y)
 
             paintSnakeBody.strokeWidth = cellSize * 0.75f
             canvas.drawPath(path, paintSnakeBody)
@@ -496,19 +575,14 @@ class SnakeView(context: Context) : View(context) {
             paintParticle.alpha = (p.life * 255).toInt().coerceIn(0, 255)
             canvas.drawCircle(p.x, p.y, cellSize * 0.15f * p.life, paintParticle)
         }
-
         floatingTexts.forEach { t ->
             paintFloatingText.alpha = (t.life * 255).toInt().coerceIn(0, 255)
             canvas.drawText(t.text, t.x, t.y, paintFloatingText)
         }
-
         canvas.restore()
 
         if (gameOver) {
             canvas.drawColor(Color.argb(deathFlashAlpha.toInt().coerceIn(0, 255), 180, 0, 0))
-        }
-
-        if (gameOver) {
             paintText.textSize = 80f
             paintText.color = Color.RED
             paintText.setShadowLayer(20f, 0f, 0f, Color.BLACK)
@@ -530,10 +604,10 @@ class SnakeView(context: Context) : View(context) {
             }
         } else if (dir.x == 0 && dir.y == 0) {
             paintSubText.textSize = 32f
-            paintSubText.color = if (currentBoardBgColor == Color.rgb(240, 240, 240)) Color.DKGRAY else Color.WHITE
+            paintSubText.color = if (currentBoardBgColor == Color.BLACK) Color.WHITE else Color.DKGRAY
             canvas.drawText("滑动屏幕开始", width / 2f, height / 2f, paintSubText)
             paintSubText.textSize = 20f
-            paintSubText.color = if (currentBoardBgColor == Color.rgb(240, 240, 240)) Color.GRAY else Color.LTGRAY
+            paintSubText.color = if (currentBoardBgColor == Color.BLACK) Color.LTGRAY else Color.GRAY
             canvas.drawText("(滑动控制方向)", width / 2f, height / 2f + 50, paintSubText)
         }
     }
@@ -542,6 +616,10 @@ class SnakeView(context: Context) : View(context) {
     private var touchStartY = 0f
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (isAutoPlay && event.action == MotionEvent.ACTION_UP) {
+            if (gameOver) { reset(); return true }
+            return true
+        }
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
                 touchStartX = event.x
@@ -549,30 +627,20 @@ class SnakeView(context: Context) : View(context) {
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                if (gameOver) {
-                    reset()
-                    return true
-                }
+                if (gameOver) { reset(); return true }
                 val dx = event.x - touchStartX
                 val dy = event.y - touchStartY
-
                 if (abs(dx) < 15 && abs(dy) < 15) return true
-
                 val lastDir = if (directionQueue.isNotEmpty()) directionQueue.last() else dir
-                
                 if (abs(dx) > abs(dy)) {
                     val newDir = if (dx > 0) Point(1, 0) else Point(-1, 0)
                     if (newDir.x != -lastDir.x || newDir.y != -lastDir.y) {
-                        if (directionQueue.size < 2 && (lastDir.x != newDir.x || lastDir.y != newDir.y)) {
-                            directionQueue.add(newDir)
-                        }
+                        if (directionQueue.size < 2 && (lastDir.x != newDir.x || lastDir.y != newDir.y)) directionQueue.add(newDir)
                     }
                 } else {
                     val newDir = if (dy > 0) Point(0, 1) else Point(0, -1)
                     if (newDir.x != -lastDir.x || newDir.y != -lastDir.y) {
-                        if (directionQueue.size < 2 && (lastDir.x != newDir.x || lastDir.y != newDir.y)) {
-                            directionQueue.add(newDir)
-                        }
+                        if (directionQueue.size < 2 && (lastDir.x != newDir.x || lastDir.y != newDir.y)) directionQueue.add(newDir)
                     }
                 }
                 return true
