@@ -26,19 +26,11 @@ class MainActivity : AppCompatActivity() {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         
-        // --- 核心修改：请求最高 120Hz 刷新率 ---
+        // 申请 120Hz 刷新率
         try {
-            val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                display
-            } else {
-                @Suppress("DEPRECATION")
-                windowManager.defaultDisplay
-            }
-            
+            val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display else windowManager.defaultDisplay
             if (display != null) {
-                val modes = display.supportedModes
-                // 寻找支持的最高刷新率（例如 120Hz）
-                val maxMode = modes.maxByOrNull { it.refreshRate }
+                val maxMode = display.supportedModes.maxByOrNull { it.refreshRate }
                 if (maxMode != null) {
                     val params = window.attributes
                     params.preferredDisplayModeId = maxMode.modeId
@@ -48,42 +40,50 @@ class MainActivity : AppCompatActivity() {
                     window.attributes = params
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        // ------------------------------------
+        } catch (e: Exception) { e.printStackTrace() }
 
         prefs = getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
         gameView = SnakeView(this)
 
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(48, 48, 48, 48)
+            setPadding(32, 32, 32, 32)
             gravity = Gravity.CENTER_VERTICAL
         }
 
         scoreView = TextView(this).apply {
             setTextColor(Color.WHITE)
-            textSize = 18f
+            textSize = 16f
             text = "分数: 0"
         }
 
         moneyView = TextView(this).apply {
             setTextColor(Color.rgb(241, 196, 15))
-            textSize = 18f
+            textSize = 16f
             text = "金币: ${prefs.getInt("money", 0)}"
-            setPadding(48, 0, 0, 0)
+            setPadding(32, 0, 0, 0)
+        }
+
+        // --- 核心：AI 演示按钮 ---
+        val autoBtn = Button(this).apply {
+            text = "🤖 演示"
+            textSize = 12f
+            setBackgroundColor(Color.rgb(155, 89, 182)) // 紫色
+            setTextColor(Color.WHITE)
+            setPadding(16, 0, 16, 0)
+            setOnClickListener { 
+                gameView.toggleAutoPlay() 
+                Toast.makeText(this@MainActivity, if (gameView.isAutoPlay) "AI 演示已开启" else "AI 演示已关闭", Toast.LENGTH_SHORT).show()
+            }
         }
 
         val shopBtn = Button(this).apply {
             text = "🛒 商店"
-            textSize = 14f
+            textSize = 12f
             setBackgroundColor(Color.rgb(52, 152, 219))
             setTextColor(Color.WHITE)
-            setPadding(24, 0, 24, 0)
-            setOnClickListener {
-                showShopCategoryDialog()
-            }
+            setPadding(16, 0, 16, 0)
+            setOnClickListener { showShopCategoryDialog() }
         }
 
         val spacer = FrameLayout(this).apply {
@@ -93,6 +93,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(scoreView)
         topBar.addView(moneyView)
         topBar.addView(spacer)
+        topBar.addView(autoBtn)
         topBar.addView(shopBtn)
 
         gameView.onScoreChanged = { score ->
@@ -102,25 +103,9 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { moneyView.text = "金币: $money" }
         }
 
-        val root = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
-        }
-
-        root.addView(
-            gameView,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
-        root.addView(
-            topBar,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP
-            )
-        )
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        root.addView(gameView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        root.addView(topBar, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP))
 
         setContentView(root)
     }
@@ -142,15 +127,10 @@ class MainActivity : AppCompatActivity() {
     private fun showSnakeShopDialog() {
         val currentMoney = prefs.getInt("money", 0)
         val equippedSkin = prefs.getString("equipped_skin", "green") ?: "green"
-
         val skins = listOf(
-            Skin("经典绿", "green", 0),
-            Skin("海洋蓝", "blue", 500),
-            Skin("烈焰红", "red", 1000),
-            Skin("暗夜紫", "purple", 2000),
-            Skin("黄金圣斗士", "gold", 5000)
+            Skin("经典绿", "green", 0), Skin("海洋蓝", "blue", 500),
+            Skin("烈焰红", "red", 1000), Skin("暗夜紫", "purple", 2000), Skin("黄金圣斗士", "gold", 5000)
         )
-
         val items = skins.map { skin ->
             val status = if (skin.id == equippedSkin) "[已装备]" else if (prefs.getBoolean("owned_${skin.id}", skin.price == 0)) "点击装备" else "花费 ${skin.price} 金币"
             "${skin.name}  -  $status"
@@ -161,7 +141,6 @@ class MainActivity : AppCompatActivity() {
             .setItems(items) { _, which ->
                 val selectedSkin = skins[which]
                 val isOwned = prefs.getBoolean("owned_${selectedSkin.id}", selectedSkin.price == 0)
-
                 if (isOwned) {
                     prefs.edit().putString("equipped_skin", selectedSkin.id).apply()
                     gameView.updateCurrentSkin()
@@ -179,23 +158,16 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this, "金币不足！还需要 ${selectedSkin.price - currentMoney} 金币", Toast.LENGTH_SHORT).show()
                     }
                 }
-            }
-            .setNegativeButton("返回", null)
-            .show()
+            }.setNegativeButton("返回", null).show()
     }
 
     private fun showBoardShopDialog() {
         val currentMoney = prefs.getInt("money", 0)
         val equippedBoard = prefs.getString("equipped_board", "dark") ?: "dark"
-
         val boards = listOf(
-            Board("经典暗黑", "dark", 0),
-            Board("极简白", "light", 500),
-            Board("霓虹蓝", "neon", 1500),
-            Board("森林绿", "forest", 3000),
-            Board("赛博朋克", "cyberpunk", 6000)
+            Board("经典纯黑", "dark", 0), Board("极简白", "light", 500),
+            Board("霓虹蓝", "neon", 1500), Board("森林绿", "forest", 3000), Board("赛博朋克", "cyberpunk", 6000)
         )
-
         val items = boards.map { board ->
             val status = if (board.id == equippedBoard) "[已装备]" else if (prefs.getBoolean("owned_board_${board.id}", board.price == 0)) "点击装备" else "花费 ${board.price} 金币"
             "${board.name}  -  $status"
@@ -206,7 +178,6 @@ class MainActivity : AppCompatActivity() {
             .setItems(items) { _, which ->
                 val selectedBoard = boards[which]
                 val isOwned = prefs.getBoolean("owned_board_${selectedBoard.id}", selectedBoard.price == 0)
-
                 if (isOwned) {
                     prefs.edit().putString("equipped_board", selectedBoard.id).apply()
                     gameView.updateCurrentBoard()
@@ -224,21 +195,12 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this, "金币不足！还需要 ${selectedBoard.price - currentMoney} 金币", Toast.LENGTH_SHORT).show()
                     }
                 }
-            }
-            .setNegativeButton("返回", null)
-            .show()
+            }.setNegativeButton("返回", null).show()
     }
 
     private data class Skin(val name: String, val id: String, val price: Int)
     private data class Board(val name: String, val id: String, val price: Int)
 
-    override fun onResume() {
-        super.onResume()
-        gameView.resume()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        gameView.pause()
-    }
+    override fun onResume() { super.onResume(); gameView.resume() }
+    override fun onPause() { super.onPause(); gameView.pause() }
 }
