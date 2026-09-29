@@ -34,23 +34,27 @@ class SnakeView @JvmOverloads constructor(
 
     private val cols = 15
     private val rows = 15
-
     private var cellSize = 0f
     private var offsetX = 0f
     private var offsetY = 0f
 
     private data class Point(val x: Int, val y: Int)
+    private data class MctsNode(
+        val firstDir: Point,
+        val simSnake: ArrayDeque<Point>,
+        val foodEaten: Boolean,
+        val foodCount: Int
+    )
+
     private val snake = ArrayDeque<Point>()
     private val directionQueue = ArrayDeque<Point>()
 
     private var dir = Point(0, 0)
     private var food = Point(5, 5)
-
     private var score = 0
     private var highScore = 0
     private var gameOver = false
     private var running = false
-
     private var gameSpeed = 180L
     private var aiMode = 0
 
@@ -63,7 +67,7 @@ class SnakeView @JvmOverloads constructor(
     private var hungerCounter = 0
     private var foodUnreachableStreak = 0
 
-    // 强制策略：-1=自动 0=BFS 1=追尾 2=加权HAM 3=纯HAM 4=MCTS
+    // -1=自动 0=BFS 1=追尾 2=加权HAM 3=纯HAM 4=深度Beam
     private var forcedStrategy = -1
     private var strategyMode = 0
 
@@ -384,7 +388,7 @@ class SnakeView @JvmOverloads constructor(
             1 -> tailChaseStrategy(head, validDirs)
             2 -> weightedHamStrategy(head, validDirs)
             3 -> pureHamStrategy(head, validDirs)
-            4 -> mctsStrategy(head, validDirs)
+            4 -> deepBeamStrategy(head, validDirs)
             else -> bfsBeamStrategy(head, validDirs)
         }
 
@@ -462,6 +466,81 @@ class SnakeView @JvmOverloads constructor(
         return bestDir
     }
 
+    // ============== 深度 Beam Search（替代 MCTS）==============
+    private fun deepBeamStrategy(head: Point, validDirs: List<Point>): Point? {
+        // 饥饿强破
+        if (hungerCounter > 15) {
+            val p = bfsPath(head, food, snake, dir)
+            if (p != null && p.size > 1) {
+                val nm = Point(p[1].x - p[0].x, p[1].y - p[0].y)
+                if (validDirs.contains(nm)) return nm
+            }
+        }
+        // 食物贴脸
+        val fdx = food.x - head.x
+        val fdy = food.y - head.y
+        if (abs(fdx) + abs(fdy) == 1) {
+            val fd = Point(fdx, fdy)
+            if (validDirs.contains(fd) && isEatingSafe(head, food)) return fd
+        }
+
+        val beamWidth = 8
+        val depth = 6
+
+        var beam = mutableListOf<MctsNode>()
+        for (d in validDirs) {
+            val nh = Point(head.x + d.x, head.y + d.y)
+            val sim = ArrayDeque(snake)
+            sim.addFirst(nh)
+            val ate = nh == food
+            if (!ate) sim.removeLast()
+            beam.add(MctsNode(d, sim, ate, if (ate) 1 else 0))
+        }
+        if (beam.isEmpty()) return null
+
+        for (step in 1 until depth) {
+            val nextBeam = mutableListOf<MctsNode>()
+            for (node in beam) {
+                val sh = node.simSnake.first()
+                for (nd in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
+                    val snh = Point(sh.x + nd.x, sh.y + nd.y)
+                    if (snh.x !in 0 until cols || snh.y !in 0 until rows) continue
+                    val ate = snh == food
+                    val bodyCheck = if (ate) node.simSnake else node.simSnake.dropLast(1)
+                    if (bodyCheck.any { it == snh }) continue
+                    val nsnake = ArrayDeque(node.simSnake)
+                    nsnake.addFirst(snh)
+                    if (!ate) nsnake.removeLast()
+                    nextBeam.add(MctsNode(node.firstDir, nsnake, node.foodEaten || ate, node.foodCount + if (ate) 1 else 0))
+                }
+            }
+            if (nextBeam.isEmpty()) break
+
+            val scored = nextBeam.map { Pair(it, scoreBeamNode(it)) }
+                .sortedByDescending { it.second }
+                .take(beamWidth)
+            beam = scored.map { it.first }.toMutableList()
+        }
+
+        val best = beam.maxByOrNull { scoreBeamNode(it) }
+        return best?.firstDir
+    }
+
+    private fun scoreBeamNode(node: MctsNode): Int {
+        val nh = node.simSnake.first()
+        val space = floodFill(nh, node.simSnake)
+        val reachTail = bfsPath(nh, node.simSnake.last(), node.simSnake, Point(0, 0)) != null
+        val reachFood = bfsPath(nh, food, node.simSnake, Point(0, 0)) != null
+
+        var s = 0
+        if (reachTail) s += 500
+        if (reachFood) s += 300
+        s += space * 5
+        s += node.foodCount * 400
+        if (space < node.simSnake.size) s -= 5000
+        return s
+    }
+
     private fun tailChaseStrategy(head: Point, validDirs: List<Point>): Point? {
         var best: Point? = null
         var bestSpace = -1
@@ -517,88 +596,6 @@ class SnakeView @JvmOverloads constructor(
             val sim = ArrayDeque(snake); sim.addFirst(nh); sim.removeLast()
             floodFill(nh, sim)
         }
-    }
-
-    private fun mctsStrategy(head: Point, validDirs: List<Point>): Point? {
-        if (hungerCounter > 15) {
-            val p = bfsPath(head, food, snake, dir)
-            if (p != null && p.size > 1) {
-                val nm = Point(p[1].x - p[0].x, p[1].y - p[0].y)
-                if (validDirs.contains(nm)) return nm
-            }
-        }
-
-        val rolloutCount = 6
-        val maxRolloutSteps = 30
-
-        var bestDir: Point? = null
-        var bestAvgScore = -1e9
-
-        for (d in validDirs) {
-            var total = 0.0
-            for (r in 0 until rolloutCount) {
-                total += simulateRollout(d, maxRolloutSteps)
-            }
-            val avg = total / rolloutCount
-            if (avg > bestAvgScore) {
-                bestAvgScore = avg
-                bestDir = d
-            }
-        }
-        return bestDir
-    }
-
-    private fun simulateRollout(firstDir: Point, maxSteps: Int): Double {
-        val sim = ArrayDeque(snake)
-        val nh = Point(snake.first().x + firstDir.x, snake.first().y + firstDir.y)
-        if (nh.x !in 0 until cols || nh.y !in 0 until rows) return -1000.0
-        if (sim.any { it == nh }) return -1000.0
-        sim.addFirst(nh)
-        val ateFirst = nh == food
-        if (!ateFirst) sim.removeLast()
-
-        var simFood = if (ateFirst) Point(Random.nextInt(cols), Random.nextInt(rows)) else food
-        var simDir = firstDir
-        var scoreGain = 0.0
-
-        for (step in 0 until maxSteps) {
-            val sh = sim.first()
-            val dirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
-            val valid = dirs.filter { sd ->
-                val isRev = (sd.x == -simDir.x && sd.y == -simDir.y)
-                val snh = Point(sh.x + sd.x, sh.y + sd.y)
-                val isW = snh.x !in 0 until cols || snh.y !in 0 until rows
-                val isS = sim.dropLast(1).any { it == snh }
-                !isRev && !isW && !isS
-            }
-            if (valid.isEmpty()) { scoreGain -= 500.0; break }
-
-            val next = valid.minByOrNull { sd ->
-                val snh = Point(sh.x + sd.x, sh.y + sd.y)
-                abs(snh.x - simFood.x) + abs(snh.y - simFood.y)
-            } ?: valid.first()
-
-            val snh = Point(sh.x + next.x, sh.y + next.y)
-            val ate = snh == simFood
-            sim.addFirst(snh)
-            if (ate) {
-                scoreGain += 10.0
-                var att = 0
-                while (att < 500) {
-                    val np = Point(Random.nextInt(cols), Random.nextInt(rows))
-                    if (sim.none { it == np }) { simFood = np; break }
-                    att++
-                }
-            } else {
-                sim.removeLast()
-            }
-            simDir = next
-
-            val space = floodFill(sim.first(), sim)
-            scoreGain += space * 0.1
-            if (space < sim.size) scoreGain -= 200.0
-        }
-        return scoreGain
     }
 
     private fun isEatingSafe(head: Point, foodPos: Point): Boolean {
@@ -990,8 +987,8 @@ class SnakeView @JvmOverloads constructor(
                     modeColor = Color.rgb(46, 204, 113)
                 }
                 4 -> {
-                    modeName = "🧠 MCTS 深推"
-                    modeDesc = "每方向6次rollout，深度30步"
+                    modeName = "🧠 深度 Beam 前瞻"
+                    modeDesc = "6步前瞻，每层保留8个最优分支"
                     modeColor = Color.rgb(155, 89, 182)
                 }
                 else -> {
