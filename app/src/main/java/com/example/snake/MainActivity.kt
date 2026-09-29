@@ -19,7 +19,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gameView: SnakeView
     private lateinit var scoreView: TextView
     private lateinit var moneyView: TextView
-    private lateinit var autoBtn: Button
+    private lateinit var bfsBtn: Button
+    private lateinit var hamBtn: Button
     private lateinit var prefs: android.content.SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -41,49 +42,68 @@ class MainActivity : AppCompatActivity() {
                     window.attributes = params
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (e: Exception) { e.printStackTrace() }
 
         prefs = getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
         gameView = SnakeView(this)
 
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(32, 32, 32, 32)
+            setPadding(20, 20, 20, 20)
             gravity = Gravity.CENTER_VERTICAL
         }
 
         scoreView = TextView(this).apply {
             setTextColor(Color.WHITE)
-            textSize = 16f
+            textSize = 13f
             text = "分数: 0"
         }
 
         moneyView = TextView(this).apply {
             setTextColor(Color.rgb(241, 196, 15))
-            textSize = 16f
+            textSize = 13f
             text = "金币: ${prefs.getInt("money", 0)}"
-            setPadding(32, 0, 0, 0)
+            setPadding(20, 0, 0, 0)
         }
 
-        autoBtn = Button(this).apply {
-            text = "🤖 演示"
-            textSize = 12f
+        bfsBtn = Button(this).apply {
+            text = "🤖 BFS"
+            textSize = 10f
             setBackgroundColor(Color.rgb(155, 89, 182))
             setTextColor(Color.WHITE)
-            setPadding(16, 0, 16, 0)
+            setPadding(10, 0, 10, 0)
             setOnClickListener {
-                gameView.toggleAutoPlay()
+                val newMode = if (gameView.getAIMode() == SnakeView.AI_MODE_BFS) {
+                    SnakeView.AI_MODE_NONE
+                } else {
+                    SnakeView.AI_MODE_BFS
+                }
+                gameView.setAIMode(newMode)
+            }
+        }
+
+        hamBtn = Button(this).apply {
+            text = "🛡 HAM"
+            textSize = 10f
+            setBackgroundColor(Color.rgb(52, 152, 219))
+            setTextColor(Color.WHITE)
+            setPadding(10, 0, 10, 0)
+            setOnClickListener {
+                val newMode = if (gameView.getAIMode() == SnakeView.AI_MODE_HAMILTONIAN) {
+                    SnakeView.AI_MODE_NONE
+                } else {
+                    SnakeView.AI_MODE_HAMILTONIAN
+                }
+                gameView.setAIMode(newMode)
             }
         }
 
         val shopBtn = Button(this).apply {
-            text = "🛒 商店"
-            textSize = 12f
-            setBackgroundColor(Color.rgb(52, 152, 219))
+            text = "🛒"
+            textSize = 10f
+            setBackgroundColor(Color.rgb(46, 204, 113))
             setTextColor(Color.WHITE)
-            setPadding(16, 0, 16, 0)
+            setPadding(10, 0, 10, 0)
             setOnClickListener { showShopCategoryDialog() }
         }
 
@@ -94,7 +114,8 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(scoreView)
         topBar.addView(moneyView)
         topBar.addView(spacer)
-        topBar.addView(autoBtn)
+        topBar.addView(bfsBtn)
+        topBar.addView(hamBtn)
         topBar.addView(shopBtn)
 
         gameView.onScoreChanged = { score ->
@@ -104,14 +125,27 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { moneyView.text = "金币: $money" }
         }
 
-        gameView.onAutoPlayChanged = { isAuto ->
+        gameView.onAIModeChanged = { mode ->
             runOnUiThread {
-                if (isAuto) {
-                    autoBtn.text = "🛑 停止演示"
-                    autoBtn.setBackgroundColor(Color.RED)
-                } else {
-                    autoBtn.text = "🤖 演示"
-                    autoBtn.setBackgroundColor(Color.rgb(155, 89, 182))
+                when (mode) {
+                    SnakeView.AI_MODE_BFS -> {
+                        bfsBtn.setBackgroundColor(Color.RED)
+                        bfsBtn.text = "🛑 BFS"
+                        hamBtn.setBackgroundColor(Color.rgb(52, 152, 219))
+                        hamBtn.text = "🛡 HAM"
+                    }
+                    SnakeView.AI_MODE_HAMILTONIAN -> {
+                        bfsBtn.setBackgroundColor(Color.rgb(155, 89, 182))
+                        bfsBtn.text = "🤖 BFS"
+                        hamBtn.setBackgroundColor(Color.RED)
+                        hamBtn.text = "🛑 HAM"
+                    }
+                    else -> {
+                        bfsBtn.setBackgroundColor(Color.rgb(155, 89, 182))
+                        bfsBtn.text = "🤖 BFS"
+                        hamBtn.setBackgroundColor(Color.rgb(52, 152, 219))
+                        hamBtn.text = "🛡 HAM"
+                    }
                 }
             }
         }
@@ -181,7 +215,6 @@ class MainActivity : AppCompatActivity() {
     private fun showBoardShopDialog() {
         val currentMoney = prefs.getInt("money", 0)
         val equippedBoard = prefs.getString("equipped_board", "dark") ?: "dark"
-        // 新增：RGB流光棋盘，售价 100000
         val boards = listOf(
             Board("经典纯黑", "dark", 0),
             Board("极简白", "light", 500),
