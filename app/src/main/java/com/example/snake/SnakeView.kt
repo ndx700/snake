@@ -24,7 +24,6 @@ import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.cos
 import kotlin.math.atan2
-import kotlin.math.PI
 import kotlin.random.Random
 
 class SnakeView @JvmOverloads constructor(
@@ -332,24 +331,18 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // ================================================================
-    // ============ 智能决策：每一步重新评估 4 个维度 ============
-    // ================================================================
     private fun analyzeAndDecide(head: Point): Decision {
         val snakeLen = snake.size
         val space = floodFill(head, snake)
         val spaceRatio = space.toFloat() / snakeLen
 
-        // 维度 1：危险度（可达空间 vs 蛇长）
         val dangerLevel = when {
-            spaceRatio < 1.0 -> 5   // 空间比蛇短：极危
-            spaceRatio < 1.5 -> 4   // 空间紧张
-            spaceRatio < 2.5 -> 3   // 一般
-            spaceRatio < 4.0 -> 2   // 尚可
-            else -> 1               // 空间充裕
+            spaceRatio < 1.0 -> 5
+            spaceRatio < 1.5 -> 4
+            spaceRatio < 2.5 -> 3
+            spaceRatio < 4.0 -> 2
+            else -> 1
         }
-
-        // 维度 2：饥饿度
         val hungerLevel = when {
             hungerCounter > 15 -> 5
             hungerCounter > 10 -> 4
@@ -357,72 +350,32 @@ class SnakeView @JvmOverloads constructor(
             hungerCounter > 3 -> 2
             else -> 1
         }
-
-        // 维度 3：战略态势（食物可达性 + 距离）
         val foodPath = bfsPath(head, food, snake, dir)
         val foodDist = foodPath?.size ?: 999
         val foodReachable = foodPath != null
         val foodLevel = when {
-            !foodReachable && foodUnreachableStreak > 8 -> 5  // 长期战略失败
+            !foodReachable && foodUnreachableStreak > 8 -> 5
             !foodReachable && foodUnreachableStreak > 3 -> 4
             !foodReachable -> 3
             foodDist < 8 -> 1
             foodDist < 15 -> 2
             else -> 3
         }
-
-        // 维度 4：发展阶段
         val stage = when {
-            snakeLen < 30 -> 0    // 早期
-            snakeLen < 60 -> 1    // 中期
-            snakeLen < 100 -> 2   // 后期
-            else -> 3             // 极后期
+            snakeLen < 30 -> 0
+            snakeLen < 60 -> 1
+            snakeLen < 100 -> 2
+            else -> 3
         }
 
-        // ============ 综合决策 ============
-        // 规则有严格优先级，能命中哪条就用哪条，同时给出理由
-
-        // R1: 空间极危 → 必须纯 HAM 保命
-        if (dangerLevel >= 5) {
-            return Decision(3, "空间${spaceRatio.toInt()}x极危→纯HAM保命")
-        }
-
-        // R2: 极度饥饿且食物可达 → 直接冲
-        if (hungerLevel >= 5 && foodReachable) {
-            return Decision(0, "饿了${hungerCounter}步→BFS冲食")
-        }
-
-        // R3: 空间紧张 → 追尾保命
-        if (dangerLevel >= 4) {
-            return Decision(1, "空间${spaceRatio.toInt()}x紧张→追尾")
-        }
-
-        // R4: 长期吃不到食物（战略失败）→ 追尾等机会
-        if (foodLevel >= 4 && dangerLevel >= 3) {
-            return Decision(1, "食物${foodUnreachableStreak}步不可达→追尾")
-        }
-
-        // R5: 极后期 → 纯 HAM（速度换安全）
-        if (stage >= 3) {
-            return Decision(3, "蛇长${snakeLen}→纯HAM")
-        }
-
-        // R6: 后期 + 分数已经不错 → 加权 HAM 稳分
-        if (stage >= 2 || score >= 60000) {
-            return Decision(2, "后期${snakeLen}节→加权HAM")
-        }
-
-        // R7: 早期 + 空间充裕 + 不饿 → 深度 Beam 展现最大算力
-        if (stage <= 0 && dangerLevel <= 2 && hungerLevel <= 2) {
-            return Decision(4, "前期空闲→深度Beam(深度6/宽度12)")
-        }
-
-        // R8: 中期 + 空间尚可 → BFS 快速吃
-        if (dangerLevel <= 2) {
-            return Decision(0, "空间充裕→BFS吃食")
-        }
-
-        // R9: 兜底：BFS
+        if (dangerLevel >= 5) return Decision(3, "空间${spaceRatio.toInt()}x极危→纯HAM")
+        if (hungerLevel >= 5 && foodReachable) return Decision(0, "饿了${hungerCounter}步→BFS冲食")
+        if (dangerLevel >= 4) return Decision(1, "空间${spaceRatio.toInt()}x紧张→追尾")
+        if (foodLevel >= 4 && dangerLevel >= 3) return Decision(1, "食物${foodUnreachableStreak}步不可达→追尾")
+        if (stage >= 3) return Decision(3, "蛇长${snakeLen}→纯HAM")
+        if (stage >= 2 || score >= 60000) return Decision(2, "后期${snakeLen}节→加权HAM")
+        if (stage <= 0 && dangerLevel <= 2 && hungerLevel <= 2) return Decision(4, "前期空闲→深度Beam")
+        if (dangerLevel <= 2) return Decision(0, "空间充裕→BFS吃食")
         return Decision(0, "默认BFS")
     }
 
@@ -456,7 +409,6 @@ class SnakeView @JvmOverloads constructor(
         if (chosen != null) { directionQueue.clear(); directionQueue.add(chosen) }
     }
 
-    // ============ BFS+Beam：流畅版 ============
     private fun fastBfsStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
             val p = bfsPath(head, food, snake, dir)
@@ -508,7 +460,6 @@ class SnakeView @JvmOverloads constructor(
         return bestDir ?: candidates.firstOrNull()?.first
     }
 
-    // ============ 深度 Beam：深度 6 + 宽度 12（运算最大化）============
     private fun deepBeamStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
             val p = bfsPath(head, food, snake, dir)
@@ -582,7 +533,6 @@ class SnakeView @JvmOverloads constructor(
         return s
     }
 
-    // ============ 追尾保命 ============
     private fun tailChaseStrategy(head: Point, validDirs: List<Point>): Point? {
         var best: Point? = null; var bestSpace = -1
         for (d in validDirs) {
@@ -600,7 +550,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // ============ 加权汉密尔顿 ============
     private fun weightedHamStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
@@ -621,7 +570,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // ============ 纯汉密尔顿 ============
     private fun pureHamStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
@@ -661,7 +609,6 @@ class SnakeView @JvmOverloads constructor(
         dir = Point(dx, dy)
     }
 
-    // ============ 快速 floodFill ============
     private fun floodFill(start: Point, currentSnake: Collection<Point>): Int {
         for (x in 0 until cols) for (y in 0 until rows) ffVisited[x][y] = false
         for (p in currentSnake) ffVisited[p.x][p.y] = true
@@ -681,7 +628,6 @@ class SnakeView @JvmOverloads constructor(
         return count
     }
 
-    // ============ 快速 BFS 路径 ============
     private fun bfsPath(start: Point, target: Point, currentSnake: Collection<Point>, reverseDir: Point): List<Point>? {
         for (x in 0 until cols) for (y in 0 until rows) bfsVisited[x][y] = false
         var head = 0; var tail = 0
@@ -788,7 +734,7 @@ class SnakeView @JvmOverloads constructor(
             Color.WHITE, Color.CYAN
         )
         for (i in 0 until 15) {
-            val a = Random.nextFloat() * 2 * PI
+            val a = Random.nextFloat() * 6.2832f
             val sp = Random.nextFloat() * 8f + 2f
             particles.add(Particle(cx, cy, cos(a) * sp, sin(a) * sp, 1.0f,
                 colors[Random.nextInt(colors.size)],
@@ -807,7 +753,7 @@ class SnakeView @JvmOverloads constructor(
         paintSnakeHead.color = Color.rgb(150, 0, 0)
         paintSnakeHead.setShadowLayer(15f, 0f, 0f, Color.rgb(150, 0, 0))
         for (i in 0 until 40) {
-            val a = Random.nextFloat() * 2 * PI
+            val a = Random.nextFloat() * 6.2832f
             val sp = Random.nextFloat() * 12f + 3f
             particles.add(Particle(hx, hy, cos(a) * sp, sin(a) * sp, 1.5f,
                 Color.rgb(255, 50, 50), Random.nextFloat() * 2f + 1f, 0.002f))
