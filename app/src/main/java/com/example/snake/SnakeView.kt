@@ -451,12 +451,11 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ================== 最终版 BFS：多维度评估 + 四重安全网 ==================
+    // ================== 终极防死胡同 BFS 算法 ==================
     private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
 
-        // 第一步：物理安全方向
         val allDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
         val validDirs = allDirs.filter { d ->
             val isReverse = (d.x == -dir.x && d.y == -dir.y)
@@ -467,7 +466,7 @@ class SnakeView(context: Context) : View(context) {
         }
         if (validDirs.isEmpty()) return
 
-        // 优先级 1：食物贴脸，且物理安全 → 直接吃
+        // 优先级 1：食物贴脸（1格内），直接吃（安全第一）
         val foodDx = food.x - head.x
         val foodDy = food.y - head.y
         if (abs(foodDx) + abs(foodDy) == 1) {
@@ -479,7 +478,7 @@ class SnakeView(context: Context) : View(context) {
             }
         }
 
-        // 优先级 2：极度饥饿（>15步没吃到）→ 强制直奔食物，不管安全模拟
+        // 优先级 2：极度饥饿（>15步没吃），强制直奔食物（避免原地饿死）
         if (hungerCounter > 15) {
             val pathToFood = bfsPathWithSnake(head, food, snake, dir)
             if (pathToFood != null && pathToFood.size > 1) {
@@ -492,16 +491,26 @@ class SnakeView(context: Context) : View(context) {
             }
         }
 
-        // 优先级 3：对所有合法方向进行多维度评估打分
+        // 优先级 3：多维度综合评估（核心防死胡同逻辑）
         var bestDir: Point? = null
         var bestScoreVal = Int.MIN_VALUE
         var bestDist = Int.MAX_VALUE
+
+        val totalFreeSpace = cols * rows - snake.size // 全局剩余空地
 
         for (d in validDirs) {
             val newHead = Point(head.x + d.x, head.y + d.y)
             val simSnake = ArrayDeque(snake)
             simSnake.addFirst(newHead)
             simSnake.removeLast()
+
+            // 计算走完后，新蛇头所在连通区域的大小
+            val space = floodFillWithSnake(newHead, simSnake)
+
+            // ★★★ 核心安全网：防止进入死胡同/被隔离的口袋 ★★★
+            // 如果走完后，可到达的空间小于蛇长的 1.5 倍，说明极度危险
+            // 如果走完后，空间小于全局空地的一半（说明被分割隔离了），也极度危险
+            val isDeadEnd = (space < snake.size * 1.5f) || (space < totalFreeSpace * 0.5f && totalFreeSpace > 15)
 
             // 评估项 A：走完后食物可达吗？
             val foodPath = bfsPathWithSnake(newHead, food, simSnake, Point(0, 0))
@@ -511,26 +520,20 @@ class SnakeView(context: Context) : View(context) {
             // 评估项 B：走完后能追到尾巴吗？
             val canReachTail = bfsPathWithSnake(newHead, simSnake.last(), simSnake, Point(0, 0)) != null
 
-            // 评估项 C：走完后活动空间有多大？
-            val space = floodFillWithSnake(newHead, simSnake)
-
-            // 综合打分
             var localScore = 0
             if (foodReachable) localScore += 40
             if (canReachTail) localScore += 30
-            if (space > snake.size * 1.5f) localScore += 30
+            if (space > snake.size * 2.0f) localScore += 30 // 空间极度充裕
 
-            // 饥饿程度越高，越重视"离食物更近"
+            // 饥饿时，极度渴望食物
             if (hungerCounter > 8) {
                 if (distToFood < 10) localScore += 20
                 else if (distToFood < 20) localScore += 10
             }
 
-            // 极端危险方向（食物不可达 + 追不到尾巴 + 空间小）：直接排除
-            val isDeadEnd = !foodReachable && !canReachTail && space < snake.size
-            if (isDeadEnd) continue
+            // 死亡惩罚：如果是死胡同，直接扣 100 分（除非无路可走，否则绝不选）
+            if (isDeadEnd) localScore -= 100
 
-            // 比较：优先总分高，其次离食物近
             val better = when {
                 localScore > bestScoreVal -> true
                 localScore < bestScoreVal -> false
@@ -550,7 +553,7 @@ class SnakeView(context: Context) : View(context) {
             return
         }
 
-        // 兜底：如果所有方向都被评估为"死路"，选空间最大的那个拖延时间
+        // 兜底：如果所有方向都是死胡同（极度绝望），选空间最大的拖延时间
         var fallbackMove: Point? = null
         var maxSpace = -1
         for (d in validDirs) {
@@ -570,20 +573,6 @@ class SnakeView(context: Context) : View(context) {
         }
     }
     // =======================================================
-
-    // 吃完食物后是否安全（用于"食物贴脸"时的二次验证——只在蛇很长时用）
-    private fun isEatingSafe(head: Point, foodPos: Point): Boolean {
-        val simSnake = ArrayDeque(snake)
-        simSnake.addFirst(foodPos)
-
-        val newHead = simSnake.first()
-        val newTail = simSnake.last()
-
-        val spaceAfterEating = floodFillWithSnake(newHead, simSnake)
-        if (spaceAfterEating > simSnake.size * 1.2f) return true
-        if (spaceAfterEating < simSnake.size * 0.7f) return false
-        return bfsPathWithSnake(newHead, newTail, simSnake, Point(0, 0)) != null
-    }
 
     // ================== 汉密尔顿路径跟随 ==================
     private fun autoPilotHamiltonian() {
