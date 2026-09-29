@@ -59,10 +59,14 @@ class SnakeView(context: Context) : View(context) {
     
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
-    private var aiLevel = 1
-    private var aiBestScore = 0
-    private var comboCount = 0
-    private var currentMultiplier = 1.0f
+    // --- 核心 AI 强化学习与奖励机制变量 ---
+    private var aiLevel = 1             // AI 等级 1-10，越高越激进
+    private var aiBestScore = 0         // AI 历史最高分
+    private var comboCount = 0          // 本局连击数（吃了多少个）
+    private var currentMultiplier = 1.0f // 当前得分倍率
+    
+    // --- 核心防绕圈饥饿计数器 ---
+    private var stepsWithoutEating = 0
 
     private var currentSkinBodyColor = Color.rgb(46, 204, 113)
     private var currentSkinHeadColor = Color.rgb(39, 174, 96)
@@ -271,10 +275,9 @@ class SnakeView(context: Context) : View(context) {
             }
             "rainbow_board" -> {
                 isRainbowBoard = true
-                currentBoardBgColor = Color.BLACK // 回退
+                currentBoardBgColor = Color.BLACK
                 currentBoardGridColor = Color.WHITE
                 paintGrid.setShadowLayer(6f, 0f, 0f, Color.WHITE)
-                // 创建一个尺寸较大、平铺模式为 MIRROR 的线性渐变，用于流动
                 val shader = LinearGradient(0f, 0f, 2000f, 2000f, rainbowColors, null, Shader.TileMode.MIRROR)
                 paintBoardBg.shader = shader
             }
@@ -297,6 +300,7 @@ class SnakeView(context: Context) : View(context) {
         directionQueue.clear()
         score = 0
         comboCount = 0
+        stepsWithoutEating = 0 // 重置饥饿计数器
         currentMultiplier = 1.0f
         gameOver = false
         gameSpeed = 180L
@@ -397,11 +401,12 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ================== AI 核心学习与奖励决策逻辑 ==================
+    // ================== 终极 AI 核心逻辑：彻底杜绝绕圈 ==================
     private fun autoPilot() {
         if (gameOver) return
         val head = snake.first()
         
+        // 根据 AI 等级、连击、倍率，动态调整 AI 的“贪婪程度”
         var currentSafeLength = 15 + (aiLevel * 5) + (comboCount * 2)
         if (score >= 500) currentSafeLength += 10
         if (score >= 1000) currentSafeLength += 15
@@ -421,6 +426,16 @@ class SnakeView(context: Context) : View(context) {
         if (pathToFood != null && pathToFood.size > 1) {
             val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
             if (validDirs.contains(nextMove)) {
+                
+                // 1. 核心修复：防死锁绕圈机制
+                // 如果连续 15 步没有吃到食物，强制打破循环！关闭所有安全检查，直接去吃！
+                if (stepsWithoutEating > 15) {
+                    directionQueue.clear()
+                    directionQueue.add(nextMove)
+                    return
+                }
+                
+                // 2. 正常的安全模拟
                 var safeToEat = snake.size < currentSafeLength
                 if (!safeToEat) {
                     val simSnake = ArrayDeque(snake)
@@ -428,6 +443,15 @@ class SnakeView(context: Context) : View(context) {
                     val tailAfterEating = simSnake.last()
                     safeToEat = bfsAvoidReverse(simSnake.first(), tailAfterEating, Point(0, 0)) != null
                 }
+                
+                // 3. 最后底线：如果连尾巴都追不到，与其绕圈饿死，不如拼死一搏去吃！
+                if (!safeToEat) {
+                    val pathToTail = bfsAvoidReverse(head, snake.last(), dir)
+                    if (pathToTail == null) {
+                        safeToEat = true
+                    }
+                }
+                
                 if (safeToEat) {
                     directionQueue.clear()
                     directionQueue.add(nextMove)
@@ -436,6 +460,7 @@ class SnakeView(context: Context) : View(context) {
             }
         }
         
+        // 4. 放弃食物，进入生存模式：追尾巴
         val pathToTail = bfsAvoidReverse(head, snake.last(), dir)
         if (pathToTail != null && pathToTail.size > 1) {
             val nextMove = Point(pathToTail[1].x - pathToTail[0].x, pathToTail[1].y - pathToTail[0].y)
@@ -446,6 +471,7 @@ class SnakeView(context: Context) : View(context) {
             }
         }
         
+        // 5. 绝境求生：寻找最大生存空间
         var bestMove: Point? = null
         var maxSpace = -1
         for (d in validDirs) {
@@ -572,6 +598,7 @@ class SnakeView(context: Context) : View(context) {
 
         snake.addFirst(newHead)
         if (isEating) {
+            stepsWithoutEating = 0 // 吃到了，计数器清零
             comboCount++
             val basePoints = 10 + (comboCount - 1) * 5
             currentMultiplier = when {
@@ -587,6 +614,7 @@ class SnakeView(context: Context) : View(context) {
             placeFood()
             gameSpeed = max(70L, gameSpeed - 3L)
         } else {
+            stepsWithoutEating++ // 没吃到，计数器增加
             snake.removeLast()
         }
     }
@@ -700,10 +728,8 @@ class SnakeView(context: Context) : View(context) {
         // === 1. 绘制 RGB 流动棋盘 ===
         if (isRainbowBoard) {
             val time = System.currentTimeMillis() % 5000L
-            // 让矩阵沿对角线方向缓慢平移，从而实现渐变的“流动”效果
             boardMatrix.setTranslate(time * 0.15f, time * 0.15f)
             paintBoardBg.shader?.setLocalMatrix(boardMatrix)
-            // 绘制棋盘区域
             canvas.drawRect(offsetX, offsetY, offsetX + cols * cellSize, offsetY + rows * cellSize, paintBoardBg)
         } else {
             canvas.drawColor(currentBoardBgColor)
