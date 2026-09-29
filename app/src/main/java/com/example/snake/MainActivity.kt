@@ -19,14 +19,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gameView: SnakeView
     private lateinit var scoreView: TextView
     private lateinit var moneyView: TextView
+    private lateinit var autoBtn: Button
     private lateinit var prefs: android.content.SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        
-        // 申请 120Hz 刷新率
+
         try {
             val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display else windowManager.defaultDisplay
             if (display != null) {
@@ -64,16 +64,14 @@ class MainActivity : AppCompatActivity() {
             setPadding(32, 0, 0, 0)
         }
 
-        // --- 核心：AI 演示按钮 ---
-        val autoBtn = Button(this).apply {
+        autoBtn = Button(this).apply {
             text = "🤖 演示"
             textSize = 12f
             setBackgroundColor(Color.rgb(155, 89, 182)) // 紫色
             setTextColor(Color.WHITE)
             setPadding(16, 0, 16, 0)
-            setOnClickListener { 
-                gameView.toggleAutoPlay() 
-                Toast.makeText(this@MainActivity, if (gameView.isAutoPlay) "AI 演示已开启" else "AI 演示已关闭", Toast.LENGTH_SHORT).show()
+            setOnClickListener {
+                gameView.toggleAutoPlay()
             }
         }
 
@@ -101,6 +99,19 @@ class MainActivity : AppCompatActivity() {
         }
         gameView.onMoneyChanged = { money ->
             runOnUiThread { moneyView.text = "金币: $money" }
+        }
+        
+        // 监听 AI 状态变化，更新按钮样式
+        gameView.onAutoPlayChanged = { isAuto ->
+            runOnUiThread {
+                if (isAuto) {
+                    autoBtn.text = "🛑 停止演示"
+                    autoBtn.setBackgroundColor(Color.RED)
+                } else {
+                    autoBtn.text = "🤖 演示"
+                    autoBtn.setBackgroundColor(Color.rgb(155, 89, 182))
+                }
+            }
         }
 
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
