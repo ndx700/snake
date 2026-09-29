@@ -27,7 +27,7 @@ class MainActivity : AppCompatActivity() {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // 申请 120Hz 刷新率（修复了之前的编译错误）
+        // 申请高刷屏 120Hz
         try {
             @Suppress("DEPRECATION")
             val display = windowManager.defaultDisplay
@@ -71,7 +71,7 @@ class MainActivity : AppCompatActivity() {
         autoBtn = Button(this).apply {
             text = "🤖 演示"
             textSize = 12f
-            setBackgroundColor(Color.rgb(155, 89, 182)) // 紫色
+            setBackgroundColor(Color.rgb(155, 89, 182))
             setTextColor(Color.WHITE)
             setPadding(16, 0, 16, 0)
             setOnClickListener {
@@ -105,7 +105,6 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { moneyView.text = "金币: $money" }
         }
 
-        // 监听 AI 状态，当 AI 死亡时按钮会自动变回紫色
         gameView.onAutoPlayChanged = { isAuto ->
             runOnUiThread {
                 if (isAuto) {
@@ -142,9 +141,14 @@ class MainActivity : AppCompatActivity() {
     private fun showSnakeShopDialog() {
         val currentMoney = prefs.getInt("money", 0)
         val equippedSkin = prefs.getString("equipped_skin", "green") ?: "green"
+        // 新增 10000 金币的 RGB 神龙皮肤
         val skins = listOf(
-            Skin("经典绿", "green", 0), Skin("海洋蓝", "blue", 500),
-            Skin("烈焰红", "red", 1000), Skin("暗夜紫", "purple", 2000), Skin("黄金圣斗士", "gold", 5000)
+            Skin("经典绿", "green", 0),
+            Skin("海洋蓝", "blue", 500),
+            Skin("烈焰红", "red", 1000),
+            Skin("暗夜紫", "purple", 2000),
+            Skin("黄金圣斗士", "gold", 5000),
+            Skin("RGB神龙", "rainbow", 10000)
         )
         val items = skins.map { skin ->
             val status = if (skin.id == equippedSkin) "[已装备]" else if (prefs.getBoolean("owned_${skin.id}", skin.price == 0)) "点击装备" else "花费 ${skin.price} 金币"
