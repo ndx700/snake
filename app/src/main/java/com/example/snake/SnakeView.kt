@@ -98,7 +98,8 @@ class SnakeView @JvmOverloads constructor(
         var x: Float, var y: Float,
         var vx: Float, var vy: Float,
         var life: Float, val color: Int,
-        var size: Float, var decay: Float, var isTrail: Boolean
+        var size: Float, var decay: Float,
+        var isTrail: Boolean = false
     )
     private data class FloatText(var x: Float, var y: Float, var life: Float, val text: String)
 
