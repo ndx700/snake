@@ -423,21 +423,35 @@ class SnakeView(context: Context) : View(context) {
         val head = snake.first()
         val newHead = Point(head.x + dir.x, head.y + dir.y)
 
+        // 1. 撞墙检测
         if (newHead.x < 0 || newHead.x >= cols || newHead.y < 0 || newHead.y >= rows) {
             gameOver = true
             triggerDeathEffects()
             saveScoreAndMoney()
             return
         }
-        if (snake.any { it == newHead }) {
+
+        // 2. 撞自己检测（修复核心 Bug：允许蛇头移动到尾巴的位置，因为尾巴会移开）
+        val isEating = newHead == food
+        val tail = snake.last()
+        val collidedWithSelf = if (newHead == tail) {
+            // 如果蛇头移动到尾巴的位置，只有当它同时吃到食物时（尾巴不移开）才算撞到自己
+            isEating 
+        } else {
+            // 其他情况下，如果蛇头碰到身体任何部位，都算撞到自己
+            snake.any { it == newHead }
+        }
+
+        if (collidedWithSelf) {
             gameOver = true
             triggerDeathEffects()
             saveScoreAndMoney()
             return
         }
 
+        // 3. 移动
         snake.addFirst(newHead)
-        if (newHead == food) {
+        if (isEating) {
             score += 10
             onScoreChanged?.invoke(score)
             triggerEatEffects()
@@ -487,7 +501,7 @@ class SnakeView(context: Context) : View(context) {
             particles.add(Particle(headX, headY, cos(angle).toFloat() * speed, sin(angle).toFloat() * speed, 1.5f, Color.rgb(255, 50, 50)))
         }
         
-        // --- 关键修改：AI 死亡后自动关闭演示模式 ---
+        // 死亡后自动关闭演示模式
         if (isAutoPlay) {
             isAutoPlay = false
             onAutoPlayChanged?.invoke(false)
