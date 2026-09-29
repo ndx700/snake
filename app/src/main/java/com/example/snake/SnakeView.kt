@@ -23,8 +23,9 @@ import kotlin.random.Random
 
 class SnakeView(context: Context) : View(context) {
 
-    private val cols = 20
-    private val rows = 20
+    // 1. 棋盘放大：从 20x20 改为 15x15
+    private val cols = 15
+    private val rows = 15
 
     private var cellSize = 0f
     private var offsetX = 0f
@@ -47,15 +48,12 @@ class SnakeView(context: Context) : View(context) {
     
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
-    // --- 皮肤系统 ---
     private var currentSkinBodyColor = Color.rgb(46, 204, 113)
     private var currentSkinHeadColor = Color.rgb(39, 174, 96)
 
-    // --- 棋盘系统 ---
     private var currentBoardBgColor = Color.rgb(17, 17, 17)
     private var currentBoardGridColor = Color.rgb(30, 30, 30)
 
-    // --- 震动马达初始化 ---
     private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
         vibratorManager?.defaultVibrator
@@ -64,7 +62,6 @@ class SnakeView(context: Context) : View(context) {
         context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
     }
 
-    // --- 死亡特效状态 ---
     private var deathFlashAlpha = 0f
     private var shakeTime = 0f
     private var shakeOffsetX = 0f
@@ -83,7 +80,6 @@ class SnakeView(context: Context) : View(context) {
     private val particles = mutableListOf<Particle>()
     private val floatingTexts = mutableListOf<FloatingText>()
 
-    // --- 画笔定义 ---
     private val paintSnakeBody = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = currentSkinBodyColor
         style = Paint.Style.STROKE
@@ -130,7 +126,6 @@ class SnakeView(context: Context) : View(context) {
         textAlign = Paint.Align.CENTER
     }
 
-    // --- 高帧率渲染核心逻辑 ---
     private var lastFrameTime = 0L
     private var timeAccumulator = 0L
 
@@ -164,7 +159,6 @@ class SnakeView(context: Context) : View(context) {
         reset()
     }
 
-    // 读取并应用当前装备的皮肤
     fun updateCurrentSkin() {
         val currentSkinId = prefs.getString("equipped_skin", "green") ?: "green"
         when (currentSkinId) {
@@ -180,7 +174,6 @@ class SnakeView(context: Context) : View(context) {
         invalidate()
     }
 
-    // 读取并应用当前装备的棋盘
     fun updateCurrentBoard() {
         val currentBoardId = prefs.getString("equipped_board", "dark") ?: "dark"
         when (currentBoardId) {
@@ -410,7 +403,6 @@ class SnakeView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        // 棋盘背景色
         canvas.drawColor(currentBoardBgColor)
 
         cellSize = minOf(width / cols.toFloat(), height / rows.toFloat())
@@ -439,14 +431,28 @@ class SnakeView(context: Context) : View(context) {
             paintFood
         )
 
+        // 2. 丝滑插值核心逻辑
         if (snake.isNotEmpty()) {
+            // 计算当前时间进度 (0.0 到 1.0)
+            val progress = if (gameOver) 0f else (timeAccumulator.toFloat() / gameSpeed).coerceIn(0f, 1f)
+            
             val path = Path()
             val points = snake.mapIndexed { index, p ->
-                val baseX = offsetX + p.x * cellSize + cellSize / 2
-                val baseY = offsetY + p.y * cellSize + cellSize / 2
+                var baseX = offsetX + p.x * cellSize + cellSize / 2
+                var baseY = offsetY + p.y * cellSize + cellSize / 2
 
+                // 对蛇头进行平滑插值：让它从上一帧位置平滑滑动到当前位置
+                if (index == 0 && !gameOver) {
+                    val prevP = if (snake.size > 1) snake[1] else Point(snake[0].x - dir.x, snake[0].y - dir.y)
+                    val prevX = offsetX + prevP.x * cellSize + cellSize / 2
+                    val prevY = offsetY + prevP.y * cellSize + cellSize / 2
+                    baseX = prevX + (baseX - prevX) * progress
+                    baseY = prevY + (baseY - prevY) * progress
+                }
+
+                // 摆动幅度稍微调小一点点，配合大格子更自然
                 val t = System.currentTimeMillis() / 200.0
-                val swingAmplitude = if (dir.x != 0) cellSize * 0.15f else cellSize * 0.08f
+                val swingAmplitude = if (dir.x != 0) cellSize * 0.08f else cellSize * 0.04f
                 val swingX = sin(t + index * 0.5).toFloat() * swingAmplitude
                 val swingY = cos(t + index * 0.5).toFloat() * swingAmplitude
 
