@@ -245,6 +245,24 @@ class SnakeView @JvmOverloads constructor(
 
     private var beamNodes = 0
 
+    /*
+     * ============================================================
+     * 饥饿自动切换阈值
+     *
+     * 当 hunger（连续未吃到食物的步数）达到这个值时，
+     * 无论玩家当前选的是哪种策略（BFS / 追尾 / HAM / AUTO），
+     * 都会临时切换到 BEAM 前瞻策略去追食物，
+     * 直到吃到食物 hunger 归零后自动恢复。
+     *
+     * 想调节灵敏度就改这个值：
+     *   30  → 更敏感
+     *   50  → 默认（约 7.5 秒）
+     *   80  → 更迟钝
+     *   120 → 只在快饿死时才切
+     * ============================================================
+     */
+    private val autoBeamHunger = 50
+
     private val frame =
         object : Choreographer.FrameCallback {
 
@@ -971,6 +989,15 @@ class SnakeView @JvmOverloads constructor(
                 danger
             )
 
+        // ========================================
+        // ★ 新增：长时间没吃到果实 → 自动切 BEAM
+        // 无论当前是 AUTO 还是玩家强制选的
+        // BFS / 追尾 / HAM，只要 hunger 超过阈值，
+        // 就临时改用 BEAM 前瞻策略去追食物。
+        // ========================================
+        val autoBeam =
+            hunger >= autoBeamHunger
+
         val scored =
             when (strategy) {
 
@@ -995,7 +1022,12 @@ class SnakeView @JvmOverloads constructor(
             } ?: legal.first()
 
         val final =
-            if (
+            if (autoBeam) {
+
+                // ★ 饥饿过久时优先级最高：BEAM 前瞻
+                beamBest(legal)
+
+            } else if (
                 forcedStrategy >= 0
             ) {
 
@@ -1058,22 +1090,30 @@ class SnakeView @JvmOverloads constructor(
         ai =
             Snapshot(
 
+                // ★ 显示策略名（含饥饿自动切换提示）
                 strategy =
-                    strategyName(
-                        if (
-                            forcedStrategy >= 0
-                        )
-                            forcedStrategy
-                        else
-                            strategy
-                    ),
+                    if (autoBeam)
+                        "BEAM 饥饿自动"
+                    else
+                        strategyName(
+                            if (
+                                forcedStrategy >= 0
+                            )
+                                forcedStrategy
+                            else
+                                strategy
+                        ),
 
+                // ★ 显示自动切换的原因
                 reason =
-                    reasonFor(
-                        final,
-                        strategy,
-                        danger
-                    ),
+                    if (autoBeam)
+                        "饥饿 $hunger 步未进食，临时切换 BEAM 追食物"
+                    else
+                        reasonFor(
+                            final,
+                            strategy,
+                            danger
+                        ),
 
                 danger = danger,
 
@@ -1103,13 +1143,13 @@ class SnakeView @JvmOverloads constructor(
                     candidates,
 
                 depth =
-                    if (strategy == 3)
+                    if (strategy == 3 || autoBeam)
                         4
                     else
                         2,
 
                 nodes =
-                    if (strategy == 3)
+                    if (strategy == 3 || autoBeam)
                         beamNodes
                     else
                         candidates.size
@@ -3351,7 +3391,7 @@ class SnakeView @JvmOverloads constructor(
         )
 
         c.drawText(
-            "死亡后自动调整安全策略",
+            "饥饿 ≥ $autoBeamHunger 自动切 BEAM",
             left + 230f,
             top + 228f,
             text
