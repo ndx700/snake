@@ -4,649 +4,1124 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
+import android.graphics.CornerPathEffect
 import android.graphics.RadialGradient
 import android.graphics.Shader
-import android.util.AttributeSet
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
-import android.os.Vibrator
-import android.os.VibrationEffect
-import android.os.Build
 import kotlin.math.abs
-import kotlin.math.atan2
-import kotlin.math.cos
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.sin
+import kotlin.math.cos
+import kotlin.math.atan2
+import kotlin.math.PI
 import kotlin.random.Random
 
-private const val COLS = 15
-private const val ROWS = 15
-private const val INIT_TICK = 180L
-private const val MIN_TICK = 70L
-private const val SPEED_STEP = 3L
+class SnakeView(context: Context) : View(context) {
 
-private data class Point(val x: Int, val y: Int)
-
-class SnakeView @JvmOverloads constructor(
-    context: Context, attrs: AttributeSet? = null
-) : View(context, attrs) {
+    private val cols = 15
+    private val rows = 15
 
     private var cellSize = 0f
-    private var offX = 0f
-    private var offY = 0f
+    private var offsetX = 0f
+    private var offsetY = 0f
 
+    private data class Point(val x: Int, val y: Int)
     private val snake = ArrayDeque<Point>()
-    private var dir = Point(1, 0)
-    private val queue = ArrayDeque<Point>()
-    private val bodyGrid = Array(COLS) { BooleanArray(ROWS) }
+    private val directionQueue = ArrayDeque<Point>()
+
+    private var dir = Point(0, 0)
+    private var nextDir = Point(0, 0)
+
     private var food = Point(5, 5)
-
     private var score = 0
-    private var high = 0
-    private var money = 0
+    private var highScore = 0
     private var gameOver = false
-    private var running = true
-    private var combo = 0
-    private var hunger = 0
-    private var tick = INIT_TICK
-    private var lastUpdate = 0L
-
-    private var skin = 0
-    private val bodyColors = intArrayOf(
-        Color.parseColor("#00E676"), Color.parseColor("#FF4081"),
-        Color.parseColor("#7C4DFF"), Color.parseColor("#00E5FF"),
-        Color.parseColor("#FFD600")
-    )
-    private val headColors = intArrayOf(
-        Color.parseColor("#00C853"), Color.parseColor("#F50057"),
-        Color.parseColor("#651FFF"), Color.parseColor("#00B8D4"),
-        Color.parseColor("#FFAB00")
-    )
-    private var bodyColor = bodyColors[0]
-    private var headColor = headColors[0]
-    private var isRainbow = false
-    private val rainbow = IntArray(361) { Color.HSVToColor(floatArrayOf(it.toFloat(), 1f, 1f)) }
-
+    private var running = false
+    
+    private var gameSpeed = 180L
+    
     private var aiMode = 0
-    private var aiLevel = 1
-    private var aiBest = 0
-    private var consecDeaths = 0
-    private val hamPath = mutableListOf<Point>()
 
-    private var deathFlash = 0f
+    var onScoreChanged: ((Int) -> Unit)? = null
+    var onMoneyChanged: ((Int) -> Unit)? = null
+    var onAIModeChanged: ((Int) -> Unit)? = null
+    
+    private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
+
+    private var aiLevel = 1
+    private var aiBestScore = 0
+    private var comboCount = 0
+    private var currentMultiplier = 1.0f
+    private var hungerCounter = 0
+    private var consecutiveDeaths = 0
+    private var foodUnreachableStreak = 0
+    
+    private val pathIndex = Array(cols) { IntArray(rows) }
+    private val pathSequence = mutableListOf<Point>()
+
+    private var currentSkinBodyColor = Color.rgb(46, 204, 113)
+    private var currentSkinHeadColor = Color.rgb(39, 174, 96)
+    private var currentBoardBgColor = Color.BLACK
+    private var currentBoardGridColor = Color.rgb(0, 255, 255)
+    
+    private var isRainbowSkin = false
+    
+    private val rainbowColors = IntArray(361) { i ->
+        Color.HSVToColor(floatArrayOf(i.toFloat(), 1f, 1f))
+    }
+
+    private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+        vibratorManager?.defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    }
+
+    private var deathFlashAlpha = 0f
     private var shakeTime = 0f
-    private var shakeX = 0f
-    private var shakeY = 0f
-    private var shockX = 0f
-    private var shockY = 0f
-    private var shockR = 0f
-    private var shockA = 0f
+    private var shakeOffsetX = 0f
+    private var shakeOffsetY = 0f
+    
+    private var shockwaveX = 0f
+    private var shockwaveY = 0f
+    private var shockwaveRadius = 0f
+    private var shockwaveAlpha = 0f
 
     private data class Particle(
-        var x: Float, var y: Float, var vx: Float, var vy: Float,
-        var life: Float, val color: Int, var size: Float, var decay: Float,
-        var isTrail: Boolean
+        var x: Float, var y: Float,
+        var vx: Float, var vy: Float,
+        var life: Float, val color: Int,
+        var size: Float = 1f,
+        var decay: Float = 0.002f,
+        var isTrail: Boolean = false
     )
-    private data class FloatText(var x: Float, var y: Float, var life: Float, val text: String)
-    private val particles = mutableListOf<Particle>()
-    private val floats = mutableListOf<FloatText>()
+    private data class FloatingText(
+        var x: Float, var y: Float,
+        var life: Float, val text: String
+    )
 
-    private val paintBg = Paint().apply { color = Color.BLACK }
-    private val paintGrid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        strokeWidth = 2f; setShadowLayer(8f, 0f, 0f, Color.CYAN)
+    private val particles = mutableListOf<Particle>()
+    private val floatingTexts = mutableListOf<FloatingText>()
+
+    private val paintSnakeBody = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = currentSkinBodyColor
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        pathEffect = CornerPathEffect(30f)
+        setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
     }
-    private val paintBody = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
-        color = bodyColor; setShadowLayer(20f, 0f, 0f, bodyColor)
+
+    private val paintSnakeHead = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = currentSkinHeadColor
+        style = Paint.Style.FILL
+        setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
     }
-    private val paintHead = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL; color = headColor; setShadowLayer(15f, 0f, 0f, headColor)
+    
+    private val paintSnakeHighlight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+        alpha = 100
     }
-    private val paintEyeW = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
-    private val paintEyeB = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
-    private val paintHL = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; alpha = 100 }
+
+    private val paintEyeWhite = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    private val paintEyeBlack = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
+
     private val paintFoodGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val paintFoodCore = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    private val paintFoodCore = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
     private val paintFoodCross = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 3f
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
         setShadowLayer(15f, 0f, 0f, Color.CYAN)
     }
-    private val paintParticle = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val paintFloat = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(241, 196, 15); textSize = 45f; textAlign = Paint.Align.CENTER
+
+    private val paintParticle = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val paintFloatingText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(241, 196, 15)
+        textSize = 45f
+        textAlign = Paint.Align.CENTER
         setShadowLayer(10f, 0f, 0f, Color.BLACK)
     }
-    private val paintShock = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE; strokeWidth = 8f; color = Color.RED
+
+    private val paintGrid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        strokeWidth = 2f
+        setShadowLayer(8f, 0f, 0f, Color.CYAN)
     }
-    private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE; textSize = 60f; textAlign = Paint.Align.CENTER
-    }
-    private val paintTextSm = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#AAAAAA"); textSize = 36f; textAlign = Paint.Align.CENTER
-    }
-    private val paintHam = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE; strokeWidth = 3f; color = Color.argb(60, 255, 255, 255)
+    
+    private val paintShockwave = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 8f
+        color = Color.RED
     }
 
-    private val vibrator: Vibrator =
-        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+    private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textAlign = Paint.Align.CENTER }
+    private val paintSubText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.LTGRAY; textAlign = Paint.Align.CENTER }
+    
+    private val paintHamPath = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        color = Color.argb(60, 255, 255, 255)
+    }
+
+    private var isRainbowBoard = false
+    private val paintBoardBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val boardMatrix = Matrix()
+
+    private var lastFrameTime = 0L
+    private var timeAccumulator = 0L
+
+    private val frameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!running) return
+            val currentTime = System.nanoTime()
+            if (lastFrameTime == 0L) lastFrameTime = currentTime
+            val deltaTime = (currentTime - lastFrameTime) / 1_000_000f
+            lastFrameTime = currentTime
+            timeAccumulator += deltaTime.toLong()
+            if (timeAccumulator >= gameSpeed) {
+                update()
+                timeAccumulator -= gameSpeed
+            }
+            updateEffects(deltaTime)
+            invalidate()
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
 
     init {
-        isFocusable = true
-        loadPrefs()
-        initHamPath()
+        initHamiltonianPath()
+        aiBestScore = prefs.getInt("ai_best_score", 0)
+        aiLevel = prefs.getInt("ai_level", 1)
+        consecutiveDeaths = prefs.getInt("consecutive_deaths", 0)
+        highScore = prefs.getInt("high_score", 0)
+        updateCurrentSkin()
+        updateCurrentBoard()
         reset()
     }
 
-    private fun loadPrefs() {
-        val p = context.getSharedPreferences("GamePrefs", Context.MODE_PRIVATE)
-        high = p.getInt("HighScore", 0)
-        money = p.getInt("Money", 0)
-        aiLevel = p.getInt("AiLevel", 1)
-        aiBest = p.getInt("AiBest", 0)
-        consecDeaths = p.getInt("Consec", 0)
-    }
-
-    private fun savePrefs() {
-        context.getSharedPreferences("GamePrefs", Context.MODE_PRIVATE).edit()
-            .putInt("HighScore", high).putInt("Money", money)
-            .putInt("AiLevel", aiLevel).putInt("AiBest", aiBest)
-            .putInt("Consec", consecDeaths).apply()
-    }
-
-    private fun initHamPath() {
-        hamPath.clear()
-        for (x in 0 until COLS) {
-            if (x % 2 == 0) for (y in 0 until ROWS) hamPath.add(Point(x, y))
-            else for (y in ROWS - 1 downTo 0) hamPath.add(Point(x, y))
+    private fun initHamiltonianPath() {
+        pathSequence.clear()
+        for (c in 0 until cols) {
+            if (c % 2 == 0) {
+                for (r in 0 until rows) {
+                    pathIndex[c][r] = pathSequence.size
+                    pathSequence.add(Point(c, r))
+                }
+            } else {
+                for (r in rows - 1 downTo 0) {
+                    pathIndex[c][r] = pathSequence.size
+                    pathSequence.add(Point(c, r))
+                }
+            }
         }
     }
 
-    private fun reset() {
+    fun getAIMode(): Int = aiMode
+
+    fun setAIMode(mode: Int) {
+        aiMode = mode
+        onAIModeChanged?.invoke(aiMode)
+        reset()
+    }
+
+    fun updateCurrentSkin() {
+        val currentSkinId = prefs.getString("equipped_skin", "green") ?: "green"
+        isRainbowSkin = false
+        when (currentSkinId) {
+            "blue" -> { currentSkinBodyColor = Color.rgb(52, 152, 219); currentSkinHeadColor = Color.rgb(41, 128, 185) }
+            "red" -> { currentSkinBodyColor = Color.rgb(231, 76, 60); currentSkinHeadColor = Color.rgb(192, 57, 43) }
+            "purple" -> { currentSkinBodyColor = Color.rgb(155, 89, 182); currentSkinHeadColor = Color.rgb(142, 68, 173) }
+            "gold" -> { currentSkinBodyColor = Color.rgb(241, 196, 15); currentSkinHeadColor = Color.rgb(243, 156, 18) }
+            "rainbow" -> {
+                isRainbowSkin = true
+                currentSkinBodyColor = Color.WHITE
+                currentSkinHeadColor = Color.WHITE
+                paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
+            }
+            else -> { currentSkinBodyColor = Color.rgb(46, 204, 113); currentSkinHeadColor = Color.rgb(39, 174, 96) }
+        }
+        if (!isRainbowSkin) {
+            paintSnakeBody.shader = null
+            paintSnakeBody.color = currentSkinBodyColor
+            paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
+            paintSnakeHead.color = currentSkinHeadColor
+            paintSnakeHead.setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
+        }
+        invalidate()
+    }
+
+    fun updateCurrentBoard() {
+        val currentBoardId = prefs.getString("equipped_board", "dark") ?: "dark"
+        when (currentBoardId) {
+            "light" -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.rgb(240, 240, 240)
+                currentBoardGridColor = Color.rgb(200, 200, 200)
+                paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+            }
+            "neon" -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.rgb(10, 25, 47)
+                currentBoardGridColor = Color.rgb(0, 255, 255)
+                paintGrid.setShadowLayer(8f, 0f, 0f, Color.CYAN)
+            }
+            "forest" -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.rgb(27, 46, 26)
+                currentBoardGridColor = Color.rgb(46, 74, 45)
+                paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+            }
+            "cyberpunk" -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.rgb(43, 15, 59)
+                currentBoardGridColor = Color.rgb(200, 0, 255)
+                paintGrid.setShadowLayer(8f, 0f, 0f, Color.MAGENTA)
+            }
+            "rainbow_board" -> {
+                isRainbowBoard = true
+                currentBoardBgColor = Color.BLACK
+                currentBoardGridColor = Color.WHITE
+                paintGrid.setShadowLayer(6f, 0f, 0f, Color.WHITE)
+                val shader = LinearGradient(0f, 0f, 2000f, 2000f, rainbowColors, null, Shader.TileMode.MIRROR)
+                paintBoardBg.shader = shader
+            }
+            else -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.BLACK
+                currentBoardGridColor = Color.rgb(0, 255, 255)
+                paintGrid.setShadowLayer(8f, 0f, 0f, Color.CYAN)
+            }
+        }
+        invalidate()
+    }
+
+    fun reset() {
         snake.clear()
         if (aiMode == 2) {
-            snake.add(Point(0, 0)); dir = Point(0, 1)
+            snake.add(Point(0, 0))
+            dir = Point(0, 1)
         } else {
-            snake.addFirst(Point(0, 0)); snake.addFirst(Point(1, 0)); snake.addFirst(Point(2, 0))
-            dir = Point(1, 0)
+            snake.add(Point(10, 10))
+            dir = Point(0, 0)
         }
-        queue.clear()
-        tick = INIT_TICK; score = 0; combo = 0; hunger = 0
-        gameOver = false; running = true
-        deathFlash = 0f; shakeTime = 0f; shockA = 0f
-        particles.clear(); floats.clear()
-        rebuildGrid(); applySkin()
-        lastUpdate = System.currentTimeMillis()
-        spawnFood()
+        nextDir = Point(0, 0)
+        directionQueue.clear()
+        score = 0
+        comboCount = 0
+        hungerCounter = 0
+        foodUnreachableStreak = 0
+        currentMultiplier = 1.0f
+        gameOver = false
+        gameSpeed = 180L
+        lastFrameTime = 0L
+        timeAccumulator = 0L
+        deathFlashAlpha = 0f
+        shakeTime = 0f
+        shakeOffsetX = 0f
+        shakeOffsetY = 0f
+        shockwaveRadius = 0f
+        shockwaveAlpha = 0f
+        particles.clear()
+        floatingTexts.clear()
+        
+        if (isRainbowSkin) {
+            paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
+        } else {
+            paintSnakeBody.color = currentSkinBodyColor
+            paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
+            paintSnakeHead.color = currentSkinHeadColor
+            paintSnakeHead.setShadowLayer(15f, 0f, 0f, currentSkinHeadColor)
+        }
+        
+        placeFood()
+        onScoreChanged?.invoke(score)
         invalidate()
     }
 
-    private fun rebuildGrid() {
-        for (x in 0 until COLS) for (y in 0 until ROWS) bodyGrid[x][y] = false
-        for (p in snake) if (p.x in 0 until COLS && p.y in 0 until ROWS) bodyGrid[p.x][p.y] = true
-    }
-
-    private fun onBody(x: Int, y: Int) =
-        x in 0 until COLS && y in 0 until ROWS && bodyGrid[x][y]
-
-    private fun applySkin() {
-        isRainbow = (skin == 5)
-        if (isRainbow) {
-            paintBody.shader = null
-            paintBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
-            paintHead.color = Color.WHITE
-            paintHead.setShadowLayer(15f, 0f, 0f, Color.WHITE)
-        } else {
-            bodyColor = bodyColors[skin.coerceIn(0, 4)]
-            headColor = headColors[skin.coerceIn(0, 4)]
-            paintBody.shader = null
-            paintBody.color = bodyColor
-            paintBody.setShadowLayer(20f, 0f, 0f, bodyColor)
-            paintHead.color = headColor
-            paintHead.setShadowLayer(15f, 0f, 0f, headColor)
+    fun resume() {
+        if (!running) {
+            running = true
+            lastFrameTime = 0L
+            timeAccumulator = 0L
+            Choreographer.getInstance().postFrameCallback(frameCallback)
         }
     }
 
-    private fun spawnFood() {
-        var nx: Int; var ny: Int; var a = 0
-        do {
-            nx = Random.nextInt(COLS); ny = Random.nextInt(ROWS); a++
-        } while (onBody(nx, ny) && a < 500)
-        if (onBody(nx, ny)) {
-            outer@ for (x in 0 until COLS) for (y in 0 until ROWS) {
-                if (!onBody(x, y)) { nx = x; ny = y; break@outer }
+    fun pause() {
+        running = false
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+    }
+
+    private fun placeFood() {
+        while (true) {
+            val p = Point(Random.nextInt(cols), Random.nextInt(rows))
+            if (snake.none { it == p }) {
+                food = p
+                return
             }
         }
-        food = Point(nx, ny)
     }
 
-    fun update() {
-        if (!running || gameOver) return
-        val now = System.currentTimeMillis()
-        if (now - lastUpdate < tick) return
-        lastUpdate = now
-
-        when (aiMode) { 1 -> aiBfs(); 2 -> aiHam() }
-
-        if (queue.isNotEmpty()) dir = queue.removeFirst()
-
-        val head = snake.first()
-        val nh = Point(head.x + dir.x, head.y + dir.y)
-        if (nh.x !in 0 until COLS || nh.y !in 0 until ROWS) { die(); return }
-
-        val eat = nh == food
-        val body = if (eat) snake else snake.dropLast(1)
-        if (body.any { it == nh }) { die(); return }
-
-        snake.addFirst(nh); bodyGrid[nh.x][nh.y] = true
-
-        if (eat) {
-            combo++
-            val base = 10 + (combo - 1) * 5
-            val mult = when { score >= 1000 -> 3f; score >= 500 -> 2f; score >= 200 -> 1.5f; else -> 1f }
-            val earned = (base * mult).toInt()
-            score += earned
-            money += when { score >= 1000 -> 10; score >= 500 -> 5; else -> 1 }
-            if (score > high) high = score
-            foodBurst(nh)
-            floats.add(FloatText(
-                offX + nh.x * cellSize + cellSize / 2,
-                offY + nh.y * cellSize + cellSize / 2, 1f, "+$earned"
-            ))
-            tick = (tick - SPEED_STEP).coerceAtLeast(MIN_TICK)
-            vibrate(80L)
-            spawnFood(); hunger = 0
-        } else {
-            val t = snake.removeLast(); bodyGrid[t.x][t.y] = false
-            hunger++
+    private fun vibrate(duration: Long, amplitude: Int = VibrationEffect.DEFAULT_AMPLITUDE) {
+        vibrator?.let {
+            if (!it.hasVibrator()) return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                it.vibrate(VibrationEffect.createOneShot(duration, amplitude))
+            } else {
+                @Suppress("DEPRECATION")
+                it.vibrate(duration)
+            }
         }
-        invalidate()
     }
 
-    private fun updateFx(dt: Float) {
+    private fun updateEffects(deltaTime: Float) {
         if (gameOver) {
-            deathFlash = 120f + 60f * sin(System.currentTimeMillis() / 150.0).toFloat()
-            if (shockA > 0) { shockR += dt * 0.5f; shockA -= dt * 0.05f }
-        } else if (deathFlash > 0) deathFlash = max(0f, deathFlash - dt * 0.2f)
+            deathFlashAlpha = 120f + 60f * sin(System.currentTimeMillis() / 150.0).toFloat()
+            if (shockwaveAlpha > 0) {
+                shockwaveRadius += deltaTime * 1.5f
+                shockwaveAlpha -= deltaTime * 0.15f
+            }
+        } else {
+            if (deathFlashAlpha > 0) deathFlashAlpha = max(0f, deathFlashAlpha - deltaTime * 0.5f)
+        }
         if (shakeTime > 0) {
-            shakeTime -= dt
-            shakeX = (Random.nextFloat() - 0.5f) * 30f * (shakeTime / 400f)
-            shakeY = (Random.nextFloat() - 0.5f) * 30f * (shakeTime / 400f)
-        } else { shakeX = 0f; shakeY = 0f }
-        val it = particles.iterator()
-        while (it.hasNext()) {
-            val p = it.next()
-            p.x += p.vx * (dt / 16f); p.y += p.vy * (dt / 16f)
+            shakeTime -= deltaTime
+            shakeOffsetX = (Random.nextFloat() - 0.5f) * 30f * (shakeTime / 400f)
+            shakeOffsetY = (Random.nextFloat() - 0.5f) * 30f * (shakeTime / 400f)
+        } else {
+            shakeOffsetX = 0f
+            shakeOffsetY = 0f
+        }
+        val iterator = particles.iterator()
+        while (iterator.hasNext()) {
+            val p = iterator.next()
+            p.x += p.vx * (deltaTime / 16f)
+            p.y += p.vy * (deltaTime / 16f)
             if (!p.isTrail) p.vy += 0.4f
-            p.life -= dt * p.decay
-            if (p.life <= 0) it.remove()
+            p.life -= deltaTime * p.decay
+            if (p.life <= 0) iterator.remove()
         }
-        val ti = floats.iterator()
-        while (ti.hasNext()) {
-            val t = ti.next()
-            t.y -= 2.5f * (dt / 16f); t.life -= dt * 0.001f
-            if (t.life <= 0) ti.remove()
+        val textIterator = floatingTexts.iterator()
+        while (textIterator.hasNext()) {
+            val t = textIterator.next()
+            t.y -= 2.5f * (deltaTime / 16f)
+            t.life -= deltaTime * 0.001f
+            if (t.life <= 0) textIterator.remove()
         }
     }
 
-    private data class Move(
-        val dir: Point, val willEat: Boolean, val canTail: Boolean,
-        val foodOk: Boolean, val space: Int, val dist: Int, val eatSafe: Boolean
-    )
+    private fun isEatingSafe(head: Point, foodPos: Point): Boolean {
+        val simSnake = ArrayDeque(snake)
+        simSnake.addFirst(foodPos)
+        
+        val newHead = simSnake.first()
+        val newTail = simSnake.last()
+        
+        val spaceAfterEating = floodFillWithSnake(newHead, simSnake)
+        
+        if (spaceAfterEating > simSnake.size * 1.2f) return true
+        
+        if (spaceAfterEating < simSnake.size * 0.7f) return false
+        val canReachTail = bfsPathWithSnake(newHead, newTail, simSnake, Point(0, 0)) != null
+        return canReachTail
+    }
 
-    private fun aiBfs() {
+    private fun autoPilotBFS() {
+        if (gameOver) return
         val head = snake.first()
-        val dirs = listOf(Point(1, 0), Point(-1, 0), Point(0, 1), Point(0, -1))
-        queue.clear()
-        val moves = mutableListOf<Move>()
-
-        for (d in dirs) {
-            if (d.x == -dir.x && d.y == -dir.y) continue
-            val n = Point(head.x + d.x, head.y + d.y)
-            if (n.x !in 0 until COLS || n.y !in 0 until ROWS) continue
-            val eat = n == food
-            val body = if (eat) snake else snake.dropLast(1)
-            if (body.any { it == n }) continue
-
-            val sim = ArrayDeque(snake); sim.addFirst(n); sim.removeLast()
-            val canTail = bfs(n, sim.last(), sim).isNotEmpty()
-            val reachable = reachable(n, sim)
-            val foodOk = reachable.contains(food)
-            val distPath = bfs(n, food, sim)
-            val dist = if (distPath.isNotEmpty()) distPath.size else 9999
-            var eatSafe = true
-            if (eat) {
-                val se = ArrayDeque(snake); se.addFirst(n)
-                eatSafe = bfs(n, se.last(), se).isNotEmpty()
-            }
-            moves.add(Move(d, eat, canTail, foodOk, reachable.size, dist, eatSafe))
+        
+        val allDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
+        val validDirs = allDirs.filter { d ->
+            val isReverse = (d.x == -dir.x && d.y == -dir.y)
+            val newHead = Point(head.x + d.x, head.y + d.y)
+            val isWall = newHead.x !in 0 until cols || newHead.y !in 0 until rows
+            val isSelf = snake.dropLast(1).any { it == newHead }
+            !isReverse && !isWall && !isSelf
         }
-        if (moves.isEmpty()) return
+        if (validDirs.isEmpty()) return
 
-        // 第1层：食物贴脸+安全
-        for (m in moves) if (m.willEat && m.eatSafe) { queue.add(m.dir); return }
-        // 第2层：极度饥饿
-        if (hunger > 15) {
-            var best: Move? = null
-            for (m in moves) if (m.foodOk || m.willEat) if (best == null || m.dist < best.dist) best = m
-            if (best != null) { queue.add(best.dir); return }
+        // ★ 新增：食物可达性检测
+        val testFoodPath = bfsPathWithSnake(head, food, snake, dir)
+        if (testFoodPath != null) {
+            foodUnreachableStreak = 0
+        } else {
+            foodUnreachableStreak++
         }
-        // 第3层：能追到尾巴中选最优
-        var bestTail: Move? = null
-        for (m in moves) {
-            if (!m.canTail) continue
-            if (bestTail == null) { bestTail = m; continue }
-            val b = bestTail
-            val mf = if (m.foodOk) 1 else 0
-            val bf = if (b.foodOk) 1 else 0
-            val better = when {
-                mf > bf -> true; mf < bf -> false
-                m.dist < b.dist -> true; m.dist > b.dist -> false
-                m.space > b.space -> true; else -> false
-            }
-            if (better) bestTail = m
-        }
-        if (bestTail != null) { queue.add(bestTail.dir); return }
-        // 第4层：死局搏命
-        var bestFood: Move? = null
-        for (m in moves) if (m.foodOk || m.willEat) if (bestFood == null || m.dist < bestFood.dist) bestFood = m
-        if (bestFood != null) { queue.add(bestFood.dir); return }
-        // 兜底
-        var bestSpace: Move? = null
-        for (m in moves) if (bestSpace == null || m.space > bestSpace.space) bestSpace = m
-        if (bestSpace != null) queue.add(bestSpace.dir)
-        else moves.firstOrNull()?.let { queue.add(it.dir) }
-    }
-
-    private fun bfs(start: Point, target: Point, custom: ArrayDeque<Point>): List<Point> {
-        val q = ArrayDeque<Point>(); val vis = HashSet<Point>(); val par = HashMap<Point, Point>()
-        q.add(start); vis.add(start)
-        while (q.isNotEmpty()) {
-            val c = q.removeFirst()
-            if (c == target) {
-                val p = mutableListOf<Point>(); var n: Point? = c
-                while (n != null && n != start) { p.add(n); n = par[n] }
-                return p.reversed()
-            }
-            for (d in listOf(Point(1, 0), Point(-1, 0), Point(0, 1), Point(0, -1))) {
-                val nx = Point(c.x + d.x, c.y + d.y)
-                if (nx.x !in 0 until COLS || nx.y !in 0 until ROWS) continue
-                if (vis.contains(nx)) continue
-                if (nx != target) {
-                    val body = if (nx == custom.last()) custom.dropLast(1) else custom
-                    if (body.any { it == nx }) continue
+        
+        // ★ 搏命模式：连续 15 步食物不可达 → 冲破死区
+        if (foodUnreachableStreak > 15) {
+            var emergencyDir: Point? = null
+            var minManhattan = Int.MAX_VALUE
+            for (d in validDirs) {
+                val nh = Point(head.x + d.x, head.y + d.y)
+                val m = abs(nh.x - food.x) + abs(nh.y - food.y)
+                if (m < minManhattan) {
+                    minManhattan = m
+                    emergencyDir = d
                 }
-                vis.add(nx); par[nx] = c; q.add(nx)
+            }
+            if (emergencyDir != null) {
+                directionQueue.clear()
+                directionQueue.add(emergencyDir)
+                return
             }
         }
-        return emptyList()
-    }
 
-    private fun reachable(start: Point, custom: ArrayDeque<Point>): Set<Point> {
-        val q = ArrayDeque<Point>(); val vis = HashSet<Point>(); q.add(start); vis.add(start)
-        while (q.isNotEmpty()) {
-            val c = q.removeFirst()
-            for (d in listOf(Point(1, 0), Point(-1, 0), Point(0, 1), Point(0, -1))) {
-                val nx = Point(c.x + d.x, c.y + d.y)
-                if (nx.x !in 0 until COLS || nx.y !in 0 until ROWS) continue
-                if (vis.contains(nx)) continue
-                if (nx != custom.last() && custom.any { it == nx }) continue
-                vis.add(nx); q.add(nx)
+        // ========== 以下为原有逻辑，未改动 ==========
+
+        if (hungerCounter > 15) {
+            val pathToFood = bfsPathWithSnake(head, food, snake, dir)
+            if (pathToFood != null && pathToFood.size > 1) {
+                val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
+                if (validDirs.contains(nextMove)) {
+                    directionQueue.clear()
+                    directionQueue.add(nextMove)
+                    return
+                }
             }
         }
-        return vis
+
+        val foodDx = food.x - head.x
+        val foodDy = food.y - head.y
+        if (abs(foodDx) + abs(foodDy) == 1) {
+            val foodDir = Point(foodDx, foodDy)
+            if (validDirs.contains(foodDir) && isEatingSafe(head, food)) {
+                directionQueue.clear()
+                directionQueue.add(foodDir)
+                return
+            }
+        }
+
+        if (hungerCounter > 8) {
+            val pathToFood = bfsPathWithSnake(head, food, snake, dir)
+            if (pathToFood != null && pathToFood.size > 1) {
+                val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
+                if (validDirs.contains(nextMove) && isEatingSafe(head, food)) {
+                    directionQueue.clear()
+                    directionQueue.add(nextMove)
+                    return
+                }
+            }
+        }
+
+        val tailSafeDirs = mutableListOf<Point>()
+        for (d in validDirs) {
+            val nextHead = Point(head.x + d.x, head.y + d.y)
+            val simSnake = ArrayDeque(snake)
+            simSnake.addFirst(nextHead)
+            simSnake.removeLast()
+            val simTail = simSnake.last()
+            val pathToTail = bfsPathWithSnake(simSnake.first(), simTail, simSnake, Point(0,0))
+            if (pathToTail != null) {
+                tailSafeDirs.add(d)
+            }
+        }
+        
+        val candidateDirs = if (tailSafeDirs.isNotEmpty()) tailSafeDirs else validDirs
+        
+        val dirSpaceMap = mutableMapOf<Point, Int>()
+        for (d in candidateDirs) {
+            val nextHead = Point(head.x + d.x, head.y + d.y)
+            val simSnake = ArrayDeque(snake)
+            simSnake.addFirst(nextHead)
+            simSnake.removeLast()
+            dirSpaceMap[d] = floodFillWithSnake(nextHead, simSnake)
+        }
+        
+        val pathToFood = bfsPathWithSnake(head, food, snake, dir)
+        if (pathToFood != null && pathToFood.size > 1) {
+            val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
+            if (candidateDirs.contains(nextMove) && isEatingSafe(head, food)) {
+                directionQueue.clear()
+                directionQueue.add(nextMove)
+                return
+            }
+        }
+        
+        if (candidateDirs.isNotEmpty()) {
+            var bestDir: Point? = null
+            var minDist = Int.MAX_VALUE
+            for (d in candidateDirs) {
+                val nextHead = Point(head.x + d.x, head.y + d.y)
+                val simSnake = ArrayDeque(snake)
+                simSnake.addFirst(nextHead)
+                simSnake.removeLast()
+                val path = bfsPathWithSnake(nextHead, food, simSnake, Point(0, 0))
+                val dist = path?.size ?: Int.MAX_VALUE
+                if (dist < minDist) {
+                    minDist = dist
+                    bestDir = d
+                }
+            }
+            if (bestDir != null) {
+                directionQueue.clear()
+                directionQueue.add(bestDir)
+                return
+            }
+        }
+        
+        var bestMove: Point? = null
+        var maxSpace = -1
+        for (d in validDirs) {
+            val space = dirSpaceMap[d] ?: 0
+            if (space > maxSpace) {
+                maxSpace = space
+                bestMove = d
+            }
+        }
+        if (bestMove != null) {
+            directionQueue.clear()
+            directionQueue.add(bestMove)
+        }
     }
 
-    private fun aiHam() {
+    private fun autoPilotHamiltonian() {
+        if (gameOver) return
         val head = snake.first()
-        var idx = hamPath.indexOf(head)
-        if (idx == -1) {
-            var md = Int.MAX_VALUE; var cl = 0
-            for (i in hamPath.indices) {
-                val p = hamPath[i]; val d = abs(p.x - head.x) + abs(p.y - head.y)
-                if (d < md) { md = d; cl = i }
+        if (head.x !in 0 until cols || head.y !in 0 until rows) return
+        
+        val currentIndex = pathIndex[head.x][head.y]
+        val nextIndex = (currentIndex + 1) % pathSequence.size
+        val nextPoint = pathSequence[nextIndex]
+        
+        val dx = nextPoint.x - head.x
+        val dy = nextPoint.y - head.y
+        
+        val newHead = Point(head.x + dx, head.y + dy)
+        val isSelfCollision = snake.dropLast(1).any { it == newHead }
+        
+        if (isSelfCollision) {
+            val nextNextIndex = (nextIndex + 1) % pathSequence.size
+            val nextNextPoint = pathSequence[nextNextIndex]
+            val dx2 = nextNextPoint.x - head.x
+            val dy2 = nextNextPoint.y - head.y
+            if (abs(dx2) + abs(dy2) == 1) {
+                dir = Point(dx2, dy2)
+                return
             }
-            idx = cl
+            return
         }
-        val ni = (idx + 1) % hamPath.size
-        val np = hamPath[ni]
-        val dx = np.x - head.x; val dy = np.y - head.y
-        if (abs(dx) + abs(dy) != 1) { aiBfs(); return }
-        queue.clear(); queue.add(Point(dx, dy))
+        
+        dir = Point(dx, dy)
     }
 
-    private fun die() {
-        gameOver = true; running = false; aiMode = 0
-        shakeTime = 400f; deathFlash = 255f
-        val h = snake.first()
-        shockX = offX + h.x * cellSize + cellSize / 2
-        shockY = offY + h.y * cellSize + cellSize / 2
-        shockR = cellSize; shockA = 255f
-        repeat(60) { particle(shockX, shockY, Color.RED, true) }
-        vibrate(300L)
-        consecDeaths++
-        if (score > high) high = score
-        if (score > aiBest) {
-            aiBest = score
-            if (score > 100) aiLevel = (aiLevel + 1).coerceAtMost(10)
-            consecDeaths = 0
-        } else if (score < 50) {
-            if (consecDeaths >= 2 || score < aiBest * 0.3) {
-                aiLevel = (aiLevel - 1).coerceAtLeast(1); consecDeaths = 0
+    private fun floodFillWithSnake(start: Point, currentSnake: Collection<Point>): Int {
+        val queue = ArrayDeque<Point>()
+        val visited = mutableSetOf<Point>()
+        queue.add(start)
+        visited.add(start)
+        while (queue.isNotEmpty()) {
+            val curr = queue.removeFirst()
+            for (d in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
+                val next = Point(curr.x + d.x, curr.y + d.y)
+                if (next.x !in 0 until cols || next.y !in 0 until rows) continue
+                if (currentSnake.any { it == next }) continue
+                if (visited.contains(next)) continue
+                visited.add(next)
+                queue.add(next)
             }
-        } else consecDeaths = 0
-        savePrefs(); invalidate()
+        }
+        return visited.size
     }
 
-    private fun foodBurst(at: Point) {
-        val cx = offX + at.x * cellSize + cellSize / 2
-        val cy = offY + at.y * cellSize + cellSize / 2
-        repeat(25) { particle(cx, cy, Color.YELLOW, false) }
+    private fun bfsPathWithSnake(start: Point, target: Point, customSnake: Collection<Point>, reverseDir: Point): List<Point>? {
+        val queue = ArrayDeque<Point>()
+        val visited = mutableSetOf<Point>()
+        val parent = mutableMapOf<Point, Point>()
+        queue.add(start)
+        visited.add(start)
+        
+        while (queue.isNotEmpty()) {
+            val curr = queue.removeFirst()
+            if (curr == target) {
+                val path = mutableListOf<Point>()
+                var node = curr
+                while (node != start) {
+                    path.add(0, node)
+                    node = parent[node]!!
+                }
+                return path
+            }
+            for (d in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
+                if (curr == start && d.x == reverseDir.x && d.y == reverseDir.y) continue
+                val next = Point(curr.x + d.x, curr.y + d.y)
+                if (next.x !in 0 until cols || next.y !in 0 until rows) continue
+                if (customSnake.any { it == next } && next != target) continue
+                if (visited.contains(next)) continue
+                visited.add(next)
+                parent[next] = curr
+                queue.add(next)
+            }
+        }
+        return null
     }
 
-    private fun particle(x: Float, y: Float, color: Int, death: Boolean) {
-        if (particles.size >= 300) particles.removeAt(0)
-        val a = Random.nextFloat() * 6.2832f
-        val s = if (death) Random.nextFloat() * 12f + 3f else Random.nextFloat() * 8f + 2f
-        particles.add(Particle(
-            x + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
-            y + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
-            cos(a) * s, sin(a) * s,
-            if (death) 1.5f else 1f, color,
-            Random.nextFloat() * 1.5f + 0.5f,
-            if (death) 0.002f else 0.0015f,
-            false
-        ))
+    private fun update() {
+        if (gameOver) return
+
+        when (aiMode) {
+            1 -> {
+                autoPilotBFS()
+                if (directionQueue.isNotEmpty()) {
+                    val next = directionQueue.removeFirst()
+                    if (dir.x == 0 && dir.y == 0) dir = next
+                    else if (dir.x != -next.x || dir.y != -next.y) dir = next
+                }
+            }
+            2 -> {
+                autoPilotHamiltonian()
+            }
+            else -> {
+                if (directionQueue.isNotEmpty()) {
+                    val next = directionQueue.removeFirst()
+                    if (dir.x == 0 && dir.y == 0) dir = next
+                    else if (dir.x != -next.x || dir.y != -next.y) dir = next
+                }
+            }
+        }
+
+        if (dir.x == 0 && dir.y == 0) return
+
+        val head = snake.first()
+        val newHead = Point(head.x + dir.x, head.y + dir.y)
+
+        if (newHead.x < 0 || newHead.x >= cols || newHead.y < 0 || newHead.y >= rows) {
+            gameOver = true
+            triggerDeathEffects()
+            saveScoreAndMoney()
+            return
+        }
+
+        val isEating = newHead == food
+        val tail = snake.last()
+        val collidedWithSelf = if (newHead == tail) isEating else snake.any { it == newHead }
+
+        if (collidedWithSelf) {
+            gameOver = true
+            triggerDeathEffects()
+            saveScoreAndMoney()
+            return
+        }
+
+        val tailX = offsetX + tail.x * cellSize + cellSize / 2
+        val tailY = offsetY + tail.y * cellSize + cellSize / 2
+        
+        val trailColor = if (isRainbowSkin) {
+            Color.HSVToColor(floatArrayOf((System.currentTimeMillis() / 10f) % 360f, 1f, 1f))
+        } else {
+            currentSkinBodyColor
+        }
+        
+        particles.add(
+            Particle(
+                x = tailX + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
+                y = tailY + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
+                vx = (Random.nextFloat() - 0.5f) * 1.5f,
+                vy = (Random.nextFloat() - 0.5f) * 1.5f,
+                life = 1.0f, color = trailColor,
+                size = Random.nextFloat() * 0.8f + 0.5f,
+                decay = 0.003f,
+                isTrail = true
+            )
+        )
+
+        snake.addFirst(newHead)
+        if (isEating) {
+            hungerCounter = 0
+            comboCount++
+            val basePoints = 10 + (comboCount - 1) * 5
+            currentMultiplier = when {
+                score >= 1000 -> 3.0f
+                score >= 500 -> 2.0f
+                score >= 200 -> 1.5f
+                else -> 1.0f
+            }
+            val earnedPoints = (basePoints * currentMultiplier).toInt()
+            score += earnedPoints
+            onScoreChanged?.invoke(score)
+            triggerEatEffects(earnedPoints)
+            placeFood()
+            gameSpeed = max(70L, gameSpeed - 3L)
+        } else {
+            hungerCounter++
+            snake.removeLast()
+        }
     }
 
-    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        super.onSizeChanged(w, h, ow, oh)
-        cellSize = minOf(w / COLS.toFloat(), h / ROWS.toFloat())
-        offX = (w - cellSize * COLS) / 2f
-        offY = (h - cellSize * ROWS) / 2f
+    private fun triggerEatEffects(scoreGained: Int) {
+        vibrate(35, 100)
+        val foodCenterX = offsetX + food.x * cellSize + cellSize / 2
+        val foodCenterY = offsetY + food.y * cellSize + cellSize / 2
+        val colors = intArrayOf(
+            Color.rgb(231, 76, 60), Color.rgb(241, 196, 15),
+            Color.rgb(46, 204, 113), Color.rgb(52, 152, 219),
+            Color.WHITE, Color.CYAN
+        )
+        for (i in 0 until 25) {
+            val angle = Random.nextFloat() * 2 * PI
+            val speed = Random.nextFloat() * 8f + 2f
+            particles.add(
+                Particle(
+                    x = foodCenterX, y = foodCenterY,
+                    vx = cos(angle).toFloat() * speed,
+                    vy = sin(angle).toFloat() * speed,
+                    life = 1.0f, color = colors[Random.nextInt(colors.size)],
+                    size = Random.nextFloat() * 1.5f + 0.5f,
+                    decay = 0.0015f
+                )
+            )
+        }
+        floatingTexts.add(FloatingText(foodCenterX, foodCenterY, 1.0f, "+$scoreGained"))
+    }
+
+    private fun triggerDeathEffects() {
+        vibrate(35, 100)
+        vibrator?.let {
+            if (it.hasVibrator()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val timings = longArrayOf(0, 100, 50, 200, 50, 300, 100, 400)
+                    val amplitudes = intArrayOf(0, 255, 0, 200, 0, 150, 0, 80)
+                    it.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                } else {
+                    @Suppress("DEPRECATION")
+                    it.vibrate(longArrayOf(0, 100, 50, 200, 50, 300, 100, 400), -1)
+                }
+            }
+        }
+        shakeTime = 400f
+        deathFlashAlpha = 255f
+        
+        val headX = offsetX + snake.first().x * cellSize + cellSize / 2
+        val headY = offsetY + snake.first().y * cellSize + cellSize / 2
+        shockwaveX = headX
+        shockwaveY = headY
+        shockwaveRadius = cellSize
+        shockwaveAlpha = 255f
+        
+        paintSnakeBody.color = Color.rgb(200, 50, 50)
+        paintSnakeBody.setShadowLayer(20f, 0f, 0f, Color.rgb(200, 50, 50))
+        paintSnakeHead.color = Color.rgb(150, 0, 0)
+        paintSnakeHead.setShadowLayer(15f, 0f, 0f, Color.rgb(150, 0, 0))
+
+        for (i in 0 until 60) {
+            val angle = Random.nextFloat() * 2 * PI
+            val speed = Random.nextFloat() * 12f + 3f
+            particles.add(
+                Particle(
+                    x = headX, y = headY,
+                    vx = cos(angle).toFloat() * speed,
+                    vy = sin(angle).toFloat() * speed,
+                    life = 1.5f, color = Color.rgb(255, 50, 50),
+                    size = Random.nextFloat() * 2f + 1f,
+                    decay = 0.002f
+                )
+            )
+        }
+        
+        if (aiMode != 0) {
+            aiMode = 0
+            onAIModeChanged?.invoke(aiMode)
+        }
+    }
+
+    private fun saveScoreAndMoney() {
+        if (score > highScore) {
+            highScore = score
+            prefs.edit().putInt("high_score", highScore).apply()
+        }
+        var currentMoney = prefs.getInt("money", 0)
+        currentMoney += score
+        prefs.edit().putInt("money", currentMoney).apply()
+        onMoneyChanged?.invoke(currentMoney)
+        
+        if (score > aiBestScore) {
+            aiBestScore = score
+            prefs.edit().putInt("ai_best_score", aiBestScore).apply()
+            if (score > 100) {
+                aiLevel = (aiLevel + 1).coerceAtMost(10)
+                prefs.edit().putInt("ai_level", aiLevel).apply()
+            }
+            consecutiveDeaths = 0
+            prefs.edit().putInt("consecutive_deaths", 0).apply()
+        } else {
+            if (score < 50) {
+                consecutiveDeaths++
+                prefs.edit().putInt("consecutive_deaths", consecutiveDeaths).apply()
+                if (consecutiveDeaths >= 2 || score < aiBestScore * 0.3) {
+                    aiLevel = (aiLevel - 1).coerceAtLeast(1)
+                    prefs.edit().putInt("ai_level", aiLevel).apply()
+                    consecutiveDeaths = 0
+                    prefs.edit().putInt("consecutive_deaths", 0).apply()
+                }
+            } else {
+                consecutiveDeaths = 0
+                prefs.edit().putInt("consecutive_deaths", 0).apply()
+            }
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val dt = 16f
-        updateFx(dt)
-        cellSize = minOf(width / COLS.toFloat(), height / ROWS.toFloat())
-        offX = (width - cellSize * COLS) / 2f
-        offY = (height - cellSize * ROWS) / 2f
-        canvas.drawColor(Color.BLACK)
-        canvas.save()
-        if (gameOver && shakeTime > 0) canvas.translate(shakeX, shakeY)
+        
+        cellSize = minOf(width / cols.toFloat(), height / rows.toFloat())
+        offsetX = (width - cellSize * cols) / 2f
+        offsetY = (height - cellSize * rows) / 2f
 
-        // 呼吸网格
-        val breath = (sin(System.currentTimeMillis() / 400.0).toFloat() + 1f) / 2f
-        paintGrid.alpha = (60 + 195 * breath).toInt().coerceIn(0, 255)
-        paintGrid.color = if (isRainbow) {
-            val c = rainbow[((System.currentTimeMillis() / 20).toInt()) % 360]
-            Color.argb(200, Color.red(c), Color.green(c), Color.blue(c))
-        } else Color.CYAN
-        for (i in 0..COLS) {
-            val x = offX + i * cellSize
-            canvas.drawLine(x, offY, x, offY + ROWS * cellSize, paintGrid)
+        if (isRainbowBoard) {
+            val time = System.currentTimeMillis() % 5000L
+            boardMatrix.setTranslate(time * 0.15f, time * 0.15f)
+            paintBoardBg.shader?.setLocalMatrix(boardMatrix)
+            canvas.drawRect(offsetX, offsetY, offsetX + cols * cellSize, offsetY + rows * cellSize, paintBoardBg)
+        } else {
+            canvas.drawColor(currentBoardBgColor)
         }
-        for (i in 0..ROWS) {
-            val y = offY + i * cellSize
-            canvas.drawLine(offX, y, offX + COLS * cellSize, y, paintGrid)
+
+        canvas.save()
+        if (gameOver && shakeTime > 0) canvas.translate(shakeOffsetX, shakeOffsetY)
+
+        val breath = (sin(System.currentTimeMillis() / 400.0).toFloat() + 1f) / 2f
+        val gridAlpha = (60 + 195 * breath).toInt()
+        paintGrid.alpha = gridAlpha
+        paintGrid.color = currentBoardGridColor
+        
+        for (i in 0..cols) {
+            val x = offsetX + i * cellSize
+            canvas.drawLine(x, offsetY, x, offsetY + rows * cellSize, paintGrid)
+        }
+        for (i in 0..rows) {
+            val y = offsetY + i * cellSize
+            canvas.drawLine(offsetX, y, offsetX + cols * cellSize, y, paintGrid)
         }
 
         if (aiMode == 2 && !gameOver) {
-            for (i in 0 until hamPath.size - 1) {
-                val a = hamPath[i]; val b = hamPath[i + 1]
-                canvas.drawLine(
-                    offX + a.x * cellSize + cellSize / 2, offY + a.y * cellSize + cellSize / 2,
-                    offX + b.x * cellSize + cellSize / 2, offY + b.y * cellSize + cellSize / 2,
-                    paintHam
-                )
+            for (i in 0 until pathSequence.size - 1) {
+                val p1 = pathSequence[i]
+                val p2 = pathSequence[i + 1]
+                val x1 = offsetX + p1.x * cellSize + cellSize / 2
+                val y1 = offsetY + p1.y * cellSize + cellSize / 2
+                val x2 = offsetX + p2.x * cellSize + cellSize / 2
+                val y2 = offsetY + p2.y * cellSize + cellSize / 2
+                canvas.drawLine(x1, y1, x2, y2, paintHamPath)
             }
         }
 
-        // 食物
-        val fx = offX + food.x * cellSize + cellSize / 2
-        val fy = offY + food.y * cellSize + cellSize / 2
+        val foodCenterX = offsetX + food.x * cellSize + cellSize / 2
+        val foodCenterY = offsetY + food.y * cellSize + cellSize / 2
         val pulse = 1f + 0.25f * sin(System.currentTimeMillis() / 150.0).toFloat()
-        val fr = cellSize * 0.4f * pulse
-        paintFoodGlow.shader = RadialGradient(fx, fy, fr * 2.2f,
-            intArrayOf(Color.argb(200, 0, 255, 255), Color.argb(100, 0, 200, 255), Color.argb(0, 0, 0, 0)),
-            floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
-        canvas.drawCircle(fx, fy, fr * 2.2f, paintFoodGlow)
+        val foodRadius = cellSize * 0.4f * pulse
+
+        val glowColors = intArrayOf(
+            Color.argb(200, 0, 255, 255),
+            Color.argb(100, 0, 200, 255),
+            Color.argb(0, 0, 0, 0)
+        )
+        val glowPositions = floatArrayOf(0.0f, 0.5f, 1.0f)
+        val radialGradient = RadialGradient(
+            foodCenterX, foodCenterY, foodRadius * 2.2f,
+            glowColors, glowPositions, Shader.TileMode.CLAMP
+        )
+        paintFoodGlow.shader = radialGradient
+        canvas.drawCircle(foodCenterX, foodCenterY, foodRadius * 2.2f, paintFoodGlow)
+
+        val rotation = (System.currentTimeMillis() % 3600) / 10f
         canvas.save()
-        canvas.rotate((System.currentTimeMillis() % 3600) / 10f, fx, fy)
+        canvas.rotate(rotation, foodCenterX, foodCenterY)
         paintFoodCross.alpha = 220
-        val cl = fr * 1.6f
-        canvas.drawLine(fx - cl, fy, fx + cl, fy, paintFoodCross)
-        canvas.drawLine(fx, fy - cl, fx, fy + cl, paintFoodCross)
-        canvas.rotate(45f, fx, fy)
-        canvas.drawLine(fx - cl * 0.7f, fy, fx + cl * 0.7f, fy, paintFoodCross)
-        canvas.drawLine(fx, fy - cl * 0.7f, fx, fy + cl * 0.7f, paintFoodCross)
+        val crossLength = foodRadius * 1.6f
+        canvas.drawLine(foodCenterX - crossLength, foodCenterY, foodCenterX + crossLength, foodCenterY, paintFoodCross)
+        canvas.drawLine(foodCenterX, foodCenterY - crossLength, foodCenterX, foodCenterY + crossLength, paintFoodCross)
+        canvas.rotate(45f, foodCenterX, foodCenterY)
+        canvas.drawLine(foodCenterX - crossLength * 0.7f, foodCenterY, foodCenterX + crossLength * 0.7f, foodCenterY, paintFoodCross)
+        canvas.drawLine(foodCenterX, foodCenterY - crossLength * 0.7f, foodCenterX, foodCenterY + crossLength * 0.7f, paintFoodCross)
         canvas.restore()
-        canvas.drawCircle(fx, fy, fr * 0.35f, paintFoodCore)
 
-        // 蛇
+        paintFoodCore.alpha = 255
+        canvas.drawCircle(foodCenterX, foodCenterY, foodRadius * 0.35f, paintFoodCore)
+
         if (snake.isNotEmpty()) {
+            val progress = if (gameOver) 0f else (timeAccumulator.toFloat() / gameSpeed).coerceIn(0f, 1f)
             val path = Path()
-            val pts = snake.mapIndexed { i, p ->
-                val bx = offX + p.x * cellSize + cellSize / 2
-                val by = offY + p.y * cellSize + cellSize / 2
+            val points = snake.mapIndexed { index, p ->
+                var baseX = offsetX + p.x * cellSize + cellSize / 2
+                var baseY = offsetY + p.y * cellSize + cellSize / 2
+                if (index == 0 && !gameOver) {
+                    val prevP = if (snake.size > 1) snake[1] else Point(snake[0].x - dir.x, snake[0].y - dir.y)
+                    val prevX = offsetX + prevP.x * cellSize + cellSize / 2
+                    val prevY = offsetY + prevP.y * cellSize + cellSize / 2
+                    baseX = prevX + (baseX - prevX) * progress
+                    baseY = prevY + (baseY - prevY) * progress
+                }
                 val t = System.currentTimeMillis() / 200.0
-                val amp = if (dir.x != 0) cellSize * 0.1f else cellSize * 0.05f
-                PointF(bx + sin(t + i * 0.5).toFloat() * amp, by + cos(t + i * 0.5).toFloat() * amp)
+                val swingAmplitude = if (dir.x != 0) cellSize * 0.1f else cellSize * 0.05f
+                val swingX = sin(t + index * 0.5).toFloat() * swingAmplitude
+                val swingY = cos(t + index * 0.5).toFloat() * swingAmplitude
+                PointF(baseX + swingX, baseY + swingY)
             }
-            path.moveTo(pts[0].x, pts[0].y)
-            for (i in 1 until pts.size) {
-                val p = pts[i - 1]; val c = pts[i]
-                path.quadTo(p.x, p.y, (p.x + c.x) / 2f, (p.y + c.y) / 2f)
+            path.moveTo(points[0].x, points[0].y)
+            for (i in 1 until points.size) {
+                val prev = points[i - 1]
+                val curr = points[i]
+                path.quadTo(prev.x, prev.y, (prev.x + curr.x) / 2f, (prev.y + curr.y) / 2f)
             }
-            if (pts.size > 1) path.lineTo(pts.last().x, pts.last().y)
+            if (points.size > 1) path.lineTo(points.last().x, points.last().y)
 
-            if (isRainbow) {
-                val hp = pts.first(); val tp = pts.last()
-                val ang = atan2(tp.y - hp.y, tp.x - hp.x)
-                val to = (System.currentTimeMillis() % 3000) / 3000f
-                val fd = cellSize * 6 * to
-                paintBody.shader = LinearGradient(
-                    hp.x - cos(ang) * fd, hp.y - sin(ang) * fd,
-                    tp.x - cos(ang) * fd, tp.y - sin(ang) * fd,
-                    rainbow, null, Shader.TileMode.MIRROR
+            if (isRainbowSkin) {
+                val headX = points.first().x
+                val headY = points.first().y
+                val tailX = points.last().x
+                val tailY = points.last().y
+                
+                val angle = atan2(tailY - headY, tailX - headX)
+                val timeOffset = (System.currentTimeMillis() % 3000) / 3000f
+                val flowDistance = cellSize * 6 * timeOffset
+                
+                val startX = headX - cos(angle) * flowDistance
+                val startY = headY - sin(angle) * flowDistance
+                val endX = tailX - cos(angle) * flowDistance
+                val endY = tailY - sin(angle) * flowDistance
+                
+                val shader = LinearGradient(
+                    startX, startY,
+                    endX, endY,
+                    rainbowColors, null, Shader.TileMode.MIRROR
                 )
-                paintBody.alpha = 255
-                paintBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
+                paintSnakeBody.shader = shader
+                paintSnakeHead.color = Color.WHITE
+                paintSnakeBody.alpha = 255
+                paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
             } else {
-                paintBody.shader = null
-                paintBody.color = bodyColor
-                paintBody.alpha = 255
-                paintBody.setShadowLayer(20f, 0f, 0f, bodyColor)
+                paintSnakeBody.shader = null
+                paintSnakeBody.color = currentSkinBodyColor
+                paintSnakeBody.alpha = 255
+                paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
             }
-            paintBody.strokeWidth = cellSize * 0.8f
-            paintBody.alpha = if (isRainbow) 150 else 120
-            canvas.drawPath(path, paintBody)
-            paintBody.strokeWidth = cellSize * 0.65f
-            paintBody.alpha = 255
-            canvas.drawPath(path, paintBody)
+            
+            paintSnakeBody.strokeWidth = cellSize * 0.8f
+            paintSnakeBody.alpha = if (isRainbowSkin) 150 else 120
+            canvas.drawPath(path, paintSnakeBody)
+            
+            paintSnakeBody.strokeWidth = cellSize * 0.65f
+            paintSnakeBody.alpha = 255
+            canvas.drawPath(path, paintSnakeBody)
 
-            val hp = pts.first()
-            canvas.drawCircle(hp.x, hp.y, cellSize * 0.5f, paintHead)
-            canvas.drawCircle(hp.x - cellSize * 0.1f, hp.y - cellSize * 0.1f, cellSize * 0.15f, paintHL)
-            val eo = cellSize * 0.2f; val er = cellSize * 0.12f; val pr = cellSize * 0.06f
-            val px = -dir.y * (cellSize * 0.2f); val py = dir.x * (cellSize * 0.2f)
-            canvas.drawCircle(hp.x + dir.x * eo + px, hp.y + dir.y * eo + py, er, paintEyeW)
-            canvas.drawCircle(hp.x + dir.x * eo - px, hp.y + dir.y * eo - py, er, paintEyeW)
-            canvas.drawCircle(hp.x + dir.x * eo * 1.2f + px, hp.y + dir.y * eo * 1.2f + py, pr, paintEyeB)
-            canvas.drawCircle(hp.x + dir.x * eo * 1.2f - px, hp.y + dir.y * eo * 1.2f - py, pr, paintEyeB)
+            val headPoint = points.first()
+            canvas.drawCircle(headPoint.x, headPoint.y, cellSize * 0.5f, paintSnakeHead)
+            canvas.drawCircle(headPoint.x - cellSize * 0.1f, headPoint.y - cellSize * 0.1f, cellSize * 0.15f, paintSnakeHighlight)
+
+            val currentDir = if (dir.x == 0 && dir.y == 0) Point(1, 0) else dir
+            val eyeOffset = cellSize * 0.2f
+            val perpOffsetX = -currentDir.y * (cellSize * 0.2f)
+            val perpOffsetY = currentDir.x * (cellSize * 0.2f)
+
+            canvas.drawCircle(headPoint.x + currentDir.x * eyeOffset + perpOffsetX, headPoint.y + currentDir.y * eyeOffset + perpOffsetY, cellSize * 0.12f, paintEyeWhite)
+            canvas.drawCircle(headPoint.x + currentDir.x * eyeOffset - perpOffsetX, headPoint.y + currentDir.y * eyeOffset - perpOffsetY, cellSize * 0.12f, paintEyeWhite)
+            canvas.drawCircle(headPoint.x + currentDir.x * eyeOffset * 1.2f + perpOffsetX, headPoint.y + currentDir.y * eyeOffset * 1.2f + perpOffsetY, cellSize * 0.06f, paintEyeBlack)
+            canvas.drawCircle(headPoint.x + currentDir.x * eyeOffset * 1.2f - perpOffsetX, headPoint.y + currentDir.y * eyeOffset * 1.2f - perpOffsetY, cellSize * 0.06f, paintEyeBlack)
         }
 
         particles.forEach { p ->
             paintParticle.color = p.color
             paintParticle.alpha = (p.life * 255).toInt().coerceIn(0, 255)
-            canvas.drawCircle(p.x, p.y, cellSize * 0.1f * p.life * p.size, paintParticle)
+            if (p.isTrail) {
+                canvas.drawCircle(p.x, p.y, cellSize * 0.1f * p.life * p.size, paintParticle)
+            } else {
+                canvas.drawCircle(p.x, p.y, cellSize * 0.15f * p.life * p.size, paintParticle)
+            }
         }
-        if (shockA > 0) {
-            paintShock.alpha = shockA.toInt().coerceIn(0, 255)
-            canvas.drawCircle(shockX, shockY, shockR, paintShock)
+        
+        if (shockwaveAlpha > 0) {
+            paintShockwave.alpha = shockwaveAlpha.toInt().coerceIn(0, 255)
+            canvas.drawCircle(shockwaveX, shockwaveY, shockwaveRadius, paintShockwave)
         }
-        floats.forEach { t ->
-            paintFloat.alpha = (t.life * 255).toInt().coerceIn(0, 255)
-            canvas.drawText(t.text, t.x, t.y, paintFloat)
+
+        floatingTexts.forEach { t ->
+            paintFloatingText.alpha = (t.life * 255).toInt().coerceIn(0, 255)
+            canvas.drawText(t.text, t.x, t.y, paintFloatingText)
         }
         canvas.restore()
 
         if (gameOver) {
-            canvas.drawColor(Color.argb(deathFlash.toInt().coerceIn(0, 255), 180, 0, 0))
-            paintText.textSize = 80f; paintText.color = Color.RED
+            canvas.drawColor(Color.argb(deathFlashAlpha.toInt().coerceIn(0, 255), 180, 0, 0))
+            paintText.textSize = 80f
+            paintText.color = Color.RED
             paintText.setShadowLayer(20f, 0f, 0f, Color.BLACK)
             canvas.drawText("GAME OVER", width / 2f, height / 2f - 60, paintText)
-            paintText.textSize = 40f; paintText.color = Color.WHITE
+
+            paintText.textSize = 40f
+            paintText.color = Color.WHITE
             canvas.drawText("最终得分: $score", width / 2f, height / 2f + 10, paintText)
-            paintTextSm.textSize = 30f; paintTextSm.color = Color.rgb(241, 196, 15)
-            canvas.drawText("最高分: $high", width / 2f, height / 2f + 60, paintTextSm)
-            paintTextSm.textSize = 20f; paintTextSm.color = Color.LTGRAY
-            canvas.drawText("AI Lv.$aiLevel | Best $aiBest", width / 2f, height / 2f + 100, paintTextSm)
-            if ((System.currentTimeMillis() / 500) % 2 == 0L) {
-                paintTextSm.textSize = 28f; paintTextSm.color = Color.WHITE
-                canvas.drawText("点击屏幕重新开始", width / 2f, height / 2f + 160, paintTextSm)
+
+            paintSubText.textSize = 30f
+            paintSubText.color = Color.rgb(241, 196, 15)
+            canvas.drawText("最高分: $highScore", width / 2f, height / 2f + 60, paintSubText)
+
+            val blink = (System.currentTimeMillis() / 500) % 2 == 0L
+            if (blink) {
+                paintSubText.textSize = 32f
+                paintSubText.color = Color.WHITE
+                canvas.drawText("点击屏幕重新开始", width / 2f, height / 2f + 150, paintSubText)
             }
-        } else {
-            paintText.textSize = 40f; paintText.color = Color.WHITE
-            canvas.drawText("Score: $score", width / 2f, 60f, paintText)
-            paintTextSm.textSize = 26f; paintTextSm.color = Color.parseColor("#AAAAAA")
-            canvas.drawText("High: $high  Money: $money", width / 2f, 100f, paintTextSm)
+        } else if (dir.x == 0 && dir.y == 0) {
+            paintSubText.textSize = 32f
+            paintSubText.color = if (isRainbowBoard) Color.WHITE else if (currentBoardBgColor == Color.BLACK) Color.WHITE else Color.DKGRAY
+            canvas.drawText("滑动屏幕开始", width / 2f, height / 2f, paintSubText)
+            paintSubText.textSize = 20f
+            paintSubText.color = if (isRainbowBoard) Color.LTGRAY else if (currentBoardBgColor == Color.BLACK) Color.LTGRAY else Color.GRAY
+            canvas.drawText("(滑动控制方向)", width / 2f, height / 2f + 50, paintSubText)
         }
     }
 
-    override fun onTouchEvent(e: MotionEvent): Boolean {
-        if (e.action == MotionEvent.ACTION_DOWN) {
+    private var touchStartX = 0f
+    private var touchStartY = 0f
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (aiMode != 0 && event.action == MotionEvent.ACTION_UP) {
             if (gameOver) { reset(); return true }
-            val dx = e.x - width / 2f; val dy = e.y - height / 2f
-            val nd = when {
-                abs(dx) > abs(dy) -> if (dx > 0) Point(1, 0) else Point(-1, 0)
-                else -> if (dy > 0) Point(0, 1) else Point(0, -1)
-            }
-            if (!(nd.x == -dir.x && nd.y == -dir.y) && queue.size < 3) queue.add(nd)
-            performClick(); return true
+            return true
         }
-        return super.onTouchEvent(e)
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                touchStartX = event.x
+                touchStartY = event.y
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (gameOver) { reset(); return true }
+                val dx = event.x - touchStartX
+                val dy = event.y - touchStartY
+                if (abs(dx) < 15 && abs(dy) < 15) return true
+                val lastDir = if (directionQueue.isNotEmpty()) directionQueue.last() else dir
+                if (abs(dx) > abs(dy)) {
+                    val newDir = if (dx > 0) Point(1, 0) else Point(-1, 0)
+                    if (newDir.x != -lastDir.x || newDir.y != -lastDir.y) {
+                        if (directionQueue.size < 2 && (lastDir.x != newDir.x || lastDir.y != newDir.y)) directionQueue.add(newDir)
+                    }
+                } else {
+                    val newDir = if (dy > 0) Point(0, 1) else Point(0, -1)
+                    if (newDir.x != -lastDir.x || newDir.y != -lastDir.y) {
+                        if (directionQueue.size < 2 && (lastDir.x != newDir.x || lastDir.y != newDir.y)) directionQueue.add(newDir)
+                    }
+                }
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
     }
-
-    override fun performClick(): Boolean { super.performClick(); return true }
-
-    private fun vibrate(ms: Long) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            vibrator.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
-        else @Suppress("DEPRECATION") vibrator.vibrate(ms)
-    }
-
-    fun setSkin(i: Int) { skin = i; applySkin(); invalidate() }
-    fun setAiMode(m: Int) { aiMode = m; queue.clear(); reset() }
-    fun getScore() = score
-    fun getHighScore() = high
-    fun getMoney() = money
-    fun isGameOver() = gameOver
 }
