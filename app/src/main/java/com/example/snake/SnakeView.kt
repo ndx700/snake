@@ -128,6 +128,15 @@ class SnakeView @JvmOverloads constructor(
     private var lastAction = -1
     private var steps = 0
 
+    /*
+     * 如果程序发生运行时异常，这里保存错误信息。
+     * 不让整个 App 直接闪退，而是在画面上显示。
+     */
+    private var runtimeError = false
+    private var runtimeErrorTitle = ""
+    private var runtimeErrorMessage = ""
+    private var runtimeErrorStack = ""
+
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
 
@@ -207,6 +216,12 @@ class SnakeView @JvmOverloads constructor(
 
     private var beamNodes = 0
 
+    /*
+     * 防止 BEAM 一次计算太多。
+     * 原来最多会产生大量节点。
+     */
+    private val maxBeamNodes = 120
+
     private val frame =
         object : Choreographer.FrameCallback {
 
@@ -214,29 +229,58 @@ class SnakeView @JvmOverloads constructor(
 
                 if (!running) return
 
-                if (lastFrame == 0L) {
+                try {
+
+                    if (lastFrame == 0L) {
+                        lastFrame = ns
+                    }
+
+                    val dt =
+                        ((ns - lastFrame) / 1_000_000L)
+                            .coerceAtMost(100L)
+
                     lastFrame = ns
+                    accumulator += dt
+
+                    /*
+                     * 防止某一帧因为卡顿积累大量 updateGame。
+                     */
+                    var updates = 0
+
+                    while (
+                        accumulator >= gameSpeed &&
+                        updates < 3
+                    ) {
+                        updateGame()
+                        accumulator -= gameSpeed
+                        updates++
+                    }
+
+                    /*
+                     * 如果因为卡顿积累特别多时间，
+                     * 直接丢掉多余时间，避免死循环。
+                     */
+                    if (accumulator > gameSpeed * 3) {
+                        accumulator = gameSpeed
+                    }
+
+                    updateEffects(
+                        dt / 16f
+                    )
+
+                    invalidate()
+
+                    if (running) {
+                        Choreographer
+                            .getInstance()
+                            .postFrameCallback(this)
+                    }
+
+                } catch (e: Throwable) {
+
+                    handleRuntimeError(e)
+
                 }
-
-                val dt =
-                    ((ns - lastFrame) / 1_000_000L)
-                        .coerceAtMost(100L)
-
-                lastFrame = ns
-                accumulator += dt
-
-                while (accumulator >= gameSpeed) {
-                    updateGame()
-                    accumulator -= gameSpeed
-                }
-
-                updateEffects(dt / 16f)
-
-                invalidate()
-
-                Choreographer
-                    .getInstance()
-                    .postFrameCallback(this)
             }
         }
 
@@ -318,17 +362,64 @@ class SnakeView @JvmOverloads constructor(
         reset()
     }
 
+    private fun handleRuntimeError(
+        e: Throwable
+    ) {
+
+        running = false
+
+        runtimeError = true
+
+        runtimeErrorTitle =
+            e.javaClass.simpleName.ifBlank {
+                "UnknownException"
+            }
+
+        runtimeErrorMessage =
+            e.message ?: "没有错误描述"
+
+        val trace =
+            e.stackTraceToString()
+
+        runtimeErrorStack =
+            trace.take(1800)
+
+        try {
+            Choreographer
+                .getInstance()
+                .removeFrameCallback(frame)
+        } catch (_: Throwable) {
+        }
+
+        invalidate()
+    }
+
     fun getAIMode(): Int {
         return aiMode
     }
 
     fun setAIMode(m: Int) {
-        aiMode = m
+
+        aiMode =
+            m.coerceIn(0, 1)
+
+        runtimeError = false
+        runtimeErrorTitle = ""
+        runtimeErrorMessage = ""
+        runtimeErrorStack = ""
+
         reset()
     }
 
     fun setForcedStrategy(s: Int) {
+
         forcedStrategy = s
+
+        runtimeError = false
+        runtimeErrorTitle = ""
+        runtimeErrorMessage = ""
+        runtimeErrorStack = ""
+
         invalidate()
     }
 
@@ -481,11 +572,18 @@ class SnakeView @JvmOverloads constructor(
 
     fun reset() {
 
+        runtimeError = false
+        runtimeErrorTitle = ""
+        runtimeErrorMessage = ""
+        runtimeErrorStack = ""
+
         snake.clear()
         queue.clear()
 
         if (aiMode == 2) {
-            snake.add(P(0, 0))
+            snake.add(
+                P(0, 0)
+            )
             dir = P(0, 1)
         } else {
             snake.add(
@@ -515,6 +613,8 @@ class SnakeView @JvmOverloads constructor(
 
         flash = 0f
 
+        beamNodes = 0
+
         ai = Snapshot(
             chosen = dir
         )
@@ -529,6 +629,10 @@ class SnakeView @JvmOverloads constructor(
     fun resume() {
 
         if (running) return
+
+        if (runtimeError) {
+            return
+        }
 
         running = true
         lastFrame = 0L
@@ -551,9 +655,22 @@ class SnakeView @JvmOverloads constructor(
 
         if (gameOver) return
 
+        if (snake.isEmpty()) {
+            reset()
+            return
+        }
+
         if (aiMode != 0) {
 
-            val chosen = chooseMove()
+            val chosen =
+                try {
+                    chooseMove()
+                } catch (e: Throwable) {
+
+                    handleRuntimeError(e)
+
+                    return
+                }
 
             queue.clear()
             queue.add(chosen)
@@ -587,9 +704,11 @@ class SnakeView @JvmOverloads constructor(
             return
         }
 
-        val ate = nh == food
+        val ate =
+            nh == food
 
-        val body = snake.toList()
+        val body =
+            snake.toList()
 
         val hitIndex =
             body.indexOf(nh)
@@ -795,6 +914,7 @@ class SnakeView @JvmOverloads constructor(
 
                     else ->
                         legal.first()
+
                 } ?: scored
 
             } else {
@@ -821,6 +941,7 @@ class SnakeView @JvmOverloads constructor(
             )
 
         ai = Snapshot(
+
             strategy =
                 strategyName(
                     if (forcedStrategy >= 0)
@@ -971,9 +1092,6 @@ class SnakeView @JvmOverloads constructor(
                 2 - edge
             ) * 55f
 
-        // ★ 这里就是本次 max() 报错的修复
-        // 原来的 0 是 Int，而第二个参数是 Float。
-        // 现在两个参数都是 Float。
         val spacePenalty =
             max(
                 0f,
@@ -1094,10 +1212,18 @@ class SnakeView @JvmOverloads constructor(
 
         repeat(3) {
 
+            if (layer.isEmpty()) {
+                return@repeat
+            }
+
             val next =
                 ArrayList<Node>()
 
             for (nod in layer) {
+
+                if (beamNodes >= maxBeamNodes) {
+                    break
+                }
 
                 beamNodes++
 
@@ -1114,6 +1240,10 @@ class SnakeView @JvmOverloads constructor(
                 }
 
                 for (d in dirs) {
+
+                    if (beamNodes >= maxBeamNodes) {
+                        break
+                    }
 
                     if (
                         isReverse(
@@ -1193,7 +1323,7 @@ class SnakeView @JvmOverloads constructor(
                     .sortedByDescending {
                         it.score
                     }
-                    .take(8)
+                    .take(6)
         }
 
         return best
@@ -1317,6 +1447,14 @@ class SnakeView @JvmOverloads constructor(
         val s = lastState
         val a = lastAction
 
+        if (s !in 0 until 20) {
+            return
+        }
+
+        if (a !in 0 until 5) {
+            return
+        }
+
         val alpha =
             when {
 
@@ -1336,7 +1474,9 @@ class SnakeView @JvmOverloads constructor(
 
         n[s][a]++
 
-        if (++steps % 20 == 0) {
+        steps++
+
+        if (steps % 20 == 0) {
             saveLearning()
         }
     }
@@ -1466,19 +1606,25 @@ class SnakeView @JvmOverloads constructor(
 
         vibrator?.let {
 
-            if (Build.VERSION.SDK_INT >= 26) {
+            try {
 
-                it.vibrate(
-                    VibrationEffect.createOneShot(
-                        120,
-                        VibrationEffect.DEFAULT_AMPLITUDE
+                if (Build.VERSION.SDK_INT >= 26) {
+
+                    it.vibrate(
+                        VibrationEffect.createOneShot(
+                            120,
+                            VibrationEffect.DEFAULT_AMPLITUDE
+                        )
                     )
-                )
 
-            } else {
+                } else {
 
-                @Suppress("DEPRECATION")
-                it.vibrate(120)
+                    @Suppress("DEPRECATION")
+                    it.vibrate(120)
+                }
+
+            } catch (_: Throwable) {
+                // 某些设备没有正常振动服务时忽略
             }
         }
 
@@ -1496,7 +1642,6 @@ class SnakeView @JvmOverloads constructor(
             !c.legal ->
                 "此方向不合法"
 
-            // ★ 修复了之前的 c.d.score 错误
             c.d == dir &&
                 danger >= 4 ->
                 "危险较高，继续保持可控路线"
@@ -1701,13 +1846,19 @@ class SnakeView @JvmOverloads constructor(
 
         for (p in body) {
 
-            bfsVisited[
-                p.y * cols + p.x
-            ] = true
+            if (inside(p)) {
+                bfsVisited[
+                    p.y * cols + p.x
+                ] = true
+            }
         }
 
         val start =
             body.first()
+
+        if (!inside(start)) {
+            return 0
+        }
 
         bfsVisited[
             start.y * cols + start.x
@@ -1722,7 +1873,10 @@ class SnakeView @JvmOverloads constructor(
 
         var count = 0
 
-        while (head < tail) {
+        while (
+            head < tail &&
+            tail <= bfsQueue.size
+        ) {
 
             val curr =
                 bfsQueue[head++]
@@ -1743,7 +1897,10 @@ class SnakeView @JvmOverloads constructor(
                 if (!bfsVisited[nx]) {
 
                     bfsVisited[nx] = true
-                    bfsQueue[tail++] = nx
+
+                    if (tail < bfsQueue.size) {
+                        bfsQueue[tail++] = nx
+                    }
                 }
             }
 
@@ -1755,7 +1912,10 @@ class SnakeView @JvmOverloads constructor(
                 if (!bfsVisited[nx]) {
 
                     bfsVisited[nx] = true
-                    bfsQueue[tail++] = nx
+
+                    if (tail < bfsQueue.size) {
+                        bfsQueue[tail++] = nx
+                    }
                 }
             }
 
@@ -1767,7 +1927,10 @@ class SnakeView @JvmOverloads constructor(
                 if (!bfsVisited[nx]) {
 
                     bfsVisited[nx] = true
-                    bfsQueue[tail++] = nx
+
+                    if (tail < bfsQueue.size) {
+                        bfsQueue[tail++] = nx
+                    }
                 }
             }
 
@@ -1779,7 +1942,10 @@ class SnakeView @JvmOverloads constructor(
                 if (!bfsVisited[nx]) {
 
                     bfsVisited[nx] = true
-                    bfsQueue[tail++] = nx
+
+                    if (tail < bfsQueue.size) {
+                        bfsQueue[tail++] = nx
+                    }
                 }
             }
         }
@@ -1847,6 +2013,10 @@ class SnakeView @JvmOverloads constructor(
         allowTail: Boolean
     ): Int {
 
+        if (!inside(start) || !inside(target)) {
+            return -1
+        }
+
         if (start == target) {
             return 0
         }
@@ -1858,9 +2028,11 @@ class SnakeView @JvmOverloads constructor(
 
         for (p in body) {
 
-            bfsVisited[
-                p.y * cols + p.x
-            ] = true
+            if (inside(p)) {
+                bfsVisited[
+                    p.y * cols + p.x
+                ] = true
+            }
         }
 
         if (
@@ -1871,9 +2043,11 @@ class SnakeView @JvmOverloads constructor(
             val last =
                 body.last()
 
-            bfsVisited[
-                last.y * cols + last.x
-            ] = false
+            if (inside(last)) {
+                bfsVisited[
+                    last.y * cols + last.x
+                ] = false
+            }
         }
 
         bfsVisited[
@@ -1895,6 +2069,10 @@ class SnakeView @JvmOverloads constructor(
                 tail - head
 
             repeat(layerSize) {
+
+                if (head >= bfsQueue.size) {
+                    return@repeat
+                }
 
                 val curr =
                     bfsQueue[head++]
@@ -1920,7 +2098,10 @@ class SnakeView @JvmOverloads constructor(
                     if (!bfsVisited[nx]) {
 
                         bfsVisited[nx] = true
-                        bfsQueue[tail++] = nx
+
+                        if (tail < bfsQueue.size) {
+                            bfsQueue[tail++] = nx
+                        }
                     }
                 }
 
@@ -1932,7 +2113,10 @@ class SnakeView @JvmOverloads constructor(
                     if (!bfsVisited[nx]) {
 
                         bfsVisited[nx] = true
-                        bfsQueue[tail++] = nx
+
+                        if (tail < bfsQueue.size) {
+                            bfsQueue[tail++] = nx
+                        }
                     }
                 }
 
@@ -1944,7 +2128,10 @@ class SnakeView @JvmOverloads constructor(
                     if (!bfsVisited[nx]) {
 
                         bfsVisited[nx] = true
-                        bfsQueue[tail++] = nx
+
+                        if (tail < bfsQueue.size) {
+                            bfsQueue[tail++] = nx
+                        }
                     }
                 }
 
@@ -1956,7 +2143,10 @@ class SnakeView @JvmOverloads constructor(
                     if (!bfsVisited[nx]) {
 
                         bfsVisited[nx] = true
-                        bfsQueue[tail++] = nx
+
+                        if (tail < bfsQueue.size) {
+                            bfsQueue[tail++] = nx
+                        }
                     }
                 }
             }
@@ -2008,6 +2198,10 @@ class SnakeView @JvmOverloads constructor(
         d: P
     ): Int {
 
+        if (snake.isEmpty()) {
+            return -1
+        }
+
         val h =
             snake.first()
 
@@ -2026,6 +2220,10 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun placeFood() {
+
+        if (snake.size >= cols * rows) {
+            return
+        }
 
         val free =
             ArrayList<P>()
@@ -2188,6 +2386,10 @@ class SnakeView @JvmOverloads constructor(
 
         if (gameOver) {
             drawGameOver(c)
+        }
+
+        if (runtimeError) {
+            drawRuntimeError(c)
         }
     }
 
@@ -2475,6 +2677,10 @@ class SnakeView @JvmOverloads constructor(
             return
         }
 
+        if (runtimeError) {
+            return
+        }
+
         val w =
             min(
                 width * 0.94f,
@@ -2568,7 +2774,7 @@ class SnakeView @JvmOverloads constructor(
             Color.WHITE
 
         c.drawText(
-            "🧠 AI  ${ai.strategy}",
+            "AI  ${ai.strategy}",
             left + 12,
             top + 24,
             text
@@ -2596,7 +2802,7 @@ class SnakeView @JvmOverloads constructor(
             "危险 " +
                 "●".repeat(ai.danger) +
                 "○".repeat(
-                    5 - ai.danger
+                    (5 - ai.danger).coerceAtLeast(0)
                 ) +
                 "   空间 ${ai.region}" +
                 "   比例 ${"%.1f".format(ai.spaceRatio)}",
@@ -2606,30 +2812,26 @@ class SnakeView @JvmOverloads constructor(
             text
         )
 
+        val tailText =
+            if (ai.tailReachable)
+                "✓ 可达"
+            else
+                "✗ 不可达"
+
+        val foodText =
+            if (ai.foodReachable)
+                "✓ 可达"
+            else
+                "✗ 不可达"
+
+        val foodDistanceText =
+            if (ai.foodDistance < 0)
+                "∞"
+            else
+                ai.foodDistance.toString()
+
         c.drawText(
-            "尾巴 " +
-                if (
-                    ai.tailReachable
-                )
-                    "✓ 可达"
-                else
-                    "✗ 不可达" +
-
-                "   食物 " +
-                if (
-                    ai.foodReachable
-                )
-                    "✓ 可达"
-                else
-                    "✗ 不可达" +
-
-                "   距离 " +
-                if (
-                    ai.foodDistance < 0
-                )
-                    "∞"
-                else
-                    ai.foodDistance.toString(),
+            "尾巴 $tailText   食物 $foodText   距离 $foodDistanceText",
 
             left + 12,
             top + 78,
@@ -2650,7 +2852,7 @@ class SnakeView @JvmOverloads constructor(
         c.drawText(
             "探索深度 ${ai.depth}   " +
                 "节点 ${ai.nodes}   " +
-                "α/攻 ${"%.2f".format(aggression)}",
+                "攻 ${"%.2f".format(aggression)}",
 
             left + 12,
             top + 112,
@@ -2701,7 +2903,7 @@ class SnakeView @JvmOverloads constructor(
             Color.CYAN
 
         c.drawText(
-            "选择  ${arrow(ai.chosen)}     " +
+            "选择 ${arrow(ai.chosen)}     " +
                 "死亡统计 W$deathWall " +
                 "S$deathSelf T$deathTrap",
 
@@ -2736,6 +2938,9 @@ class SnakeView @JvmOverloads constructor(
                 top + 190,
                 text
             )
+
+            text.isFakeBoldText =
+                false
         }
     }
 
@@ -2815,6 +3020,118 @@ class SnakeView @JvmOverloads constructor(
         )
     }
 
+    private fun drawRuntimeError(
+        c: Canvas
+    ) {
+
+        paint.color =
+            Color.argb(
+                245,
+                0,
+                0,
+                0
+            )
+
+        c.drawRect(
+            0f,
+            0f,
+            width.toFloat(),
+            height.toFloat(),
+            paint
+        )
+
+        text.textAlign =
+            Paint.Align.LEFT
+
+        text.isFakeBoldText =
+            true
+
+        text.textSize = 19f
+        text.color = Color.RED
+
+        c.drawText(
+            "游戏运行异常",
+            16f,
+            32f,
+            text
+        )
+
+        text.isFakeBoldText =
+            false
+
+        text.textSize = 14f
+        text.color = Color.WHITE
+
+        c.drawText(
+            "异常类型：$runtimeErrorTitle",
+            16f,
+            60f,
+            text
+        )
+
+        text.color = Color.YELLOW
+
+        val msg =
+            runtimeErrorMessage
+                .replace("\n", " ")
+                .take(90)
+
+        c.drawText(
+            "错误：$msg",
+            16f,
+            84f,
+            text
+        )
+
+        text.color = Color.CYAN
+
+        c.drawText(
+            "请把下面这段内容发给我：",
+            16f,
+            112f,
+            text
+        )
+
+        text.color = Color.LTGRAY
+        text.textSize = 10f
+
+        val lines =
+            runtimeErrorStack
+                .replace("\r", "")
+                .split("\n")
+
+        var y = 132f
+
+        for (line in lines.take(18)) {
+
+            val safe =
+                line.take(100)
+
+            c.drawText(
+                safe,
+                16f,
+                y,
+                text
+            )
+
+            y += 14f
+
+            if (y > height - 30f) {
+                break
+            }
+        }
+
+        text.textSize = 13f
+        text.color = Color.GREEN
+
+        c.drawText(
+            "点击屏幕可重新开始",
+            16f,
+            height - 15f,
+            text
+        )
+    }
+
     private fun arrow(
         p: P
     ): String {
@@ -2849,8 +3166,26 @@ class SnakeView @JvmOverloads constructor(
             return true
         }
 
-        if (gameOver) {
+        /*
+         * 如果发生了运行时异常，
+         * 点击屏幕直接重新初始化。
+         */
+        if (runtimeError) {
+
             reset()
+            resume()
+
+            return true
+        }
+
+        if (gameOver) {
+
+            reset()
+
+            if (!running) {
+                resume()
+            }
+
             return true
         }
 
