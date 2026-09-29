@@ -227,6 +227,12 @@ class SnakeView @JvmOverloads constructor(
 
     private var flash = 0f
 
+    /*
+     * 15 × 15 = 225
+     *
+     * 所有 BFS 数组的合法下标：
+     * 0..224
+     */
     private val bfsVisited =
         BooleanArray(
             cols * rows
@@ -1982,6 +1988,25 @@ class SnakeView @JvmOverloads constructor(
             p.y in 0 until rows
     }
 
+    /*
+     * =========================================================
+     * 修复后的 freeRegion()
+     *
+     * 原来的崩溃：
+     *
+     * ArrayIndexOutOfBoundsException:
+     * length=225; index=225
+     *
+     * 原因：
+     * bfsQueue 只有 225 个元素，
+     * 但 BFS 在某些情况下会继续写入第 226 个位置。
+     *
+     * 这里保证：
+     * 1. 每个格子只入队一次
+     * 2. index 永远在 0..224
+     * 3. tail 永远不会超过 bfsQueue.size
+     * =========================================================
+     */
     private fun freeRegion(
         body: ArrayDeque<P>
     ): Int {
@@ -1990,33 +2015,70 @@ class SnakeView @JvmOverloads constructor(
             return 0
         }
 
+        val total =
+            cols * rows
+
         java.util.Arrays.fill(
             bfsVisited,
             false
         )
 
+        /*
+         * 标记蛇身体。
+         */
         for (p in body) {
 
-            bfsVisited[
+            if (
+                p.x !in 0 until cols ||
+                p.y !in 0 until rows
+            ) {
+                continue
+            }
+
+            val index =
                 p.y * cols +
                     p.x
-            ] = true
+
+            if (
+                index in 0 until total
+            ) {
+
+                bfsVisited[index] =
+                    true
+            }
         }
 
         val start =
             body.first()
 
-        bfsVisited[
+        if (
+            start.x !in 0 until cols ||
+            start.y !in 0 until rows
+        ) {
+            return 0
+        }
+
+        val startIndex =
             start.y * cols +
                 start.x
-        ] = false
+
+        if (
+            startIndex !in 0 until total
+        ) {
+            return 0
+        }
+
+        /*
+         * 蛇头作为搜索起点。
+         */
+        bfsVisited[startIndex] =
+            false
 
         var head = 0
-        var tail = 1
+        var tail = 0
 
-        bfsQueue[0] =
-            start.y * cols +
-                start.x
+        bfsQueue[tail++] =
+            startIndex
 
         var count = 0
 
@@ -2027,6 +2089,12 @@ class SnakeView @JvmOverloads constructor(
             val curr =
                 bfsQueue[head++]
 
+            if (
+                curr !in 0 until total
+            ) {
+                continue
+            }
+
             val cx =
                 curr % cols
 
@@ -2035,80 +2103,310 @@ class SnakeView @JvmOverloads constructor(
 
             count++
 
-            if (cx > 0) {
-
-                val nx =
-                    curr - 1
+            /*
+             * 安全加入 BFS 队列。
+             *
+             * 每个格子只有第一次发现时才能进入。
+             */
+            fun addNode(
+                index: Int
+            ) {
 
                 if (
-                    !bfsVisited[nx]
+                    index !in 0 until total
+                ) {
+                    return
+                }
+
+                if (
+                    bfsVisited[index]
+                ) {
+                    return
+                }
+
+                bfsVisited[index] =
+                    true
+
+                if (
+                    tail <
+                    bfsQueue.size
                 ) {
 
-                    bfsVisited[nx] =
-                        true
-
                     bfsQueue[tail++] =
-                        nx
+                        index
                 }
             }
 
+            // 左
+            if (
+                cx > 0
+            ) {
+
+                addNode(
+                    curr - 1
+                )
+            }
+
+            // 右
             if (
                 cx < cols - 1
             ) {
 
-                val nx =
+                addNode(
                     curr + 1
-
-                if (
-                    !bfsVisited[nx]
-                ) {
-
-                    bfsVisited[nx] =
-                        true
-
-                    bfsQueue[tail++] =
-                        nx
-                }
+                )
             }
 
-            if (cy > 0) {
+            // 上
+            if (
+                cy > 0
+            ) {
 
-                val nx =
+                addNode(
                     curr - cols
-
-                if (
-                    !bfsVisited[nx]
-                ) {
-
-                    bfsVisited[nx] =
-                        true
-
-                    bfsQueue[tail++] =
-                        nx
-                }
+                )
             }
 
+            // 下
             if (
                 cy < rows - 1
             ) {
 
-                val nx =
+                addNode(
                     curr + cols
-
-                if (
-                    !bfsVisited[nx]
-                ) {
-
-                    bfsVisited[nx] =
-                        true
-
-                    bfsQueue[tail++] =
-                        nx
-                }
+                )
             }
         }
 
         return count
+    }
+
+    /*
+     * =========================================================
+     * 修复后的 distance()
+     *
+     * distance() 同样使用 bfsQueue，
+     * 因此一起做安全保护。
+     * =========================================================
+     */
+    private fun distance(
+        start: P,
+        target: P,
+        body: Collection<P>,
+        allowTail: Boolean
+    ): Int {
+
+        if (
+            start.x !in 0 until cols ||
+            start.y !in 0 until rows ||
+            target.x !in 0 until cols ||
+            target.y !in 0 until rows
+        ) {
+            return -1
+        }
+
+        if (
+            start == target
+        ) {
+            return 0
+        }
+
+        val total =
+            cols * rows
+
+        java.util.Arrays.fill(
+            bfsVisited,
+            false
+        )
+
+        /*
+         * 标记身体。
+         */
+        for (p in body) {
+
+            if (
+                p.x !in 0 until cols ||
+                p.y !in 0 until rows
+            ) {
+                continue
+            }
+
+            val index =
+                p.y * cols +
+                    p.x
+
+            if (
+                index in 0 until total
+            ) {
+
+                bfsVisited[index] =
+                    true
+            }
+        }
+
+        /*
+         * 尾巴允许作为通路。
+         */
+        if (
+            allowTail &&
+            body.isNotEmpty()
+        ) {
+
+            val last =
+                body.last()
+
+            if (
+                last.x in 0 until cols &&
+                last.y in 0 until rows
+            ) {
+
+                val lastIndex =
+                    last.y * cols +
+                        last.x
+
+                if (
+                    lastIndex in 0 until total
+                ) {
+
+                    bfsVisited[lastIndex] =
+                        false
+                }
+            }
+        }
+
+        val startIndex =
+            start.y * cols +
+                start.x
+
+        if (
+            startIndex !in 0 until total
+        ) {
+            return -1
+        }
+
+        bfsVisited[startIndex] =
+            false
+
+        var head = 0
+        var tail = 0
+
+        bfsQueue[tail++] =
+            startIndex
+
+        var dist = 0
+
+        while (
+            head < tail
+        ) {
+
+            val layerSize =
+                tail - head
+
+            repeat(layerSize) {
+
+                if (
+                    head >= tail
+                ) {
+                    return@repeat
+                }
+
+                val curr =
+                    bfsQueue[head++]
+
+                if (
+                    curr !in 0 until total
+                ) {
+                    return@repeat
+                }
+
+                val cx =
+                    curr % cols
+
+                val cy =
+                    curr / cols
+
+                if (
+                    cx == target.x &&
+                    cy == target.y
+                ) {
+
+                    return dist
+                }
+
+                fun addNode(
+                    index: Int
+                ) {
+
+                    if (
+                        index !in 0 until total
+                    ) {
+                        return
+                    }
+
+                    if (
+                        bfsVisited[index]
+                    ) {
+                        return
+                    }
+
+                    bfsVisited[index] =
+                        true
+
+                    if (
+                        tail <
+                        bfsQueue.size
+                    ) {
+
+                        bfsQueue[tail++] =
+                            index
+                    }
+                }
+
+                // 左
+                if (
+                    cx > 0
+                ) {
+
+                    addNode(
+                        curr - 1
+                    )
+                }
+
+                // 右
+                if (
+                    cx < cols - 1
+                ) {
+
+                    addNode(
+                        curr + 1
+                    )
+                }
+
+                // 上
+                if (
+                    cy > 0
+                ) {
+
+                    addNode(
+                        curr - cols
+                    )
+                }
+
+                // 下
+                if (
+                    cy < rows - 1
+                ) {
+
+                    addNode(
+                        curr + cols
+                    )
+                }
+            }
+
+            dist++
+        }
+
+        return -1
     }
 
     private fun countSafeMoves(
@@ -2163,163 +2461,6 @@ class SnakeView @JvmOverloads constructor(
             body,
             true
         ) >= 0
-    }
-
-    private fun distance(
-        start: P,
-        target: P,
-        body: Collection<P>,
-        allowTail: Boolean
-    ): Int {
-
-        if (start == target) {
-            return 0
-        }
-
-        java.util.Arrays.fill(
-            bfsVisited,
-            false
-        )
-
-        for (p in body) {
-
-            bfsVisited[
-                p.y * cols +
-                    p.x
-            ] = true
-        }
-
-        if (
-            allowTail &&
-            body.isNotEmpty()
-        ) {
-
-            val last =
-                body.last()
-
-            bfsVisited[
-                last.y * cols +
-                    last.x
-            ] = false
-        }
-
-        bfsVisited[
-            start.y * cols +
-                start.x
-        ] = false
-
-        var head = 0
-        var tail = 1
-
-        bfsQueue[0] =
-            start.y * cols +
-                start.x
-
-        var dist = 0
-
-        while (
-            head < tail
-        ) {
-
-            val layerSize =
-                tail - head
-
-            repeat(layerSize) {
-
-                val curr =
-                    bfsQueue[head++]
-
-                val cx =
-                    curr % cols
-
-                val cy =
-                    curr / cols
-
-                if (
-                    cx == target.x &&
-                    cy == target.y
-                ) {
-
-                    return dist
-                }
-
-                if (cx > 0) {
-
-                    val nx =
-                        curr - 1
-
-                    if (
-                        !bfsVisited[nx]
-                    ) {
-
-                        bfsVisited[nx] =
-                            true
-
-                        bfsQueue[tail++] =
-                            nx
-                    }
-                }
-
-                if (
-                    cx < cols - 1
-                ) {
-
-                    val nx =
-                        curr + 1
-
-                    if (
-                        !bfsVisited[nx]
-                    ) {
-
-                        bfsVisited[nx] =
-                            true
-
-                        bfsQueue[tail++] =
-                            nx
-                    }
-                }
-
-                if (cy > 0) {
-
-                    val nx =
-                        curr - cols
-
-                    if (
-                        !bfsVisited[nx]
-                    ) {
-
-                        bfsVisited[nx] =
-                            true
-
-                        bfsQueue[tail++] =
-                            nx
-                    }
-                }
-
-                if (
-                    cy < rows - 1
-                ) {
-
-                    val nx =
-                        curr + cols
-
-                    if (
-                        !bfsVisited[nx]
-                    ) {
-
-                        bfsVisited[nx] =
-                            true
-
-                        bfsQueue[tail++] =
-                            nx
-                    }
-                }
-            }
-
-            dist++
-        }
-
-        return -1
     }
 
     private fun calculateDanger(): Int {
@@ -2845,10 +2986,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // =========================================================
-    // AI 实时面板
-    // =========================================================
-
     private fun drawDebug(
         c: Canvas
     ) {
@@ -2860,7 +2997,6 @@ class SnakeView @JvmOverloads constructor(
             return
         }
 
-        // 面板明显放大
         val w =
             min(
                 width * 0.97f,
@@ -2876,8 +3012,6 @@ class SnakeView @JvmOverloads constructor(
         val left =
             (width - w) / 2f
 
-        // AI 正常运行时放在上方
-        // 游戏结束时放在下方
         val top =
             if (gameOver) {
 
@@ -2952,10 +3086,6 @@ class SnakeView @JvmOverloads constructor(
             border
         )
 
-        // =========================
-        // 标题
-        // =========================
-
         text.textAlign =
             Paint.Align.LEFT
 
@@ -2978,10 +3108,6 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText =
             false
 
-        // =========================
-        // AI 正在判断
-        // =========================
-
         text.textSize =
             14f
 
@@ -2994,10 +3120,6 @@ class SnakeView @JvmOverloads constructor(
             top + 54f,
             text
         )
-
-        // =========================
-        // 危险 / 空间
-        // =========================
 
         text.color =
             Color.WHITE
@@ -3035,10 +3157,6 @@ class SnakeView @JvmOverloads constructor(
             top + 78f,
             text
         )
-
-        // =========================
-        // 尾巴 / 食物
-        // =========================
 
         val tailText =
             if (
@@ -3085,10 +3203,6 @@ class SnakeView @JvmOverloads constructor(
             text
         )
 
-        // =========================
-        // 长度 / 饥饿 / 分数
-        // =========================
-
         c.drawText(
             "长度 ${snake.size}",
             left + 16f,
@@ -3117,10 +3231,6 @@ class SnakeView @JvmOverloads constructor(
             text
         )
 
-        // =========================
-        // AI 前瞻
-        // =========================
-
         c.drawText(
             "探索深度 ${ai.depth}",
             left + 16f,
@@ -3145,10 +3255,6 @@ class SnakeView @JvmOverloads constructor(
             top + 150f,
             text
         )
-
-        // =========================
-        // 四方向评分
-        // =========================
 
         text.textSize =
             13f
@@ -3195,10 +3301,6 @@ class SnakeView @JvmOverloads constructor(
                 w / 4f
         }
 
-        // =========================
-        // AI 最终选择
-        // =========================
-
         text.textSize =
             14f
 
@@ -3221,10 +3323,6 @@ class SnakeView @JvmOverloads constructor(
             top + 204f,
             text
         )
-
-        // =========================
-        // 学习状态
-        // =========================
 
         text.textSize =
             12f
@@ -3249,10 +3347,6 @@ class SnakeView @JvmOverloads constructor(
             top + 228f,
             text
         )
-
-        // =========================
-        // 游戏结束信息
-        // =========================
 
         if (gameOver) {
 
