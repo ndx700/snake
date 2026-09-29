@@ -50,7 +50,6 @@ class SnakeView(context: Context) : View(context) {
     
     private var gameSpeed = 180L
     
-    // AI 模式：0=NONE, 1=BFS, 2=HAM
     private var aiMode = 0
 
     var onScoreChanged: ((Int) -> Unit)? = null
@@ -426,12 +425,12 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ================== 升级版 BFS 智能 AI：追尾预判 + 饥饿强破循环 ==================
+    // ================== 终极 BFS：贪婪优先 + 追尾贪心 + 饥饿破循环 ==================
     private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
         
-        // 第一步：物理安全方向（不撞墙、不反向、不撞身体）
+        // Step 1: 物理安全方向
         val allDirs = listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))
         val validDirs = allDirs.filter { d ->
             val isReverse = (d.x == -dir.x && d.y == -dir.y)
@@ -442,14 +441,23 @@ class SnakeView(context: Context) : View(context) {
         }
         if (validDirs.isEmpty()) return
 
-        // ★★★ 核心修复：饥饿强制破循环 ★★★
-        // 如果连续 15 步没吃到食物，说明在绕圈了，强制去吃东西！
-        val isStarving = hungerCounter > 15
-        if (isStarving) {
+        // ★★★ 修复1：贪婪优先——食物就在蛇头旁边，直接吃！★★★
+        val foodDx = food.x - head.x
+        val foodDy = food.y - head.y
+        if (abs(foodDx) + abs(foodDy) == 1) {
+            val foodDir = Point(foodDx, foodDy)
+            if (validDirs.contains(foodDir)) {
+                directionQueue.clear()
+                directionQueue.add(foodDir)
+                return
+            }
+        }
+
+        // ★★★ 修复2：饥饿强制破循环——连续 8 步没吃到食物，跳过所有评估，直接去吃 ★★★
+        if (hungerCounter > 8) {
             val pathToFood = bfsPathWithSnake(head, food, snake, dir)
             if (pathToFood != null && pathToFood.size > 1) {
                 val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
-                // 只要下一步物理安全，就直接去吃（不再检查吃完后能否追尾）
                 if (validDirs.contains(nextMove)) {
                     directionQueue.clear()
                     directionQueue.add(nextMove)
@@ -458,7 +466,7 @@ class SnakeView(context: Context) : View(context) {
             }
         }
 
-        // 模拟走每一步，检查能否到达尾巴（正常状态下的安全筛选）
+        // Step 2: 筛选"能追到尾巴"的方向（这是活路）
         val tailSafeDirs = mutableListOf<Point>()
         for (d in validDirs) {
             val nextHead = Point(head.x + d.x, head.y + d.y)
@@ -483,7 +491,7 @@ class SnakeView(context: Context) : View(context) {
             dirSpaceMap[d] = floodFillWithSnake(nextHead, simSnake)
         }
         
-        // 尝试吃食物（在安全方向中，且吃完后能追到尾巴）
+        // Step 3: 正常吃食物（在安全方向中，且吃完后能追到尾巴）
         val pathToFood = bfsPathWithSnake(head, food, snake, dir)
         if (pathToFood != null && pathToFood.size > 1) {
             val nextMove = Point(pathToFood[1].x - pathToFood[0].x, pathToFood[1].y - pathToFood[0].y)
@@ -501,21 +509,24 @@ class SnakeView(context: Context) : View(context) {
             }
         }
         
-        // 追自己的尾巴（完美循环保命）
-        val pathToTail = bfsPathWithSnake(head, snake.last(), snake, dir)
-        if (pathToTail != null && pathToTail.size > 1) {
-            val nextMove = Point(pathToTail[1].x - pathToTail[0].x, pathToTail[1].y - pathToTail[0].y)
-            if (candidateDirs.contains(nextMove)) {
+        // ★★★ 修复3：追尾时贪心——在能追到尾巴的方向中，选离食物最近的那个 ★★★
+        // 这样它会主动绕圈靠近食物，最终触发"贪婪优先"，把食物吃掉
+        if (candidateDirs.isNotEmpty()) {
+            val bestDir = candidateDirs.minByOrNull { d ->
+                val newHead = Point(head.x + d.x, head.y + d.y)
+                abs(newHead.x - food.x) + abs(newHead.y - food.y)
+            }
+            if (bestDir != null) {
                 directionQueue.clear()
-                directionQueue.add(nextMove)
+                directionQueue.add(bestDir)
                 return
             }
         }
         
-        // 最后绝境：选空间最大的方向
+        // Step 5: 最后的绝境：选空间最大的方向
         var bestMove: Point? = null
         var maxSpace = -1
-        for (d in candidateDirs) {
+        for (d in validDirs) {
             val space = dirSpaceMap[d] ?: 0
             if (space > maxSpace) {
                 maxSpace = space
@@ -529,7 +540,6 @@ class SnakeView(context: Context) : View(context) {
     }
     // =======================================================
 
-    // ================== 汉密尔顿路径跟随 ==================
     private fun autoPilotHamiltonian() {
         if (gameOver) return
         val head = snake.first()
@@ -559,7 +569,6 @@ class SnakeView(context: Context) : View(context) {
         
         dir = Point(dx, dy)
     }
-    // =======================================================
 
     private fun floodFillWithSnake(start: Point, currentSnake: Collection<Point>): Int {
         val queue = ArrayDeque<Point>()
