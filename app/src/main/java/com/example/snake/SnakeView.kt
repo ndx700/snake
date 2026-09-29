@@ -623,6 +623,7 @@ class SnakeView @JvmOverloads constructor(
             if(first){path.moveTo(x,y);first=false}else path.lineTo(x,y)
             if(rainbowSkin)snakePaint.color=hsv[(i*17+score)%360] else snakePaint.color=bodyColor
         }
+        // 用线段逐段绘制，保证彩虹皮肤每段不同
         val list=snake.toList()
         for(i in 0 until list.size-1){
             val a=list[i];val b=list[i+1]
@@ -660,9 +661,9 @@ class SnakeView @JvmOverloads constructor(
         border.color=when(ai.danger){1->Color.GREEN;2->Color.rgb(150,255,80);3->Color.YELLOW;4->Color.rgb(255,150,0);else->Color.RED}
         border.style=Paint.Style.STROKE;border.strokeWidth=3f
         c.drawRoundRect(left,top,left+w,top+h,18f,18f,border)
-        text.textAlign=Paint.Align.LEFT;text.isFakeBoldText=true;text.textSize=16f;text.color=Color.WHITE
+        text.textAlign=Paint.Align.LEFT;text.setFakeBoldText(true);text.textSize=16f;text.color=Color.WHITE
         c.drawText("🧠 AI  ${ai.strategy}",left+12,top+24,text)
-        text.isFakeBoldText=false;text.textSize=12f
+        text.setFakeBoldText(false);text.textSize=12f
         text.color=Color.YELLOW;c.drawText("正在判断：${ai.reason}",left+12,top+43,text)
         text.color=Color.WHITE
         c.drawText("危险 ${"●".repeat(ai.danger)}${"○".repeat(5-ai.danger)}   空间 ${ai.region}   比例 ${"%.1f".format(ai.spaceRatio)}",left+12,top+61,text)
