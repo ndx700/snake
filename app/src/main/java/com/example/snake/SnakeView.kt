@@ -32,8 +32,6 @@ class SnakeView(context: Context) : View(context) {
 
     private data class Point(val x: Int, val y: Int)
     private val snake = ArrayDeque<Point>()
-    
-    // 方向缓冲队列
     private val directionQueue = ArrayDeque<Point>()
 
     private var dir = Point(0, 0)
@@ -45,8 +43,8 @@ class SnakeView(context: Context) : View(context) {
     private var gameOver = false
     private var running = false
     
-    // --- 核心提速：初始速度 100ms，最低速度 50ms ---
-    private var gameSpeed = 100L
+    // 初始很慢 180ms，最低 70ms
+    private var gameSpeed = 180L
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
@@ -157,7 +155,7 @@ class SnakeView(context: Context) : View(context) {
     }
 
     init {
-        setLayerType(LAYER_TYPE_SOFTWARE, null)
+        // 注意：这里删除了 setLayerType(LAYER_TYPE_SOFTWARE, null)，默认开启硬件加速，最高可跑满 120 帧
         highScore = prefs.getInt("high_score", 0)
         updateCurrentSkin()
         updateCurrentBoard()
@@ -200,7 +198,7 @@ class SnakeView(context: Context) : View(context) {
         directionQueue.clear()
         score = 0
         gameOver = false
-        gameSpeed = 100L // 重置速度 100ms
+        gameSpeed = 180L
         lastFrameTime = 0L
         timeAccumulator = 0L
 
@@ -330,8 +328,7 @@ class SnakeView(context: Context) : View(context) {
             onScoreChanged?.invoke(score)
             triggerEatEffects()
             placeFood()
-            // 每次吃食物提速，最低降到 50ms
-            gameSpeed = max(50L, gameSpeed - 4L)
+            gameSpeed = max(70L, gameSpeed - 3L)
         } else {
             snake.removeLast()
         }
@@ -559,7 +556,6 @@ class SnakeView(context: Context) : View(context) {
                 val dx = event.x - touchStartX
                 val dy = event.y - touchStartY
 
-                // 触发滑动距离 15 像素，已经非常灵敏了
                 if (abs(dx) < 15 && abs(dy) < 15) return true
 
                 val lastDir = if (directionQueue.isNotEmpty()) directionQueue.last() else dir
