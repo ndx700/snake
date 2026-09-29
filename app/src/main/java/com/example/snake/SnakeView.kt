@@ -50,8 +50,7 @@ class SnakeView(context: Context) : View(context) {
 
     private var gameSpeed = 180L
 
-    // AI 模式：0 = 手动, 1 = BFS, 2 = HAM
-    private var aiMode = 0
+    private var aiMode = 0 // 0=手动, 1=BFS, 2=HAM
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
@@ -451,7 +450,7 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // ================== 终极防死胡同 BFS 算法 ==================
+    // ★★★ 终极修复：棋盘分区隔离检测 ★★★
     private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
@@ -466,7 +465,7 @@ class SnakeView(context: Context) : View(context) {
         }
         if (validDirs.isEmpty()) return
 
-        // 优先级 1：食物贴脸（1格内），直接吃（安全第一）
+        // 优先级 1：食物贴脸，直接吃
         val foodDx = food.x - head.x
         val foodDy = food.y - head.y
         if (abs(foodDx) + abs(foodDy) == 1) {
@@ -478,7 +477,7 @@ class SnakeView(context: Context) : View(context) {
             }
         }
 
-        // 优先级 2：极度饥饿（>15步没吃），强制直奔食物（避免原地饿死）
+        // 优先级 2：极度饥饿（>15步），强制直奔食物
         if (hungerCounter > 15) {
             val pathToFood = bfsPathWithSnake(head, food, snake, dir)
             if (pathToFood != null && pathToFood.size > 1) {
@@ -491,12 +490,8 @@ class SnakeView(context: Context) : View(context) {
             }
         }
 
-        // 优先级 3：多维度综合评估（核心防死胡同逻辑）
-        var bestDir: Point? = null
-        var bestScoreVal = Int.MIN_VALUE
-        var bestDist = Int.MAX_VALUE
-
-        val totalFreeSpace = cols * rows - snake.size // 全局剩余空地
+        val totalEmpty = cols * rows - snake.size // 全局剩余空地
+        val evaluatedDirs = mutableListOf<Triple<Point, Int, Int>>() // (方向, 可达空间, 被隔离空间)
 
         for (d in validDirs) {
             val newHead = Point(head.x + d.x, head.y + d.y)
@@ -504,35 +499,73 @@ class SnakeView(context: Context) : View(context) {
             simSnake.addFirst(newHead)
             simSnake.removeLast()
 
-            // 计算走完后，新蛇头所在连通区域的大小
-            val space = floodFillWithSnake(newHead, simSnake)
+            // 计算走完后，从新蛇头出发能到达的区域
+            val reachable = getReachableCells(newHead, simSnake)
+            val space = reachable.size
+            val excluded = totalEmpty - space // 被身体隔离出去的空间
 
-            // ★★★ 核心安全网：防止进入死胡同/被隔离的口袋 ★★★
-            // 如果走完后，可到达的空间小于蛇长的 1.5 倍，说明极度危险
-            // 如果走完后，空间小于全局空地的一半（说明被分割隔离了），也极度危险
-            val isDeadEnd = (space < snake.size * 1.5f) || (space < totalFreeSpace * 0.5f && totalFreeSpace > 15)
+            evaluatedDirs.add(Triple(d, space, excluded))
+        }
 
-            // 评估项 A：走完后食物可达吗？
-            val foodPath = bfsPathWithSnake(newHead, food, simSnake, Point(0, 0))
-            val foodReachable = foodPath != null
-            val distToFood = foodPath?.size ?: Int.MAX_VALUE
+        // ★★★ 核心逻辑：分区隔离过滤 ★★★
+        // 如果走这一步会导致棋盘被分割（excluded > 3），并且食物不在我可达的区域里（食物在对面），
+        // 那么绝对不走这一步。这叫"避免切分棋盘导致自己饿死"。
+        val safeDirs = mutableListOf<Triple<Point, Int, Int>>()
+        for (eval in evaluatedDirs) {
+            val d = eval.first
+            val space = eval.second
+            val excluded = eval.third
 
-            // 评估项 B：走完后能追到尾巴吗？
-            val canReachTail = bfsPathWithSnake(newHead, simSnake.last(), simSnake, Point(0, 0)) != null
+            val newHead = Point(head.x + d.x, head.y + d.y)
+            val simSnake = ArrayDeque(snake)
+            simSnake.addFirst(newHead)
+            simSnake.removeLast()
+
+            val reachable = getReachableCells(newHead, simSnake)
+            val foodReachable = reachable.contains(food)
+
+            // 规则 A：如果走完后空间被严重切割（excluded > 5），且食物不在这一侧，直接淘汰
+            if (excluded > 5 && !foodReachable) continue
+
+            // 规则 B：如果走完后空间实在太小（< 蛇长 + 5），且没有食物（无法立即增长），直接淘汰
+            if (space < snake.size + 5 && !foodReachable) continue
+
+            safeDirs.add(eval)
+        }
+
+        // 如果安全方向为空（绝境），降级回退到所有合法方向
+        val candidateDirs = if (safeDirs.isNotEmpty()) safeDirs else evaluatedDirs
+
+        // ★★★ 打分系统（仅对候选方向）★★★
+        var bestDir: Point? = null
+        var bestScoreVal = Int.MIN_VALUE
+        var bestDist = Int.MAX_VALUE
+
+        for (eval in candidateDirs) {
+            val d = eval.first
+            val space = eval.second
+            val excluded = eval.third
+
+            val newHead = Point(head.x + d.x, head.y + d.y)
+            val simSnake = ArrayDeque(snake)
+            simSnake.addFirst(newHead)
+            simSnake.removeLast()
+
+            val reachable = getReachableCells(newHead, simSnake)
+            val foodReachable = reachable.contains(food)
+            val distToFood = if (foodReachable) (bfsPathWithSnake(newHead, food, simSnake, Point(0, 0))?.size ?: Int.MAX_VALUE) else Int.MAX_VALUE
 
             var localScore = 0
-            if (foodReachable) localScore += 40
-            if (canReachTail) localScore += 30
-            if (space > snake.size * 2.0f) localScore += 30 // 空间极度充裕
-
-            // 饥饿时，极度渴望食物
+            if (foodReachable) localScore += 100
+            if (space > snake.size * 1.5) localScore += 50
+            if (space > snake.size * 3) localScore += 50
             if (hungerCounter > 8) {
-                if (distToFood < 10) localScore += 20
-                else if (distToFood < 20) localScore += 10
+                if (distToFood < 10) localScore += 40
+                else if (distToFood < 20) localScore += 20
             }
 
-            // 死亡惩罚：如果是死胡同，直接扣 100 分（除非无路可走，否则绝不选）
-            if (isDeadEnd) localScore -= 100
+            // 如果违反了安全规则但被迫选了，扣重分
+            if (!safeDirs.contains(eval)) localScore -= 1000
 
             val better = when {
                 localScore > bestScoreVal -> true
@@ -553,7 +586,7 @@ class SnakeView(context: Context) : View(context) {
             return
         }
 
-        // 兜底：如果所有方向都是死胡同（极度绝望），选空间最大的拖延时间
+        // 终极兜底：真的无路可走了，选剩余空间最大的方向拖延时间
         var fallbackMove: Point? = null
         var maxSpace = -1
         for (d in validDirs) {
@@ -573,6 +606,26 @@ class SnakeView(context: Context) : View(context) {
         }
     }
     // =======================================================
+
+    // 计算从 start 出发能到达的所有空格
+    private fun getReachableCells(start: Point, currentSnake: Collection<Point>): Set<Point> {
+        val queue = ArrayDeque<Point>()
+        val visited = mutableSetOf<Point>()
+        queue.add(start)
+        visited.add(start)
+        while (queue.isNotEmpty()) {
+            val curr = queue.removeFirst()
+            for (d in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
+                val next = Point(curr.x + d.x, curr.y + d.y)
+                if (next.x !in 0 until cols || next.y !in 0 until rows) continue
+                if (currentSnake.any { it == next }) continue
+                if (visited.contains(next)) continue
+                visited.add(next)
+                queue.add(next)
+            }
+        }
+        return visited
+    }
 
     // ================== 汉密尔顿路径跟随 ==================
     private fun autoPilotHamiltonian() {
@@ -607,22 +660,7 @@ class SnakeView(context: Context) : View(context) {
     // =======================================================
 
     private fun floodFillWithSnake(start: Point, currentSnake: Collection<Point>): Int {
-        val queue = ArrayDeque<Point>()
-        val visited = mutableSetOf<Point>()
-        queue.add(start)
-        visited.add(start)
-        while (queue.isNotEmpty()) {
-            val curr = queue.removeFirst()
-            for (d in listOf(Point(0, -1), Point(0, 1), Point(-1, 0), Point(1, 0))) {
-                val next = Point(curr.x + d.x, curr.y + d.y)
-                if (next.x !in 0 until cols || next.y !in 0 until rows) continue
-                if (currentSnake.any { it == next }) continue
-                if (visited.contains(next)) continue
-                visited.add(next)
-                queue.add(next)
-            }
-        }
-        return visited.size
+        return getReachableCells(start, currentSnake).size
     }
 
     private fun bfsPathWithSnake(start: Point, target: Point, customSnake: Collection<Point>, reverseDir: Point): List<Point>? {
