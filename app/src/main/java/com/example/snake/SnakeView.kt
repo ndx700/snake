@@ -159,16 +159,16 @@ class SnakeView @JvmOverloads constructor(
         style = Paint.Style.STROKE; strokeWidth = 3f
     }
     private val paintModeName = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textSize = 26f; textAlign = Paint.Align.CENTER; isFakeBoldText = true
+        textSize = 24f; textAlign = Paint.Align.CENTER; isFakeBoldText = true
     }
     private val paintModeDesc = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE; textSize = 17f; textAlign = Paint.Align.CENTER
+        color = Color.WHITE; textSize = 15f; textAlign = Paint.Align.CENTER
     }
     private val paintReason = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(255, 215, 0); textSize = 15f; textAlign = Paint.Align.CENTER
+        color = Color.rgb(255, 215, 0); textSize = 14f; textAlign = Paint.Align.CENTER
     }
     private val paintModeInfo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(180, 180, 180); textSize = 15f; textAlign = Paint.Align.LEFT
+        color = Color.rgb(180, 180, 180); textSize = 13f; textAlign = Paint.Align.LEFT
     }
     private val paintBoardBg = Paint(Paint.ANTI_ALIAS_FLAG)
     private val boardMatrix = Matrix()
@@ -331,6 +331,10 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
+    // ============================================================
+    // ================= 决策与安全检查核心 =================
+    // ============================================================
+
     private fun analyzeAndDecide(head: Point): Decision {
         val snakeLen = snake.size
         val space = floodFill(head, snake)
@@ -379,6 +383,49 @@ class SnakeView @JvmOverloads constructor(
         return Decision(0, "默认BFS")
     }
 
+    /**
+     * 能否安全进入 HAM 模式的 3 项硬检查：
+     * 条件 1：蛇头必须在汉密尔顿路径上
+     * 条件 2：路径下一步必须是合法方向（不撞墙、不反向、不在身体上）
+     * 条件 3：模拟走完路径下一步，不撞身体
+     *
+     * 任一条件不满足 → 降级到 BFS
+     */
+    private fun canSafelyEnterHam(head: Point, validDirs: List<Point>): Pair<Boolean, String> {
+        // 条件 1：蛇头必须在路径上（不能光看 pathIndex，因为默认值是 0）
+        val pathPos = pathIndex[head.x][head.y]
+        val pathPoint = pathSequence[pathPos]
+        if (pathPoint.x != head.x || pathPoint.y != head.y) {
+            return Pair(false, "蛇头不在路径")
+        }
+
+        // 条件 2：路径下一步必须是合法方向
+        val nextPos = (pathPos + 1) % pathSequence.size
+        val nextPoint = pathSequence[nextPos]
+        val pathDir = Point(nextPoint.x - head.x, nextPoint.y - head.y)
+        if (abs(pathDir.x) + abs(pathDir.y) != 1) {
+            return Pair(false, "路径不连续")
+        }
+        if (!validDirs.contains(pathDir)) {
+            return Pair(false, "路径被堵")
+        }
+
+        // 条件 3：模拟走完路径下一步，不撞自己
+        val nh = Point(head.x + pathDir.x, head.y + pathDir.y)
+        val sim = ArrayDeque(snake)
+        sim.addFirst(nh)
+        sim.removeLast()
+        var hit = false
+        var skipFirst = true
+        for (p in sim) {
+            if (skipFirst) { skipFirst = false; continue }
+            if (p.x == nh.x && p.y == nh.y) { hit = true; break }
+        }
+        if (hit) return Pair(false, "会撞身体")
+
+        return Pair(true, "安全")
+    }
+
     private fun autoPilotBFS() {
         if (gameOver) return
         val head = snake.first()
@@ -396,8 +443,21 @@ class SnakeView @JvmOverloads constructor(
         if (p != null) foodUnreachableStreak = 0 else foodUnreachableStreak++
 
         val decision = analyzeAndDecide(head)
-        strategyMode = if (forcedStrategy >= 0) forcedStrategy else decision.strategy
-        lastReason = if (forcedStrategy >= 0) "手动强制" else decision.reason
+        var wanted = if (forcedStrategy >= 0) forcedStrategy else decision.strategy
+        var reason = if (forcedStrategy >= 0) "手动强制" else decision.reason
+
+        // ★ HAM 类策略（2=加权，3=纯）必须通过安全检查才能执行
+        if (wanted == 2 || wanted == 3) {
+            val (ok, why) = canSafelyEnterHam(head, validDirs)
+            if (!ok) {
+                // 降级到 BFS，并在面板显示原因
+                reason = "$reason ⚠降级:$why"
+                wanted = 0
+            }
+        }
+
+        strategyMode = wanted
+        lastReason = reason
 
         val chosen: Point? = when (strategyMode) {
             1 -> tailChaseStrategy(head, validDirs)
@@ -409,6 +469,7 @@ class SnakeView @JvmOverloads constructor(
         if (chosen != null) { directionQueue.clear(); directionQueue.add(chosen) }
     }
 
+    // ============ BFS + Beam ============
     private fun fastBfsStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
             val p = bfsPath(head, food, snake, dir)
@@ -460,6 +521,7 @@ class SnakeView @JvmOverloads constructor(
         return bestDir ?: candidates.firstOrNull()?.first
     }
 
+    // ============ 深度 Beam（运算最大化）============
     private fun deepBeamStrategy(head: Point, validDirs: List<Point>): Point? {
         if (hungerCounter > 15) {
             val p = bfsPath(head, food, snake, dir)
@@ -533,6 +595,7 @@ class SnakeView @JvmOverloads constructor(
         return s
     }
 
+    // ============ 追尾保命 ============
     private fun tailChaseStrategy(head: Point, validDirs: List<Point>): Point? {
         var best: Point? = null; var bestSpace = -1
         for (d in validDirs) {
@@ -550,10 +613,12 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
+    // ============ 加权汉密尔顿（进入前已通过安全检查）============
     private fun weightedHamStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
         val pathDir = Point(pathNext.x - head.x, pathNext.y - head.y)
+
         val foodDist = abs(head.x - food.x) + abs(head.y - food.y)
         if (foodDist <= 3) {
             val p = bfsPath(head, food, snake, dir)
@@ -562,6 +627,7 @@ class SnakeView @JvmOverloads constructor(
                 if (validDirs.contains(nm) && isEatingSafeQuick(head, food)) return nm
             }
         }
+
         if (validDirs.contains(pathDir)) return pathDir
         return validDirs.maxByOrNull {
             val nh = Point(head.x + it.x, head.y + it.y)
@@ -570,6 +636,7 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
+    // ============ 纯汉密尔顿（进入前已通过安全检查）============
     private fun pureHamStrategy(head: Point, validDirs: List<Point>): Point? {
         val pathPos = pathIndex[head.x][head.y]
         val pathNext = pathSequence[(pathPos + 1) % pathSequence.size]
@@ -609,6 +676,7 @@ class SnakeView @JvmOverloads constructor(
         dir = Point(dx, dy)
     }
 
+    // ============ 快速 floodFill ============
     private fun floodFill(start: Point, currentSnake: Collection<Point>): Int {
         for (x in 0 until cols) for (y in 0 until rows) ffVisited[x][y] = false
         for (p in currentSnake) ffVisited[p.x][p.y] = true
@@ -628,6 +696,7 @@ class SnakeView @JvmOverloads constructor(
         return count
     }
 
+    // ============ 快速 BFS 路径 ============
     private fun bfsPath(start: Point, target: Point, currentSnake: Collection<Point>, reverseDir: Point): List<Point>? {
         for (x in 0 until cols) for (y in 0 until rows) bfsVisited[x][y] = false
         var head = 0; var tail = 0
@@ -934,22 +1003,22 @@ class SnakeView @JvmOverloads constructor(
                 4 -> { modeName = "🧠 深度 Beam"; modeDesc = "深度6+宽度12，运算最大化"; modeColor = Color.rgb(155, 89, 182) }
                 else -> { modeName = "🎯 BFS + Beam"; modeDesc = "单步空间评估，秒级响应"; modeColor = Color.rgb(231, 76, 60) }
             }
-            val panelX = width / 2f; val panelY = height - 100f
-            val panelW = 640f; val panelH = 115f
+            val panelX = width / 2f; val panelY = height - 110f
+            val panelW = 660f; val panelH = 125f
             canvas.drawRoundRect(panelX - panelW / 2, panelY - panelH / 2,
                 panelX + panelW / 2, panelY + panelH / 2, 15f, 15f, paintPanelBg)
             paintPanelBorder.color = modeColor
             canvas.drawRoundRect(panelX - panelW / 2, panelY - panelH / 2,
                 panelX + panelW / 2, panelY + panelH / 2, 15f, 15f, paintPanelBorder)
             paintModeName.color = modeColor
-            canvas.drawText(modeName, panelX, panelY - 30f, paintModeName)
-            canvas.drawText(modeDesc, panelX, panelY - 6f, paintModeDesc)
-            canvas.drawText("💡 $lastReason", panelX, panelY + 18f, paintReason)
+            canvas.drawText(modeName, panelX, panelY - 35f, paintModeName)
+            canvas.drawText(modeDesc, panelX, panelY - 12f, paintModeDesc)
+            canvas.drawText("💡 $lastReason", panelX, panelY + 10f, paintReason)
             val snakeLen = snake.size
             val freeSpace = cols * rows - snakeLen
             val forceTag = if (forcedStrategy >= 0) " [强制]" else ""
             val infoText = "LEN:$snakeLen  SPACE:$freeSpace  HUNGER:$hungerCounter  STRK:$foodUnreachableStreak$forceTag"
-            canvas.drawText(infoText, panelX - panelW / 2 + 15f, panelY + 42f, paintModeInfo)
+            canvas.drawText(infoText, panelX - panelW / 2 + 15f, panelY + 35f, paintModeInfo)
         }
     }
 
