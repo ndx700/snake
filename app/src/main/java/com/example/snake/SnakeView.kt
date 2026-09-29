@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
@@ -21,6 +22,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.cos
+import kotlin.math.atan2
 import kotlin.math.PI
 import kotlin.random.Random
 
@@ -57,19 +59,22 @@ class SnakeView(context: Context) : View(context) {
     
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
-    // --- 核心 AI 强化学习与奖励机制变量 ---
-    private var aiLevel = 1             // AI 等级 1-10，越高越激进
-    private var aiBestScore = 0         // AI 历史最高分
-    private var comboCount = 0          // 本局连击数（吃了多少个）
-    private var currentMultiplier = 1.0f // 当前得分倍率
+    private var aiLevel = 1
+    private var aiBestScore = 0
+    private var comboCount = 0
+    private var currentMultiplier = 1.0f
 
     private var currentSkinBodyColor = Color.rgb(46, 204, 113)
     private var currentSkinHeadColor = Color.rgb(39, 174, 96)
     private var currentBoardBgColor = Color.BLACK
-    private var currentBoardGridColor = Color.rgb(0, 255, 255) // 默认青色霓虹网格
+    private var currentBoardGridColor = Color.rgb(0, 255, 255)
     
-    // 新增：RGB 皮肤标志位
     private var isRainbowSkin = false
+    
+    // 预生成 360 种平滑过渡的彩虹色，用于动态渐变
+    private val rainbowColors = IntArray(361) { i ->
+        Color.HSVToColor(floatArrayOf(i.toFloat(), 1f, 1f))
+    }
 
     private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -94,7 +99,8 @@ class SnakeView(context: Context) : View(context) {
         var vx: Float, var vy: Float,
         var life: Float, val color: Int,
         var size: Float = 1f,
-        var decay: Float = 0.002f
+        var decay: Float = 0.002f,
+        var isTrail: Boolean = false
     )
     private data class FloatingText(
         var x: Float, var y: Float,
@@ -162,6 +168,11 @@ class SnakeView(context: Context) : View(context) {
     private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textAlign = Paint.Align.CENTER }
     private val paintSubText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.LTGRAY; textAlign = Paint.Align.CENTER }
 
+    // --- RGB 棋盘新增画笔 ---
+    private var isRainbowBoard = false
+    private val paintBoardBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val boardMatrix = Matrix()
+
     private var lastFrameTime = 0L
     private var timeAccumulator = 0L
 
@@ -201,7 +212,6 @@ class SnakeView(context: Context) : View(context) {
     fun updateCurrentSkin() {
         val currentSkinId = prefs.getString("equipped_skin", "green") ?: "green"
         
-        // 重置彩虹标志
         isRainbowSkin = false
         
         when (currentSkinId) {
@@ -210,17 +220,16 @@ class SnakeView(context: Context) : View(context) {
             "purple" -> { currentSkinBodyColor = Color.rgb(155, 89, 182); currentSkinHeadColor = Color.rgb(142, 68, 173) }
             "gold" -> { currentSkinBodyColor = Color.rgb(241, 196, 15); currentSkinHeadColor = Color.rgb(243, 156, 18) }
             "rainbow" -> {
-                // 激活 RGB 流光神龙皮肤
                 isRainbowSkin = true
                 currentSkinBodyColor = Color.WHITE
                 currentSkinHeadColor = Color.WHITE
-                // 为 RGB 皮肤提供极致的发光效果（阴影层加强）
                 paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
             }
             else -> { currentSkinBodyColor = Color.rgb(46, 204, 113); currentSkinHeadColor = Color.rgb(39, 174, 96) }
         }
         
         if (!isRainbowSkin) {
+            paintSnakeBody.shader = null
             paintSnakeBody.color = currentSkinBodyColor
             paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
             paintSnakeHead.color = currentSkinHeadColor
@@ -232,11 +241,50 @@ class SnakeView(context: Context) : View(context) {
     fun updateCurrentBoard() {
         val currentBoardId = prefs.getString("equipped_board", "dark") ?: "dark"
         when (currentBoardId) {
-            "light" -> { currentBoardBgColor = Color.rgb(240, 240, 240); currentBoardGridColor = Color.rgb(200, 200, 200) }
-            "neon" -> { currentBoardBgColor = Color.rgb(10, 25, 47); currentBoardGridColor = Color.rgb(0, 255, 255) }
-            "forest" -> { currentBoardBgColor = Color.rgb(27, 46, 26); currentBoardGridColor = Color.rgb(46, 74, 45) }
-            "cyberpunk" -> { currentBoardBgColor = Color.rgb(43, 15, 59); currentBoardGridColor = Color.rgb(200, 0, 255) }
-            else -> { currentBoardBgColor = Color.BLACK; currentBoardGridColor = Color.rgb(0, 255, 255) }
+            "light" -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.rgb(240, 240, 240)
+                currentBoardGridColor = Color.rgb(200, 200, 200)
+                paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+            }
+            "neon" -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.rgb(10, 25, 47)
+                currentBoardGridColor = Color.rgb(0, 255, 255)
+                paintGrid.setShadowLayer(8f, 0f, 0f, Color.CYAN)
+            }
+            "forest" -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.rgb(27, 46, 26)
+                currentBoardGridColor = Color.rgb(46, 74, 45)
+                paintGrid.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+            }
+            "cyberpunk" -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.rgb(43, 15, 59)
+                currentBoardGridColor = Color.rgb(200, 0, 255)
+                paintGrid.setShadowLayer(8f, 0f, 0f, Color.MAGENTA)
+            }
+            "rainbow_board" -> {
+                isRainbowBoard = true
+                currentBoardBgColor = Color.BLACK // 回退
+                currentBoardGridColor = Color.WHITE
+                paintGrid.setShadowLayer(6f, 0f, 0f, Color.WHITE)
+                // 创建一个尺寸较大、平铺模式为 MIRROR 的线性渐变，用于流动
+                val shader = LinearGradient(0f, 0f, 2000f, 2000f, rainbowColors, null, Shader.TileMode.MIRROR)
+                paintBoardBg.shader = shader
+            }
+            else -> { 
+                isRainbowBoard = false
+                paintBoardBg.shader = null
+                currentBoardBgColor = Color.BLACK
+                currentBoardGridColor = Color.rgb(0, 255, 255)
+                paintGrid.setShadowLayer(8f, 0f, 0f, Color.CYAN)
+            }
         }
         invalidate()
     }
@@ -336,7 +384,7 @@ class SnakeView(context: Context) : View(context) {
             val p = iterator.next()
             p.x += p.vx * (deltaTime / 16f)
             p.y += p.vy * (deltaTime / 16f)
-            p.vy += 0.4f
+            if (!p.isTrail) p.vy += 0.4f
             p.life -= deltaTime * p.decay
             if (p.life <= 0) iterator.remove()
         }
@@ -354,12 +402,7 @@ class SnakeView(context: Context) : View(context) {
         if (gameOver) return
         val head = snake.first()
         
-        // 核心：AI 理解奖励机制。
-        // 随着连击（comboCount）增加，AI 的“安全长度阈值”也会提升。
-        // 意味着连击越高，AI 越愿意冒风险去续连击！
         var currentSafeLength = 15 + (aiLevel * 5) + (comboCount * 2)
-        
-        // 如果是高倍率阶段（>=500分触发1.5倍），AI 也会更激进，因为它知道死了就亏大了，但吃到了血赚
         if (score >= 500) currentSafeLength += 10
         if (score >= 1000) currentSafeLength += 15
 
@@ -504,26 +547,42 @@ class SnakeView(context: Context) : View(context) {
             return
         }
 
+        // 拖尾效果
+        val tailX = offsetX + tail.x * cellSize + cellSize / 2
+        val tailY = offsetY + tail.y * cellSize + cellSize / 2
+        
+        val trailColor = if (isRainbowSkin) {
+            Color.HSVToColor(floatArrayOf((System.currentTimeMillis() / 10f) % 360f, 1f, 1f))
+        } else {
+            currentSkinBodyColor
+        }
+        
+        particles.add(
+            Particle(
+                x = tailX + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
+                y = tailY + (Random.nextFloat() - 0.5f) * cellSize * 0.5f,
+                vx = (Random.nextFloat() - 0.5f) * 1.5f,
+                vy = (Random.nextFloat() - 0.5f) * 1.5f,
+                life = 1.0f, color = trailColor,
+                size = Random.nextFloat() * 0.8f + 0.5f,
+                decay = 0.003f,
+                isTrail = true
+            )
+        )
+
         snake.addFirst(newHead)
         if (isEating) {
             comboCount++
-            
-            // 1. 基础分：连击加成（每多吃一个，基础分 +5）
             val basePoints = 10 + (comboCount - 1) * 5
-            
-            // 2. 倍率计算：总分越高，倍率越高
             currentMultiplier = when {
                 score >= 1000 -> 2.0f
                 score >= 500 -> 1.5f
                 score >= 200 -> 1.2f
                 else -> 1.0f
             }
-            
-            // 3. 最终得分
             val earnedPoints = (basePoints * currentMultiplier).toInt()
             score += earnedPoints
             onScoreChanged?.invoke(score)
-            
             triggerEatEffects(earnedPoints)
             placeFood()
             gameSpeed = max(70L, gameSpeed - 3L)
@@ -532,7 +591,6 @@ class SnakeView(context: Context) : View(context) {
         }
     }
 
-    // 加入传入参数 scoreGained，飘字显示实际获得的分数
     private fun triggerEatEffects(scoreGained: Int) {
         vibrate(35, 100)
         val foodCenterX = offsetX + food.x * cellSize + cellSize / 2
@@ -556,7 +614,6 @@ class SnakeView(context: Context) : View(context) {
                 )
             )
         }
-        // 飘字显示具体获得了多少分（带连击和倍率加成）
         floatingTexts.add(FloatingText(foodCenterX, foodCenterY, 1.0f, "+$scoreGained"))
     }
 
@@ -620,7 +677,6 @@ class SnakeView(context: Context) : View(context) {
         prefs.edit().putInt("money", currentMoney).apply()
         onMoneyChanged?.invoke(currentMoney)
         
-        // AI 强化学习结算：根据得分变化，调整 AI 等级（冒险倾向）
         if (score > aiBestScore) {
             aiBestScore = score
             prefs.edit().putInt("ai_best_score", aiBestScore).apply()
@@ -637,16 +693,26 @@ class SnakeView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         
-        canvas.drawColor(currentBoardBgColor)
-
         cellSize = minOf(width / cols.toFloat(), height / rows.toFloat())
         offsetX = (width - cellSize * cols) / 2f
         offsetY = (height - cellSize * rows) / 2f
 
+        // === 1. 绘制 RGB 流动棋盘 ===
+        if (isRainbowBoard) {
+            val time = System.currentTimeMillis() % 5000L
+            // 让矩阵沿对角线方向缓慢平移，从而实现渐变的“流动”效果
+            boardMatrix.setTranslate(time * 0.15f, time * 0.15f)
+            paintBoardBg.shader?.setLocalMatrix(boardMatrix)
+            // 绘制棋盘区域
+            canvas.drawRect(offsetX, offsetY, offsetX + cols * cellSize, offsetY + rows * cellSize, paintBoardBg)
+        } else {
+            canvas.drawColor(currentBoardBgColor)
+        }
+
         canvas.save()
         if (gameOver && shakeTime > 0) canvas.translate(shakeOffsetX, shakeOffsetY)
 
-        // === 1. 绘制呼吸霓虹网格 ===
+        // 2. 呼吸霓虹网格
         val breath = (sin(System.currentTimeMillis() / 400.0).toFloat() + 1f) / 2f
         val gridAlpha = (60 + 195 * breath).toInt()
         paintGrid.alpha = gridAlpha
@@ -661,7 +727,7 @@ class SnakeView(context: Context) : View(context) {
             canvas.drawLine(offsetX, y, offsetX + cols * cellSize, y, paintGrid)
         }
 
-        // === 2. 绘制极其炫酷的能量核心食物 ===
+        // 3. 能量核心食物
         val foodCenterX = offsetX + food.x * cellSize + cellSize / 2
         val foodCenterY = offsetY + food.y * cellSize + cellSize / 2
         val pulse = 1f + 0.25f * sin(System.currentTimeMillis() / 150.0).toFloat()
@@ -695,7 +761,7 @@ class SnakeView(context: Context) : View(context) {
         paintFoodCore.alpha = 255
         canvas.drawCircle(foodCenterX, foodCenterY, foodRadius * 0.35f, paintFoodCore)
 
-        // === 3. 绘制蛇（核心 RGB 流光渲染） ===
+        // 4. 绘制蛇
         if (snake.isNotEmpty()) {
             val progress = if (gameOver) 0f else (timeAccumulator.toFloat() / gameSpeed).coerceIn(0f, 1f)
             val path = Path()
@@ -723,59 +789,45 @@ class SnakeView(context: Context) : View(context) {
             }
             if (points.size > 1) path.lineTo(points.last().x, points.last().y)
 
-            // --- 动态 RGB 流光逻辑 ---
             if (isRainbowSkin) {
-                // 计算从蛇头到蛇尾的向量
                 val headX = points.first().x
                 val headY = points.first().y
                 val tailX = points.last().x
                 val tailY = points.last().y
                 
-                // 时间偏移，让光效流动
-                val timeOffset = (System.currentTimeMillis() % 2000) / 2000f
+                val angle = atan2(tailY - headY, tailX - headX)
+                val timeOffset = (System.currentTimeMillis() % 3000) / 3000f
+                val flowDistance = cellSize * 6 * timeOffset
                 
-                // 鲜艳的 RGB 颜色数组
-                val rainbowColors = intArrayOf(
-                    Color.RED, Color.MAGENTA, Color.BLUE, Color.CYAN, Color.GREEN, Color.YELLOW, Color.RED
-                )
-                
-                // 计算动态渐变的位置，产生流动感
-                val dx = tailX - headX
-                val dy = tailY - headY
-                val length = max(1f, kotlin.math.sqrt(dx * dx + dy * dy))
-                val offsetX = dx / length * cellSize * timeOffset
-                val offsetY = dy / length * cellSize * timeOffset
+                val startX = headX - cos(angle) * flowDistance
+                val startY = headY - sin(angle) * flowDistance
+                val endX = tailX - cos(angle) * flowDistance
+                val endY = tailY - sin(angle) * flowDistance
                 
                 val shader = LinearGradient(
-                    headX - offsetX, headY - offsetY,
-                    tailX + offsetX, tailY + offsetY,
+                    startX, startY,
+                    endX, endY,
                     rainbowColors, null, Shader.TileMode.MIRROR
                 )
                 paintSnakeBody.shader = shader
                 paintSnakeHead.color = Color.WHITE
-                
-                // 因为 shader 会覆盖颜色，所以需要设置 alpha 和阴影
                 paintSnakeBody.alpha = 255
-                paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE) // 极致发光
+                paintSnakeBody.setShadowLayer(35f, 0f, 0f, Color.WHITE)
             } else {
-                // 普通皮肤逻辑
-                paintSnakeBody.shader = null // 清除 shader
+                paintSnakeBody.shader = null
                 paintSnakeBody.color = currentSkinBodyColor
                 paintSnakeBody.alpha = 255
                 paintSnakeBody.setShadowLayer(20f, 0f, 0f, currentSkinBodyColor)
             }
             
-            // 绘制外层光晕
             paintSnakeBody.strokeWidth = cellSize * 0.8f
             paintSnakeBody.alpha = if (isRainbowSkin) 150 else 120
             canvas.drawPath(path, paintSnakeBody)
             
-            // 绘制内层实体
             paintSnakeBody.strokeWidth = cellSize * 0.65f
             paintSnakeBody.alpha = 255
             canvas.drawPath(path, paintSnakeBody)
 
-            // 绘制蛇头
             val headPoint = points.first()
             canvas.drawCircle(headPoint.x, headPoint.y, cellSize * 0.5f, paintSnakeHead)
             canvas.drawCircle(headPoint.x - cellSize * 0.1f, headPoint.y - cellSize * 0.1f, cellSize * 0.15f, paintSnakeHighlight)
@@ -791,11 +843,15 @@ class SnakeView(context: Context) : View(context) {
             canvas.drawCircle(headPoint.x + currentDir.x * eyeOffset * 1.2f - perpOffsetX, headPoint.y + currentDir.y * eyeOffset * 1.2f - perpOffsetY, cellSize * 0.06f, paintEyeBlack)
         }
 
-        // === 4. 粒子与冲击波 ===
+        // 5. 粒子与冲击波
         particles.forEach { p ->
             paintParticle.color = p.color
             paintParticle.alpha = (p.life * 255).toInt().coerceIn(0, 255)
-            canvas.drawCircle(p.x, p.y, cellSize * 0.15f * p.life * p.size, paintParticle)
+            if (p.isTrail) {
+                canvas.drawCircle(p.x, p.y, cellSize * 0.1f * p.life * p.size, paintParticle)
+            } else {
+                canvas.drawCircle(p.x, p.y, cellSize * 0.15f * p.life * p.size, paintParticle)
+            }
         }
         
         if (shockwaveAlpha > 0) {
@@ -803,14 +859,14 @@ class SnakeView(context: Context) : View(context) {
             canvas.drawCircle(shockwaveX, shockwaveY, shockwaveRadius, paintShockwave)
         }
 
-        // === 5. 飘字 ===
+        // 6. 飘字
         floatingTexts.forEach { t ->
             paintFloatingText.alpha = (t.life * 255).toInt().coerceIn(0, 255)
             canvas.drawText(t.text, t.x, t.y, paintFloatingText)
         }
         canvas.restore()
 
-        // === 6. 游戏结束界面 ===
+        // 7. 游戏结束界面
         if (gameOver) {
             canvas.drawColor(Color.argb(deathFlashAlpha.toInt().coerceIn(0, 255), 180, 0, 0))
             paintText.textSize = 80f
@@ -834,10 +890,10 @@ class SnakeView(context: Context) : View(context) {
             }
         } else if (dir.x == 0 && dir.y == 0) {
             paintSubText.textSize = 32f
-            paintSubText.color = if (currentBoardBgColor == Color.BLACK) Color.WHITE else Color.DKGRAY
+            paintSubText.color = if (isRainbowBoard) Color.WHITE else if (currentBoardBgColor == Color.BLACK) Color.WHITE else Color.DKGRAY
             canvas.drawText("滑动屏幕开始", width / 2f, height / 2f, paintSubText)
             paintSubText.textSize = 20f
-            paintSubText.color = if (currentBoardBgColor == Color.BLACK) Color.LTGRAY else Color.GRAY
+            paintSubText.color = if (isRainbowBoard) Color.LTGRAY else if (currentBoardBgColor == Color.BLACK) Color.LTGRAY else Color.GRAY
             canvas.drawText("(滑动控制方向)", width / 2f, height / 2f + 50, paintSubText)
         }
     }
