@@ -96,7 +96,6 @@ class MainActivity : AppCompatActivity() {
             gameView?.setTrainingMode(trainingMode)
             gameView?.setAIMode(if (aiOn || trainingMode) 1 else 0)
 
-            // 第一行：分数 + 金币
             val row1 = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(12, 10, 12, 4)
@@ -119,7 +118,6 @@ class MainActivity : AppCompatActivity() {
             row1.addView(scoreView)
             row1.addView(moneyView)
 
-            // 第二行：全部按钮，保证商店不会被挤掉
             val row2 = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(8, 4, 8, 10)
@@ -162,7 +160,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            reinforceBtn = compactBtn("强化训练", Color.rgb(39, 174, 96)).apply {
+            reinforceBtn = compactBtn("强化", Color.rgb(39, 174, 96)).apply {
                 updateReinforceButton()
                 setOnClickListener {
                     reinforceMode = !reinforceMode
@@ -177,7 +175,7 @@ class MainActivity : AppCompatActivity() {
                         gameView?.setReinforceTraining(true)
                         updateAiButton()
                         updateTrainingButton()
-                        Toast.makeText(this@MainActivity, "强化训练：吃满 CPU，每秒狂跑", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@MainActivity, "强化训练：吃满 CPU", Toast.LENGTH_SHORT).show()
                     } else {
                         gameView?.setReinforceTraining(false)
                         Toast.makeText(this@MainActivity, "已停止强化训练", Toast.LENGTH_SHORT).show()
@@ -190,22 +188,19 @@ class MainActivity : AppCompatActivity() {
                 updateAiButton()
                 setOnClickListener {
                     if (trainingMode || reinforceMode) {
-                        Toast.makeText(this@MainActivity, "训练/强化模式下 AI 强制开启，请先关闭训练", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@MainActivity, "训练/强化模式下 AI 强制开启", Toast.LENGTH_SHORT).show()
                         return@setOnClickListener
                     }
                     aiOn = !aiOn
                     prefs.edit().putBoolean("ai_on", aiOn).apply()
                     gameView?.setAIMode(if (aiOn) 1 else 0)
                     updateAiButton()
-                    Toast.makeText(
-                        this@MainActivity,
-                        if (aiOn) "AI 已开启" else "AI 已关闭，点击屏幕滑动方向手动控制",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    val msg = if (aiOn) "AI 已开启" else "AI 已关闭，滑动方向手动控制"
+                    Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
                 }
             }
 
-            val shop = compactBtn("🛒商店", Color.rgb(46, 204, 113)).apply {
+            val shop = compactBtn("商店", Color.rgb(46, 204, 113)).apply {
                 setOnClickListener { showShopCategoryDialog() }
             }
 
@@ -292,10 +287,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateReinforceButton() {
         if (reinforceMode) {
-            reinforceBtn?.text = "停止强化"
+            reinforceBtn?.text = "停止"
             reinforceBtn?.setBackgroundColor(Color.rgb(192, 57, 43))
         } else {
-            reinforceBtn?.text = "强化训练"
+            reinforceBtn?.text = "强化"
             reinforceBtn?.setBackgroundColor(Color.rgb(39, 174, 96))
         }
     }
