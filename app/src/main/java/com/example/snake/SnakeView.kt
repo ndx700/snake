@@ -365,7 +365,7 @@ class SnakeView @JvmOverloads constructor(
         }
 
         // 经验回放：随机抽2条额外更新
-        repeat(2) {
+        repeat(1) {
             synchronized(replayBuffer) {
                 if (replayBuffer.isNotEmpty()) {
                     val e = replayBuffer.elementAt(Random.nextInt(replayBuffer.size))
@@ -479,67 +479,72 @@ class SnakeView @JvmOverloads constructor(
 
     private fun evolveNextGeneration() {
         evolving = true
-        val scoresCopy = synchronized(sharedLock) {
-            currentScores.copyOf()
-        }
-
-        val sortedIndices = (0 until POPULATION_SIZE)
-            .filter { !scoresCopy[it].isNaN() }
-            .sortedByDescending { scoresCopy[it] }
-
-        val bestBrains = if (sortedIndices.isNotEmpty()) {
-            sortedIndices.take(10).map { population[it] }
-        } else {
-            (0 until 10).map { population[it] }
-        }
-
-        val bestScore = if (sortedIndices.isNotEmpty()) scoresCopy[sortedIndices[0]] else 0f
-        bestScoreThisGen = bestScore
-        if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
-
-        for (i in 0 until POPULATION_SIZE) {
-            when {
-                i < 8 -> population[i] = bestBrains[i]
-                i < 40 -> {
-                    val p1 = bestBrains[Random.nextInt(bestBrains.size)]
-                    var p2 = bestBrains[Random.nextInt(bestBrains.size)]
-                    while (p2 === p1 && bestBrains.size > 1) {
-                        p2 = bestBrains[Random.nextInt(bestBrains.size)]
-                    }
-                    val child = TinyBrain()
-                    p1.crossover(p2, child)
-                    population[i] = child
-                }
-                else -> {
-                    val parent = bestBrains[Random.nextInt(bestBrains.size)]
-                    val child = TinyBrain()
-                    parent.breed(child)
-                    population[i] = child
-                }
+        try {
+            val scoresCopy = synchronized(sharedLock) {
+                currentScores.copyOf()
             }
-        }
 
-        synchronized(sharedLock) {
+            val sortedIndices = (0 until POPULATION_SIZE)
+                .filter { !scoresCopy[it].isNaN() }
+                .sortedByDescending { scoresCopy[it] }
+
+            val bestBrains = if (sortedIndices.isNotEmpty()) {
+                sortedIndices.take(10).map { population[it] }
+            } else {
+                (0 until 10).map { population[it] }
+            }
+
+            val bestScore = if (sortedIndices.isNotEmpty()) scoresCopy[sortedIndices[0]] else 0f
+            bestScoreThisGen = bestScore
+            if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
+
             for (i in 0 until POPULATION_SIZE) {
-                currentScores[i] = 0f
+                when {
+                    i < bestBrains.size -> population[i] = bestBrains[i]
+                    i < 40 -> {
+                        val p1 = bestBrains[Random.nextInt(bestBrains.size)]
+                        var p2 = bestBrains[Random.nextInt(bestBrains.size)]
+                        while (p2 === p1 && bestBrains.size > 1) {
+                            p2 = bestBrains[Random.nextInt(bestBrains.size)]
+                        }
+                        val child = TinyBrain()
+                        p1.crossover(p2, child)
+                        population[i] = child
+                    }
+                    else -> {
+                        val parent = bestBrains[Random.nextInt(bestBrains.size)]
+                        val child = TinyBrain()
+                        parent.breed(child)
+                        population[i] = child
+                    }
+                }
             }
-        }
 
-        generation++
-        val nnRatio = (generation / 50f).coerceIn(0f, 0.8f)
-        nnWeight = nnRatio
-        qWeight = 1.0f - nnRatio
-
-        // 每5代自动保存一次进度
-        if (generation % 5 == 0) {
-            Thread {
-                saveTrainingState()
-            }.apply {
-                isDaemon = true
-                start()
+            synchronized(sharedLock) {
+                for (i in 0 until POPULATION_SIZE) {
+                    currentScores[i] = 0f
+                }
             }
+
+            generation++
+            val nnRatio = (generation / 50f).coerceIn(0f, 0.8f)
+            nnWeight = nnRatio
+            qWeight = 1.0f - nnRatio
+
+            // 每5代自动保存一次进度
+            if (generation % 5 == 0) {
+                Thread {
+                    saveTrainingState()
+                }.apply {
+                    isDaemon = true
+                    start()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            evolving = false
         }
-        evolving = false
     }
 
     private fun buildInputs(head: P, target: P, currentBody: ArrayDeque<P>): FloatArray {
@@ -646,7 +651,7 @@ class SnakeView @JvmOverloads constructor(
     private val trainThreads: MutableList<Thread> =
         mutableListOf()
 
-    private val TRAIN_THREADS = 4
+    private val TRAIN_THREADS = 3
 
     private val aiPool: ExecutorService = run {
         val cores =
@@ -657,7 +662,7 @@ class SnakeView @JvmOverloads constructor(
         Executors.newFixedThreadPool(cores) { r ->
             Thread(r, "snake-ai").apply {
                 isDaemon = true
-                priority = Thread.NORM_PRIORITY - 1
+                priority = Thread.NORM_PRIORITY
             }
         }
     }
@@ -1068,7 +1073,7 @@ class SnakeView @JvmOverloads constructor(
             )
 
             t.isDaemon = true
-            t.priority = Thread.NORM_PRIORITY - 1
+            t.priority = Thread.NORM_PRIORITY
             t.start()
 
             trainThreads.add(t)
