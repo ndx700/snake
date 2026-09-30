@@ -331,6 +331,7 @@ class SnakeView @JvmOverloads constructor(
         if (state !in 0 until V2_STATE_COUNT) return
         if (action !in 0 until V2_ACTIONS) return
 
+        visitedStateSet.add(state)
         val idx = qIndex(state, action)
 
         synchronized(qLock(idx)) {
@@ -719,7 +720,7 @@ class SnakeView @JvmOverloads constructor(
             lastFrame = ns
 
             if (reinforceTraining) {
-                if ((++renderSkipCounter % 15) == 0) {
+                if ((++renderSkipCounter % 2) == 0) {
                     invalidate()
                 }
 
@@ -5328,6 +5329,11 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
+    // 最近访问过的状态（用于Q热度图）
+    private val visitedStateSet = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
+    )
+
     private fun drawQHeatmap(
         c: Canvas,
         left: Float,
@@ -5336,51 +5342,73 @@ class SnakeView @JvmOverloads constructor(
         h: Float
     ) {
         val grid = 10
-        val cellW =
-            w / grid
+        val cellW = w / grid
+        val cellH = h / grid
 
-        val cellH =
-            h / grid
+        val stateList = synchronized(visitedStateSet) {
+            visitedStateSet.toList().take(100)
+        }
 
-        var visitedStates = 0
-        var positive = 0
-        var negative = 0
         var maxAbs = 0.001f
-
-        val sampleStep =
-            max(
-                1,
-                V2_STATE_COUNT /
-                    100
-            )
-
-        for (s in 0 until V2_STATE_COUNT step sampleStep) {
-            var touched = false
-
+        for (s in stateList) {
             for (a in 0 until 4) {
-                val idx =
-                    qIndex(s, a)
-
-                val visits =
-                    nV2[idx]
-
+                val idx = qIndex(s, a)
+                val visits = nV2[idx]
                 if (visits > 0) {
-                    touched = true
+                    val qv = qV2[idx]
+                    if (abs(qv) > maxAbs) maxAbs = abs(qv)
+                }
+            }
+        }
 
-                    val qv =
-                        qV2[idx]
+        for (i in 0 until 100) {
+            val x = left + (i % grid) * cellW
+            val y = top + (i / grid) * cellH
 
-                    maxAbs =
-                        max(
-                            maxAbs,
-                            abs(qv)
-                        )
-
-                    if (qv >= 0f) {
-                        positive++
-                    } else {
-                        negative++
+            if (i >= stateList.size) {
+                barPaint.color = Color.rgb(35, 35, 40)
+            } else {
+                val s = stateList[i]
+                var best = -999f
+                var touched = false
+                for (a in 0 until 4) {
+                    val idx = qIndex(s, a)
+                    if (nV2[idx] > 0) {
+                        touched = true
+                        val qv = qV2[idx]
+                        if (qv > best) best = qv
                     }
+                }
+                if (!touched) {
+                    barPaint.color = Color.rgb(35, 35, 40)
+                } else {
+                    val t = (best / maxAbs).coerceIn(-1f, 1f)
+                    barPaint.color = if (t >= 0f) {
+                        Color.rgb(
+                            (40 * (1f - t)).toInt(),
+                            (60 + 195 * t).toInt(),
+                            (40 * (1f - t)).toInt()
+                        )
+                    } else {
+                        val nt = -t
+                        Color.rgb(
+                            (200 + 55 * nt).toInt(),
+                            (60 * (1f - nt)).toInt(),
+                            (60 * (1f - nt)).toInt()
+                        )
+                    }
+                }
+            }
+
+            c.drawRect(
+                x + 1f,
+                y + 1f,
+                x + cellW - 2f,
+                y + cellH - 2f,
+                barPaint
+            )
+        }
+    }
                 }
             }
 
@@ -5504,11 +5532,11 @@ class SnakeView @JvmOverloads constructor(
 
         val w =
             min(
-                width * 1.0f,
-                width.toFloat()
+                width * 0.95f,
+                680f
             )
 
-        val h = 580f
+        val h = 680f
 
         val left =
             (width - w) / 2f
@@ -5516,7 +5544,7 @@ class SnakeView @JvmOverloads constructor(
         val top =
             max(
                 12f,
-                height - h - 12f
+                height - h - 24f
             )
 
         // ===== 背景面板 =====
@@ -5596,8 +5624,8 @@ class SnakeView @JvmOverloads constructor(
         )
 
         // ===== 三个统计卡片 =====
-        val cardY = top + 78f
-        val cardH = 56f
+        val cardY = top + 80f
+        val cardH = 60f
         val cardW = (w - 48f) / 3f
         val cardGap = 8f
 
@@ -5689,16 +5717,16 @@ class SnakeView @JvmOverloads constructor(
         }
 
         // ===== 权重柱状图 =====
-        val wbY = top + 195f
+        val wbY = top + 200f
         text.isFakeBoldText = true
         text.textSize = 13f
         text.color = Color.rgb(255, 200, 100)
         c.drawText("【权重分布】", left + 16f, wbY, text)
         text.isFakeBoldText = false
-        drawWeightBars(c, left + 16f, wbY + 8f, w - 32f, 60f)
+        drawWeightBars(c, left + 16f, wbY + 10f, w - 32f, 70f)
 
         // ===== V2学习行 =====
-        val learnY = top + 280f
+        val learnY = top + 300f
         text.isFakeBoldText = true
         text.textSize = 13f
         text.color = Color.rgb(255, 150, 255)
@@ -5766,7 +5794,7 @@ class SnakeView @JvmOverloads constructor(
 
         // ===== 学习曲线 + 死亡饼图 =====
         val chartY = barY + 12f
-        val chartH = 70f
+        val chartH = 80f
         val curveX = left + 16f
         val curveW = (w - 32f) * 0.58f
 
@@ -5803,7 +5831,7 @@ class SnakeView @JvmOverloads constructor(
         text.color = Color.rgb(200, 180, 255)
         c.drawText("【Q表热度】", left + 16f, heatY, text)
         text.isFakeBoldText = false
-        drawQHeatmap(c, left + 16f, heatY + 6f, w - 32f, 56f)
+        drawQHeatmap(c, left + 16f, heatY + 8f, w - 32f, 60f)
 
         // ===== 底部信息行 =====
         val infoY = heatY + 56f + 20f
