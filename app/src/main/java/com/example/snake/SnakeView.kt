@@ -5504,11 +5504,11 @@ class SnakeView @JvmOverloads constructor(
 
         val w =
             min(
-                width * 0.97f,
-                720f
+                width * 1.0f,
+                width.toFloat()
             )
 
-        val h = 900f
+        val h = 580f
 
         val left =
             (width - w) / 2f
@@ -5538,29 +5538,28 @@ class SnakeView @JvmOverloads constructor(
             panel
         )
 
-        // ===== 边框颜色 =====
+        // ===== 细边框（融入背景） =====
         border.color =
-            when {
-                reinforceTraining -> Color.rgb(46, 204, 113)
-                ai.danger <= 2 -> Color.rgb(46, 204, 113)
-                ai.danger == 3 -> Color.YELLOW
-                ai.danger == 4 -> Color.rgb(255, 150, 0)
-                else -> Color.RED
-            }
+            Color.argb(
+                60,
+                46,
+                204,
+                113
+            )
 
         border.style =
             Paint.Style.STROKE
 
         border.strokeWidth =
-            5f
+            1.5f
 
         c.drawRoundRect(
             left,
             top,
             left + w,
             top + h,
-            22f,
-            22f,
+            16f,
+            16f,
             border
         )
 
@@ -5690,7 +5689,7 @@ class SnakeView @JvmOverloads constructor(
         }
 
         // ===== 权重柱状图 =====
-        val wbY = top + 180f
+        val wbY = top + 195f
         text.isFakeBoldText = true
         text.textSize = 13f
         text.color = Color.rgb(255, 200, 100)
