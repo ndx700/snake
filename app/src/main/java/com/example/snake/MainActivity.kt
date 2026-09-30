@@ -136,8 +136,8 @@ class MainActivity : AppCompatActivity() {
                     gameView?.setTrainingMode(trainingMode)
                     updateTrainingButton()
 
-                    val msg = if (trainingMode) "🚀 训练模式：AI 加速中" else "已退出训练"
-                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                    val msg = if (trainingMode) "训练模式：AI 加速中" else "已退出训练"
+                    Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
                 }
             }
 
@@ -230,7 +230,7 @@ class MainActivity : AppCompatActivity() {
             text = crash
         }
         AlertDialog.Builder(this)
-            .setTitle("⚠ 上一次运行发生崩溃")
+            .setTitle("上一次运行发生崩溃")
             .setView(view)
             .setPositiveButton("知道了") { _, _ -> deleteCrashLog(applicationContext) }
             .setNeutralButton("保留日志", null)
