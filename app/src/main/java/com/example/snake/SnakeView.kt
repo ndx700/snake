@@ -264,7 +264,6 @@ class SnakeView @JvmOverloads constructor(
 
     private var lastV2State = -1
     private var lastV2Action = -1
-    private var steps = 0
 
     private fun qIndex(state: Int, action: Int): Int {
         return state * V2_ACTIONS + action
@@ -1350,8 +1349,6 @@ class SnakeView @JvmOverloads constructor(
 
         lastV2State = nextState
         lastV2Action = oldAction
-
-        steps++
     }
 
     /*
