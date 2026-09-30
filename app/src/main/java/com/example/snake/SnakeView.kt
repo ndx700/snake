@@ -164,13 +164,6 @@ class SnakeView @JvmOverloads constructor(
     private var autoRestartDelay = 250L
     private var restartCountdown = 0L
 
-    /*
-     * ============================================================
-     * 强制追食物阈值（随蛇长浮动）
-     * 蛇越长，越晚才强制追食物，
-     * 避免长蛇直线冲食物把自己绕死。
-     * ============================================================
-     */
     private fun hungerForceEat(): Int = when {
         snake.size < 20 -> 50
         snake.size < 35 -> 70
@@ -384,11 +377,6 @@ class SnakeView @JvmOverloads constructor(
 
         val regionWeight = if (hunger >= 30) 4f else 11f
 
-        // ============================================================
-        // 饥饿强制模式（安全版）
-        // 先筛"尾巴可达 + 空间足够"的安全方向，
-        // 在其中选离食物最近的。
-        // ============================================================
         val forceEatThreshold = hungerForceEat()
         val forceEat = hunger >= forceEatThreshold
 
@@ -1016,22 +1004,17 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // ============================================================
-    // 详细思考面板 + 可视化
-    // ============================================================
     private fun drawDebug(c: Canvas) {
         if (aiMode == 0 && !gameOver) return
 
         val w = min(width * 0.97f, 720f)
-        val h = if (gameOver) 480f else 480f
+        val h = 480f
         val left = (width - w) / 2f
         val top = if (gameOver) max(12f, height - h - 12f) else 12f
 
-        // 面板底
         panel.color = Color.argb(225, 0, 0, 0)
         c.drawRoundRect(left, top, left + w, top + h, 22f, 22f, panel)
 
-        // 边框颜色
         border.color = when (ai.danger) {
             1 -> Color.GREEN
             2 -> Color.rgb(150, 255, 80)
@@ -1045,19 +1028,16 @@ class SnakeView @JvmOverloads constructor(
 
         text.textAlign = Paint.Align.LEFT
 
-        // ─── 1. 策略 ───
         text.isFakeBoldText = true
         text.textSize = 20f
         text.color = Color.WHITE
         c.drawText("🧠 ${ai.strategy}", left + 16f, top + 30f, text)
 
-        // ─── 2. 原因 ───
         text.isFakeBoldText = false
         text.textSize = 13f
         text.color = Color.YELLOW
         c.drawText(ai.reason, left + 16f, top + 52f, text)
 
-        // ─── 3. 权重 ───
         text.color = Color.rgb(120, 220, 255)
         text.textSize = 13f
         c.drawText(
@@ -1069,7 +1049,6 @@ class SnakeView @JvmOverloads constructor(
             left + 16f, top + 74f, text
         )
 
-        // ─── 4. 状态 ───
         text.color = Color.WHITE
         val tailTxt = if (ai.tailReachable) "✓" else "✗"
         val foodTxt = if (ai.foodReachable) "✓" else "✗"
@@ -1081,7 +1060,6 @@ class SnakeView @JvmOverloads constructor(
             left + 16f, top + 96f, text
         )
 
-        // ─── 5. Q 表 ───
         text.color = Color.rgb(200, 180, 255)
         c.drawText(
             "Q表 状态 ${ai.strategyId}  Q值 ${"%+.3f".format(ai.qValue)}  " +
@@ -1089,9 +1067,6 @@ class SnakeView @JvmOverloads constructor(
             left + 16f, top + 118f, text
         )
 
-        // ============================================================
-        // ─── 6. 【可视化】四方向安全条 ───
-        // ============================================================
         text.color = Color.rgb(255, 200, 100)
         text.isFakeBoldText = true
         text.textSize = 13f
@@ -1105,45 +1080,41 @@ class SnakeView @JvmOverloads constructor(
         var barY = top + 160f
 
         val dirNames = listOf("↑", "↓", "←", "→")
-        ai.candidates.forEachIndexed { idx, c ->
-            // 方向箭头
+        ai.candidates.forEachIndexed { idx, cand ->
             text.textSize = 16f
-            text.color = if (!c.legal) Color.GRAY
-                        else if (c.d == ai.chosen) Color.CYAN
+            text.color = if (!cand.legal) Color.GRAY
+                        else if (cand.d == ai.chosen) Color.CYAN
                         else Color.WHITE
             c.drawText(dirNames[idx], left + 16f, barY + 14f, text)
 
-            if (!c.legal) {
+            if (!cand.legal) {
                 text.textSize = 12f
                 text.color = Color.GRAY
                 c.drawText("非法（撞墙/身体）", barStartX, barY + 14f, text)
             } else {
-                // 计算安全分数 0~1
                 val regionRatio =
                     if (snake.size > 0)
-                        c.region.toFloat() / snake.size
+                        cand.region.toFloat() / snake.size
                     else 0f
 
                 val safeScore = when {
-                    c.tailOk && regionRatio >= 1.5f -> 1.0f
-                    c.tailOk && regionRatio >= 1.0f -> 0.75f
+                    cand.tailOk && regionRatio >= 1.5f -> 1.0f
+                    cand.tailOk && regionRatio >= 1.0f -> 0.75f
                     regionRatio >= 1.0f -> 0.5f
                     regionRatio >= 0.6f -> 0.3f
                     else -> 0.15f
                 }
 
-                // 条背景
                 barPaint.color = Color.rgb(40, 40, 40)
                 c.drawRoundRect(
                     barStartX, barY, barEndX, barY + 18f, 4f, 4f, barPaint
                 )
 
-                // 条填充（颜色 = 安全等级）
                 val barColor = when {
-                    safeScore >= 0.9f -> Color.rgb(46, 204, 113)    // 绿
-                    safeScore >= 0.7f -> Color.rgb(241, 196, 15)    // 黄
-                    safeScore >= 0.5f -> Color.rgb(230, 126, 34)    // 橙
-                    else -> Color.rgb(231, 76, 60)                  // 红
+                    safeScore >= 0.9f -> Color.rgb(46, 204, 113)
+                    safeScore >= 0.7f -> Color.rgb(241, 196, 15)
+                    safeScore >= 0.5f -> Color.rgb(230, 126, 34)
+                    else -> Color.rgb(231, 76, 60)
                 }
                 barPaint.color = barColor
                 c.drawRoundRect(
@@ -1152,22 +1123,18 @@ class SnakeView @JvmOverloads constructor(
                     4f, 4f, barPaint
                 )
 
-                // 条上的文字
                 text.textSize = 11f
                 text.color = Color.WHITE
                 val label =
-                    "空间${c.region} 尾巴${if (c.tailOk) "✓" else "✗"} " +
-                    "食物${if (c.foodDist < 0) "∞" else c.foodDist} " +
-                    "得分${"%.0f".format(c.score)}"
+                    "空间${cand.region} 尾巴${if (cand.tailOk) "✓" else "✗"} " +
+                    "食物${if (cand.foodDist < 0) "∞" else cand.foodDist} " +
+                    "得分${"%.0f".format(cand.score)}"
                 c.drawText(label, barStartX + 6f, barY + 14f, text)
             }
 
             barY += 22f
         }
 
-        // ============================================================
-        // ─── 7. 【可视化】饥饿进度条 ───
-        // ============================================================
         val hungerBarY = barY + 8f
         text.textSize = 13f
         text.color = Color.rgb(255, 200, 100)
@@ -1180,16 +1147,13 @@ class SnakeView @JvmOverloads constructor(
         val hBarEnd = barEndX
         val hBarW = hBarEnd - hBarStart
 
-        // 进度比例（相对 hungerKillLimit）
         val hRatio = (hunger.toFloat() / hungerKillLimit).coerceIn(0f, 1f)
 
-        // 条底
         barPaint.color = Color.rgb(40, 40, 40)
         c.drawRoundRect(
             hBarStart, hungerBarY, hBarEnd, hungerBarY + 18f, 4f, 4f, barPaint
         )
 
-        // 条填充
         val hColor = when {
             hunger >= hungerKillLimit -> Color.RED
             hunger >= autoBeamHunger -> Color.rgb(255, 100, 50)
@@ -1204,14 +1168,12 @@ class SnakeView @JvmOverloads constructor(
             4f, 4f, barPaint
         )
 
-        // 阈值标记
         val forcePos = hBarStart + hBarW * (hForce.toFloat() / hungerKillLimit)
         val beamPos = hBarStart + hBarW * (autoBeamHunger.toFloat() / hungerKillLimit)
         barPaint.color = Color.WHITE
         c.drawLine(forcePos, hungerBarY, forcePos, hungerBarY + 18f, barPaint)
         c.drawLine(beamPos, hungerBarY, beamPos, hungerBarY + 18f, barPaint)
 
-        // 文字
         text.textSize = 11f
         text.color = Color.WHITE
         c.drawText(
@@ -1222,9 +1184,6 @@ class SnakeView @JvmOverloads constructor(
 
         val hungerBarEndY = hungerBarY + 26f
 
-        // ============================================================
-        // ─── 8. 学习效果 ───
-        // ============================================================
         text.color = Color.rgb(120, 255, 180)
         text.isFakeBoldText = true
         text.textSize = 13f
