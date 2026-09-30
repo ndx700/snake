@@ -4920,6 +4920,8 @@ class SnakeView @JvmOverloads constructor(
         )
     }
 
+    private val prevWeights = FloatArray(8) { 1f }
+
     private fun drawWeightBars(
         c: Canvas,
         left: Float,
@@ -5019,34 +5021,25 @@ class SnakeView @JvmOverloads constructor(
                 barPaint
             )
 
+            // 涨跌检测：和上一帧比较
+            val prevRatio = prevWeights.getOrElse(i) { 1f }
+            val delta = ratio - prevRatio
+            prevWeights[i] = ratio
+
             barPaint.color =
                 when {
+                    delta > 0.05f ->
+                        Color.rgb(231, 76, 60)  // 涨了=红
+                    delta < -0.05f ->
+                        Color.rgb(46, 204, 113)  // 跌了=绿
                     ratio > 1.3f ->
-                        Color.rgb(
-                            231,
-                            76,
-                            60
-                        )
-
+                        Color.rgb(231, 76, 60)
                     ratio > 1.1f ->
-                        Color.rgb(
-                            241,
-                            196,
-                            15
-                        )
-
+                        Color.rgb(241, 196, 15)
                     ratio < 0.8f ->
-                        Color.rgb(
-                            52,
-                            152,
-                            219
-                        )
-
+                        Color.rgb(52, 152, 219)
                     else ->
-                        Color.rgb(
-                            46,
-                            204,
-                            113
+                        Color.rgb(46, 204, 113
                         )
                 }
 
@@ -5646,19 +5639,55 @@ class SnakeView @JvmOverloads constructor(
             text
         )
 
-        // 进化进度条
+        // 训练数据条（Q覆盖/回放/ε/Q-NN权重）
         if (reinforceTraining) {
-            val progBarY = top + 158f
-            barPaint.color = Color.rgb(40, 40, 50)
             barPaint.style = Paint.Style.FILL
-            c.drawRoundRect(left + 16f, progBarY, left + w - 16f, progBarY + 6f, 3f, 3f, barPaint)
+            var meterY = top + 155f
+            val meterW = w - 32f
+
+            // Q覆盖条
+            text.textSize = 9f
+            text.color = Color.rgb(200, 180, 255)
+            c.drawText("Q覆盖 ${visitedStates.size}/$V2_STATE_COUNT", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(200, 150, 255)
+            val qCovR = (visitedStates.size.toFloat() / V2_STATE_COUNT).coerceIn(0f, 1f)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * qCovR, meterY + 19f, 3f, 3f, barPaint)
+            meterY += 24f
+
+            // 经验回放条
+            text.color = Color.rgb(100, 220, 255)
+            c.drawText("回放 ${replayBuffer.size}/$REPLAY_CAPACITY", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(100, 200, 255)
+            val rpR = replayBuffer.size.toFloat() / REPLAY_CAPACITY
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * rpR, meterY + 19f, 3f, 3f, barPaint)
+            meterY += 24f
+
+            // 探索率ε条
+            text.color = Color.rgb(241, 196, 15)
+            c.drawText("ε ${"%.2f".format(v2Epsilon)}", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(241, 196, 15)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * v2Epsilon, meterY + 19f, 3f, 3f, barPaint)
+            meterY += 24f
+
+            // Q/NN权重条
+            text.color = Color.rgb(200, 200, 200)
+            c.drawText("Q ${"%.2f".format(qWeight)} / NN ${"%.2f".format(nnWeight)}", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(231, 76, 60)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * qWeight, meterY + 19f, 3f, 3f, barPaint)
             barPaint.color = Color.rgb(46, 204, 113)
-            val progR = currentAgentIndex.toFloat() / POPULATION_SIZE
-            c.drawRoundRect(left + 16f, progBarY, left + 16f + (w - 32f) * progR, progBarY + 6f, 3f, 3f, barPaint)
+            c.drawRoundRect(left + 16f + meterW * qWeight, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
         }
 
         val wbY =
-            top + 180f
+            top + 250f
 
         text.isFakeBoldText =
             true
@@ -6185,6 +6214,12 @@ class SnakeView @JvmOverloads constructor(
                 "Q表权重 ${"%.2f".format(qWeight)}   神经网络权重 ${"%.2f".format(nnWeight)}",
                 left + 16f,
                 infoY + 40f,
+                text
+            )
+            c.drawText(
+                "回放${replayBuffer.size}/${REPLAY_CAPACITY}   ε${"%.2f".format(v2Epsilon)}   步${v2LearningSteps}",
+                left + 16f,
+                infoY + 58f,
                 text
             )
             val learnStatus = when {
