@@ -368,7 +368,7 @@ class SnakeView @JvmOverloads constructor(
         repeat(2) {
             synchronized(replayBuffer) {
                 if (replayBuffer.isNotEmpty()) {
-                    val e = replayBuffer[Random.nextInt(replayBuffer.size)]
+                    val e = replayBuffer.elementAt(Random.nextInt(replayBuffer.size))
                     val eidx = qIndex(e.state, e.action)
                     synchronized(qLock(eidx)) {
                         evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
