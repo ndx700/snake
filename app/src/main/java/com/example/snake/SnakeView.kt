@@ -450,10 +450,27 @@ class SnakeView @JvmOverloads constructor(
     @Volatile
     private var trainActive = false
 
+    /*
+     * 每一轮强化训练使用一个独立的 generation 号。
+     * 旧线程只会看到旧 generation，自然退出，
+     * 绝不会混进新一代的训练。
+     */
+    @Volatile
+    private var trainGeneration = 0L
+
     private val trainThreads: MutableList<Thread> =
         mutableListOf()
 
-    private val TRAIN_THREADS = 8
+    /*
+     * 线程数：
+     * 4 核手机 → 3 线程
+     * 6/8 核手机 → 4 线程
+     * 不再 8 个 MAX_PRIORITY 线程硬怼，
+     * 让 UI 保持响应。
+     */
+    private val TRAIN_THREADS =
+        (Runtime.getRuntime().availableProcessors() - 1)
+            .coerceIn(2, 4)
 
     private val aiPool: ExecutorService = run {
         val cores =
@@ -571,7 +588,7 @@ class SnakeView @JvmOverloads constructor(
 
             lastFrame = ns
 
-            if (reinforceTraining) {
+            if (reinforceTraining && trainActive) {
                 if ((++renderSkipCounter % 15) == 0) {
                     invalidate()
                 }
@@ -581,6 +598,12 @@ class SnakeView @JvmOverloads constructor(
                     .postFrameCallback(this)
 
                 return
+            }
+
+            // 自愈：标志位卡住时自动恢复，避免“点了取消蛇不走”
+            if (reinforceTraining && !trainActive) {
+                reinforceTraining = false
+                trainingMode = false
             }
 
             if (gameOver) {
@@ -813,6 +836,9 @@ class SnakeView @JvmOverloads constructor(
     private fun startParallelTraining() {
         if (trainActive) return
 
+        // 开一代新的
+        val myGen = ++trainGeneration
+
         reinforceTraining = true
         trainingMode = true
         aiMode = 1
@@ -833,15 +859,28 @@ class SnakeView @JvmOverloads constructor(
                                     i * 999983L
                         )
 
-                    while (trainActive) {
+                    while (
+                        trainActive &&
+                        trainGeneration == myGen
+                    ) {
                         game.playOneGame()
+
+                        if (
+                            !trainActive ||
+                            trainGeneration != myGen
+                        ) {
+                            break
+                        }
                     }
                 },
-                "snake-train-$i"
+                "snake-train-$i-gen$myGen"
             )
 
             t.isDaemon = true
-            t.priority = Thread.MAX_PRIORITY
+
+            // 不再 MAX_PRIORITY，让 UI 保持响应
+            t.priority = Thread.NORM_PRIORITY
+
             t.start()
 
             trainThreads.add(t)
@@ -849,37 +888,39 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun stopParallelTraining() {
-        if (!trainActive) return
+        /*
+         * 关键修复：
+         * 无论 trainActive / reinforceTraining 当前是什么状态，
+         * 都强制清理标志位。
+         *
+         * 旧版本里 if (!trainActive) return 会导致
+         * reinforceTraining 永远清不掉，主循环卡在训练分支。
+         */
+        val hadTraining =
+            trainActive || reinforceTraining
 
+        // 让所有旧 generation 线程立刻看到“该退出了”
+        trainGeneration++
         trainActive = false
         reinforceTraining = false
         trainingMode = false
 
-        val deadline =
-            System.currentTimeMillis() + 2000L
-
-        for (t in trainThreads) {
-            try {
-                val remain =
-                    deadline -
-                        System.currentTimeMillis()
-
-                if (remain > 0) {
-                    t.join(remain)
-                }
-            } catch (_: Throwable) {
-            }
-        }
-
+        /*
+         * 不阻塞 UI 线程去 join。
+         * 旧线程会在下一轮循环检查 generation / trainActive 后自行退出。
+         * 即使它们还残留几毫秒，也绝不会影响新一代。
+         */
         trainThreads.clear()
 
-        saveLearning()
+        if (hadTraining) {
+            saveLearning()
 
-        if (running) {
-            bgm?.start()
+            if (running) {
+                bgm?.start()
+            }
+
+            reset()
         }
-
-        reset()
     }
 
     fun setForcedStrategy(s: Int) {
@@ -1216,7 +1257,7 @@ class SnakeView @JvmOverloads constructor(
                         (
                             snake.size *
                                 safetyMargin
-                        ).toInt()
+                            ).toInt()
                     )
                 ) {
                     "TRAP"
@@ -4170,7 +4211,7 @@ class SnakeView @JvmOverloads constructor(
     ) {
         super.onDraw(c)
 
-        if (reinforceTraining) {
+        if (reinforceTraining && trainActive) {
             c.drawColor(
                 Color.BLACK
             )
@@ -4208,7 +4249,7 @@ class SnakeView @JvmOverloads constructor(
                 Color.LTGRAY
 
             c.drawText(
-                "8 线程并行 · V2 Q-Learning · 全速计算",
+                "${TRAIN_THREADS} 线程并行 · V2 Q-Learning · 全速计算",
                 width / 2f,
                 178f,
                 text
@@ -5325,8 +5366,8 @@ class SnakeView @JvmOverloads constructor(
             Color.WHITE
 
         c.drawText(
-            if (reinforceTraining)
-                "并行训练中 · 8 线程"
+            if (reinforceTraining && trainActive)
+                "并行训练中 · ${TRAIN_THREADS} 线程"
             else
                 ai.strategy,
             left + 16f,
@@ -5344,8 +5385,8 @@ class SnakeView @JvmOverloads constructor(
             Color.YELLOW
 
         c.drawText(
-            if (reinforceTraining) {
-                "8 个独立棋盘同时训练，共享 V2 Q 表"
+            if (reinforceTraining && trainActive) {
+                "${TRAIN_THREADS} 个独立棋盘同时训练，共享 V2 Q 表"
             } else {
                 ai.reason
             },
@@ -5438,7 +5479,7 @@ class SnakeView @JvmOverloads constructor(
         )
 
         val threadInfo =
-            if (reinforceTraining) {
+            if (reinforceTraining && trainActive) {
                 "${trainThreads.size} 线程"
             } else {
                 "单局"
@@ -5533,7 +5574,7 @@ class SnakeView @JvmOverloads constructor(
         var barY =
             top + 318f
 
-        if (!reinforceTraining) {
+        if (!(reinforceTraining && trainActive)) {
             text.isFakeBoldText =
                 true
 
@@ -6005,7 +6046,7 @@ class SnakeView @JvmOverloads constructor(
 
         if (
             gameOver &&
-            !reinforceTraining
+            !(reinforceTraining && trainActive)
         ) {
             text.color =
                 Color.RED
@@ -6327,7 +6368,13 @@ class SnakeView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
 
+        // 同时清掉所有强化训练标志，避免重新 attach 后卡住
+        trainGeneration++
         trainActive = false
+        reinforceTraining = false
+        trainingMode = false
+
+        trainThreads.clear()
 
         bgm?.stop()
 
@@ -6351,6 +6398,14 @@ class SnakeView @JvmOverloads constructor(
     private inner class TrainGame(
         seed: Long
     ) {
+        /*
+         * 捕获创建时的 generation。
+         * 外部 generation 一旦变化，这个 TrainGame 立即作废，
+         * 不会再往 Q 表里写数据，也不会继续跑。
+         */
+        private val myGeneration =
+            trainGeneration
+
         val rng =
             Random(seed)
 
@@ -6437,15 +6492,21 @@ class SnakeView @JvmOverloads constructor(
             while (
                 !gOver &&
                 trainActive &&
+                trainGeneration == myGeneration &&
                 iter < 30000
             ) {
                 gStep()
                 iter++
             }
 
+            /*
+             * 只有“本 generation 内正常死亡”才记入统计。
+             * 如果是因为停止/换代而退出，不记死亡。
+             */
             if (
                 gOver &&
-                trainActive
+                trainActive &&
+                trainGeneration == myGeneration
             ) {
                 gDie(
                     lastDeathCause
@@ -6481,6 +6542,19 @@ class SnakeView @JvmOverloads constructor(
         }
 
         fun gStep() {
+            /*
+             * 快速退出：
+             * 如果这一代已经停止，或 generation 已经变了，
+             * 立刻返回，不再往下做任何重计算。
+             */
+            if (
+                !trainActive ||
+                trainGeneration != myGeneration
+            ) {
+                gOver = true
+                return
+            }
+
             val state =
                 gBuildState()
 
