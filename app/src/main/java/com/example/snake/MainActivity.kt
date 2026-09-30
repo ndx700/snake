@@ -599,28 +599,20 @@ class MainActivity : AppCompatActivity() {
                 )
             )
 
+            /*
+             * 按钮区贴顶。
+             * HUD 已在 SnakeView 里贴底，
+             * 棋盘在 SnakeView.onSizeChanged 里
+             * 被限制在按钮和 HUD 之间，
+             * 所以这里不需要 topMargin。
+             */
             root.addView(
                 top,
                 FrameLayout.LayoutParams(
                     -1,
                     -2,
                     Gravity.TOP
-                ).apply {
-
-                    /*
-                     * 把按钮区整体下移到 HUD 面板下方。
-                     *
-                     * SnakeView 顶部 HUD 面板：
-                     *   top    = 12px
-                     *   height = 275px（游戏中）
-                     *            300px（GAME OVER）
-                     *
-                     * 12 + 300 = 312 是 HUD 的最坏底边，
-                     * 这里用 360 留出足够间距，
-                     * 游戏中和 GAME OVER 都不会压到 HUD。
-                     */
-                    topMargin = 360
-                }
+                )
             )
 
             setContentView(
