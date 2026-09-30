@@ -136,11 +136,8 @@ class MainActivity : AppCompatActivity() {
                     gameView?.setTrainingMode(trainingMode)
                     updateTrainingButton()
 
-                    Toast.makeText(
-                        this,
-                        if (trainingMode) "🚀 训练模式：AI 加速中" else "已退出训练",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    val msg = if (trainingMode) "🚀 训练模式：AI 加速中" else "已退出训练"
+                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
                 }
             }
 
@@ -170,8 +167,12 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener { showShopCategoryDialog() }
             }
 
-            val gap1 = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(6, 1) }
-            val gap2 = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(6, 1) }
+            val gap1 = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(6, 1)
+            }
+            val gap2 = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(6, 1)
+            }
 
             row1.addView(scoreView)
             row1.addView(moneyView)
