@@ -2,6 +2,11 @@ package com.example.snake
 
 import android.content.Context
 import android.graphics.*
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -68,7 +73,12 @@ class SnakeView @JvmOverloads constructor(
     private var aiMode = 1
     private var forcedStrategy = -1
 
-    private var gameSpeed = 16L
+    // ============================================================
+    // 速度：初始很慢，随蛇长逐渐加快
+    // ============================================================
+    private var gameSpeed = 220L          // 初始 220ms/步
+    private val gameSpeedMin = 45L        // 最快 45ms/步
+    private val gameSpeedStart = 220L
     private var accumulator = 0L
     private var lastFrame = 0L
 
@@ -105,9 +115,8 @@ class SnakeView @JvmOverloads constructor(
     private var deathTrap = 0
     private var totalGames = 0
 
-    private var lastLearnAction = "初始化（暂无死亡）"
+    private var lastLearnAction = "正式版（不训练）"
 
-    // ★★★ 改动 1：60 → 40，更早进入长蛇谨慎模式 ★★★
     private val safeFollowLength = 40
 
     private val recentScores = ArrayDeque<Int>()
@@ -132,6 +141,18 @@ class SnakeView @JvmOverloads constructor(
             @Suppress("DEPRECATION")
             context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
         }
+
+    // ============================================================
+    // 音效：吃到果实清脆短音
+    // ============================================================
+    private val toneGen: ToneGenerator? = try {
+        ToneGenerator(AudioManager.STREAM_MUSIC, 85)
+    } catch (_: Throwable) { null }
+
+    // ============================================================
+    // BGM 播放器
+    // ============================================================
+    private var bgm: BgmPlayer? = null
 
     private var bodyColor = Color.rgb(46, 204, 113)
     private var headColor = Color.rgb(39, 174, 96)
@@ -173,15 +194,48 @@ class SnakeView @JvmOverloads constructor(
         else -> 200
     }
 
+    /** 吃到果实清脆震动：两下轻快脉冲 */
+    private fun vibrateEat() {
+        vibrator?.let {
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    it.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 12, 25, 12), -1))
+                } else {
+                    @Suppress("DEPRECATION")
+                    it.vibrate(longArrayOf(0, 12, 25, 12), -1)
+                }
+            } catch (_: Throwable) {}
+        }
+    }
+
+    /** 死亡震动：一下长震 */
+    private fun vibrateDeath() {
+        vibrator?.let {
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    it.vibrate(VibrationEffect.createOneShot(120, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    it.vibrate(120)
+                }
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun playEatSound() {
+        try { toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 55) } catch (_: Throwable) {}
+    }
+
     private val frame = object : Choreographer.FrameCallback {
         override fun doFrame(ns: Long) {
             if (!running) return
             if (lastFrame == 0L) lastFrame = ns
             val dt = ((ns - lastFrame) / 1_000_000L).coerceAtMost(100L)
             lastFrame = ns
+
             if (gameOver) {
-                restartCountdown -= dt
-                if (restartCountdown <= 0L) reset()
+                // ★ 正式版：不自动重开，等玩家点击
+                restartCountdown = 0L
             } else {
                 accumulator += dt
                 while (accumulator >= gameSpeed) {
@@ -210,7 +264,7 @@ class SnakeView @JvmOverloads constructor(
         wFoodAte = prefs.getFloat("w_food_ate", wFoodAte0)
         wEdge = prefs.getFloat("w_edge", wEdge0)
         wSpace = prefs.getFloat("w_space", wSpace0)
-        lastLearnAction = prefs.getString("last_learn_action", "初始化（暂无死亡）") ?: "初始化"
+        lastLearnAction = prefs.getString("last_learn_action", "正式版（不训练）") ?: "正式版（不训练）"
         deathWall = prefs.getInt("stat_wall", 0)
         deathSelf = prefs.getInt("stat_self", 0)
         deathTrap = prefs.getInt("stat_trap", 0)
@@ -219,6 +273,7 @@ class SnakeView @JvmOverloads constructor(
             q[s][a] = prefs.getFloat("q_${s}_$a", 0f)
             n[s][a] = prefs.getInt("n_${s}_$a", 0)
         }
+        bgm = BgmPlayer()
         updateCurrentSkin()
         updateCurrentBoard()
         reset()
@@ -268,7 +323,8 @@ class SnakeView @JvmOverloads constructor(
         else { snake.add(P(cols / 2, rows / 2)); dir = P(1, 0) }
         score = 0; combo = 0; hunger = 0
         gameOver = false; deathCause = "无"; lastDeathInfo = ""
-        gameSpeed = 16L; accumulator = 0L; lastFrame = 0L
+        gameSpeed = gameSpeedStart
+        accumulator = 0L; lastFrame = 0L
         particles.clear(); floats.clear(); flash = 0f; restartCountdown = 0L
         ai = Snapshot(chosen = dir)
         placeFood()
@@ -279,11 +335,13 @@ class SnakeView @JvmOverloads constructor(
     fun resume() {
         if (running) return
         running = true; lastFrame = 0L
+        bgm?.start()
         Choreographer.getInstance().postFrameCallback(frame)
     }
 
     fun pause() {
         running = false
+        bgm?.stop()
         Choreographer.getInstance().removeFrameCallback(frame)
     }
 
@@ -311,15 +369,38 @@ class SnakeView @JvmOverloads constructor(
         }
         snake.addFirst(nh)
         if (ate) {
-            score += 10 + min(combo, 20); combo++; hunger = 0; money++
-            if (score > highScore) { highScore = score; prefs.edit().putInt("high_score", highScore).apply() }
+            // ============================================================
+            // 奖励机制：分数和金币随蛇长、连击增长
+            // ============================================================
+            val comboBonus = min(combo, 30) * 3
+            val lenBonus = snake.size
+            val gain = 10 + comboBonus + lenBonus
+            score += gain
+            combo++
+            hunger = 0
+            // 金币和分数成正比，额外 +30 加速购买
+            money += gain * 3 + 30
+
+            if (score > highScore) highScore = score
             onScoreChanged?.invoke(score)
             onMoneyChanged?.invoke(money)
-            prefs.edit().putInt("money", money).apply()
-            learn(2.5f + combo * 0.05f); rewardEatStep()
-            spawnFoodEffect(nh); placeFood(); gameSpeed = 16L
+            prefs.edit()
+                .putInt("money", money)
+                .putInt("high_score", highScore)
+                .apply()
+
+            // ============================================================
+            // 速度：随蛇长逐渐加快
+            // ============================================================
+            gameSpeed = max(gameSpeedMin, gameSpeedStart - snake.size * 2L)
+
+            // 音效 + 震动
+            vibrateEat()
+            playEatSound()
+            spawnFoodEffect(nh)
+            placeFood()
         } else {
-            snake.removeLast(); hunger++; combo = max(0, combo - 1); learn(0.025f)
+            snake.removeLast(); hunger++; combo = max(0, combo - 1)
         }
         steps++
     }
@@ -475,7 +556,6 @@ class SnakeView @JvmOverloads constructor(
         return final.d
     }
 
-    // ★★★ 改动 2：evaluate 增加"吃完后安全性检查" ★★★
     private fun evaluate(d: P): Candidate {
         if (!legalDirection(d)) return Candidate(d, -1e9f, "撞墙/身体", false)
         val sim = simulate(snake.first(), d)
@@ -500,9 +580,6 @@ class SnakeView @JvmOverloads constructor(
         var foodScoreVal = if (foodDist >= 0) hungerFactor * aggression * (wFoodNear / (foodDist + 1)) else -450f * hungerFactor
         if (ate) foodScoreVal += wFoodAte * aggression
 
-        // ★★★ 新增：吃完后安全检查 ★★★
-        // sim.body 已经是"吃完之后"的蛇身（长度 +1）
-        // 如果吃完后尾巴不可达，或者剩余空间不够，重罚该方向
         var eatPenalty = 0f
         if (ate) {
             val afterSize = sim.body.size
@@ -510,7 +587,6 @@ class SnakeView @JvmOverloads constructor(
             val tailOkAfter = tail
             val spaceOkAfter = region >= needSpace
             if (!tailOkAfter || !spaceOkAfter) {
-                // 蛇越长罚越重，避免长蛇吃一个把自己锁死
                 eatPenalty = -2000f - snake.size * 30f
             }
         }
@@ -587,40 +663,11 @@ class SnakeView @JvmOverloads constructor(
 
     private fun clampW(v: Float, lo: Float, hi: Float): Float = v.coerceIn(lo, hi)
     private fun rewardEatStep() {
-        wFoodAte = clampW(wFoodAte * 1.01f, 300f, 3000f)
-        wTailGood = clampW(wTailGood * 1.005f, 60f, 800f)
+        // 正式版：不再调整权重
     }
 
-    // ★★★ 改动 3：去掉末尾的 k=0.98 衰减，让学习真正累积 ★★★
     private fun adjustWeights(cause: String) {
-        val beforeEdge = wEdge; val beforeTail = wTailGood
-        val beforeSpace = wSpace; val beforeFood = wFoodNear; val beforeRegion = wRegion
-        when (cause) {
-            "WALL" -> {
-                wEdge = clampW(wEdge * 1.15f, 20f, 400f)
-            }
-            "SELF" -> {
-                wTailGood = clampW(wTailGood * 1.15f, 60f, 800f)
-                wTailBad = clampW(wTailBad * 1.10f, -1500f, -80f)
-            }
-            "TRAP" -> {
-                wSpace = clampW(wSpace * 1.20f, 8f, 300f)
-            }
-            "HUNGER" -> {
-                wFoodNear = clampW(wFoodNear * 1.25f, 100f, 2500f)
-                wFoodAte = clampW(wFoodAte * 1.15f, 300f, 3000f)
-            }
-        }
-        lastLearnAction = when (cause) {
-            "WALL" -> "边界 ${"%.0f→%.0f".format(beforeEdge, wEdge)}"
-            "SELF" -> "尾巴+ ${"%.0f→%.0f".format(beforeTail, wTailGood)}"
-            "TRAP" -> "空间 ${"%.0f→%.0f".format(beforeSpace, wSpace)}"
-            "HUNGER" -> "食物近 ${"%.0f→%.0f".format(beforeFood, wFoodNear)}"
-            else -> "无变化"
-        }
-        // 只对区域/机动做极缓慢回归，防止极端值；其余权重不再衰减
-        wRegion = wRegion * 0.999f + wRegion0 * 0.001f
-        wMobility = wMobility * 0.999f + wMobility0 * 0.001f
+        // 正式版：不再调整权重
     }
 
     private fun selectStrategy(state: Int, danger: Int): Int {
@@ -644,66 +691,38 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun learn(reward: Float) {
-        if (lastState < 0 || lastAction < 0) return
-        val s = lastState; val a = lastAction
-        val alpha = when {
-            n[s][a] < 10 -> 0.20f
-            n[s][a] < 50 -> 0.10f
-            else -> 0.04f
-        }
-        q[s][a] += alpha * (reward - q[s][a])
-        n[s][a]++
-        if (++steps % 20 == 0) saveLearning()
+        // 正式版：不训练
     }
 
     private fun saveLearning() {
-        val e = prefs.edit()
-            .putFloat("learn_aggression", aggression)
-            .putFloat("learn_safety", safetyMargin)
-            .putFloat("learn_shortcut", shortcutBonus)
-            .putFloat("w_region", wRegion).putFloat("w_mobility", wMobility)
-            .putFloat("w_tail_good", wTailGood).putFloat("w_tail_bad", wTailBad)
-            .putFloat("w_food_near", wFoodNear).putFloat("w_food_ate", wFoodAte)
-            .putFloat("w_edge", wEdge).putFloat("w_space", wSpace)
-            .putString("last_learn_action", lastLearnAction)
-            .putInt("stat_wall", deathWall).putInt("stat_self", deathSelf)
-            .putInt("stat_trap", deathTrap).putInt("stat_total", totalGames)
-            .putInt("money", money).putInt("high_score", highScore)
-        for (s in 0 until 100) for (a in 0 until 4) {
-            e.putFloat("q_${s}_$a", q[s][a]); e.putInt("n_${s}_$a", n[s][a])
-        }
-        e.apply()
+        // 正式版：不保存学习数据，只保存金币/高分
+        prefs.edit()
+            .putInt("money", money)
+            .putInt("high_score", highScore)
+            .apply()
     }
 
     private fun die(cause: String) {
         gameOver = true; deathCause = cause
         when (cause) {
-            "WALL" -> { deathWall++; learn(-6f) }
-            "SELF" -> { deathSelf++; learn(-7f) }
-            "HUNGER" -> { deathTrap++; learn(-30f) }
-            else -> { deathTrap++; learn(-8f) }
+            "WALL" -> deathWall++
+            "SELF" -> deathSelf++
+            "HUNGER" -> deathTrap++
+            else -> deathTrap++
         }
-        adjustWeights(cause)
+        // 正式版：不调用 adjustWeights / saveLearning 的学习部分
         totalGames++
         recentScores.addLast(score)
         while (recentScores.size > 50) recentScores.removeFirst()
         if (score > bestRecentScore) bestRecentScore = score
-        aggression = when (cause) {
-            "WALL" -> max(0.5f, aggression * 0.97f)
-            "SELF" -> max(0.5f, aggression * 0.99f)
-            "HUNGER" -> min(3f, aggression * 1.15f)
-            else -> max(0.5f, aggression * 0.94f)
-        }
-        if (cause == "TRAP") safetyMargin = min(3f, safetyMargin * 1.04f)
+
         lastDeathInfo = "死亡=$cause 长度=${snake.size} 分数=$score " +
                 "空间=${ai.region} 需求=${(snake.size * safetyMargin).toInt()} " +
                 "尾巴=${if (ai.tailReachable) "可达" else "不可达"}"
         saveLearning(); flash = 1f
-        vibrator?.let {
-            if (Build.VERSION.SDK_INT >= 26) it.vibrate(VibrationEffect.createOneShot(120, VibrationEffect.DEFAULT_AMPLITUDE))
-            else { @Suppress("DEPRECATION") it.vibrate(120) }
-        }
-        restartCountdown = autoRestartDelay
+        vibrateDeath()
+        // 正式版：不自动重开
+        restartCountdown = 0L
         invalidate()
     }
 
@@ -908,7 +927,12 @@ class SnakeView @JvmOverloads constructor(
 
         cell = min(w.toFloat() / cols, availH / rows)
         ox = (w - cols * cell) / 2f
-        oy = availTop + (availH - rows * cell) / 2f
+
+        // ★ 棋盘整体往下挪 2.5 格
+        val baseOy = availTop + (availH - rows * cell) / 2f
+        val moveDown = cell * 2.5f
+        val maxOy = availBottom - rows * cell
+        oy = (baseOy + moveDown).coerceAtMost(maxOy)
     }
 
     override fun onDraw(c: Canvas) {
@@ -1211,7 +1235,7 @@ class SnakeView @JvmOverloads constructor(
             left + 118f, top + 110f, text
         )
         c.drawText(
-            "Q ${"%+.3f".format(ai.qValue)}   访问 ${ai.nVisits}   深度 ${ai.depth}",
+            "速度 ${(1000f / gameSpeed).toInt()}步/秒   深度 ${ai.depth}",
             left + 118f, top + 134f, text
         )
 
@@ -1220,7 +1244,7 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = true
         text.textSize = 14f
         text.color = Color.rgb(255, 200, 100)
-        c.drawText("【权重柱状图】100% = 初始值   越长=当前越在意", left + 16f, wbY, text)
+        c.drawText("【权重柱状图】正式版不再训练", left + 16f, wbY, text)
         text.isFakeBoldText = false
         drawWeightBars(c, left + 16f, wbY + 8f, w - 32f, 66f)
 
@@ -1335,7 +1359,7 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = true
         text.textSize = 14f
         text.color = Color.rgb(120, 255, 180)
-        c.drawText("【学习曲线】", curveX, chartY, text)
+        c.drawText("【历史分数】", curveX, chartY, text)
         text.isFakeBoldText = false
         drawLearningCurve(c, curveX, chartY + 8f, curveW, chartH)
 
@@ -1364,7 +1388,7 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = true
         text.textSize = 14f
         text.color = Color.rgb(200, 180, 255)
-        c.drawText("【Q表热度 10×10=100状态】绿=高价值 红=负 灰=未访问", left + 16f, heatY, text)
+        c.drawText("【Q表 正式版不再训练】", left + 16f, heatY, text)
         text.isFakeBoldText = false
         drawQHeatmap(c, left + 16f, heatY + 8f, w - 32f, 66f)
 
@@ -1416,7 +1440,7 @@ class SnakeView @JvmOverloads constructor(
                    width / 2f, height / 2f - 15, text)
 
         text.color = Color.YELLOW
-        c.drawText("自动重开中…", width / 2f, height / 2f + 20, text)
+        c.drawText("点击屏幕重新开始", width / 2f, height / 2f + 20, text)
 
         text.color = Color.LTGRAY
         text.textSize = 11f
@@ -1437,5 +1461,126 @@ class SnakeView @JvmOverloads constructor(
 
         if (!isReverse(d, dir)) queue.add(d)
         return true
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        bgm?.stop()
+        try { toneGen?.release() } catch (_: Throwable) {}
+    }
+
+    // ============================================================
+    // BGM 播放器：8-bit 风格，用 AudioTrack 合成，不依赖外部文件
+    // ============================================================
+    private class BgmPlayer {
+        private var audioTrack: AudioTrack? = null
+        @Volatile private var playing = false
+        private var thread: Thread? = null
+
+        fun start() {
+            if (playing) return
+            playing = true
+            thread = Thread {
+                try {
+                    val sampleRate = 22050
+                    val pcm = generateMelody(sampleRate)
+                    val track = AudioTrack.Builder()
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_GAME)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                .build()
+                        )
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setSampleRate(sampleRate)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(pcm.size * 2)
+                        .setTransferMode(AudioTrack.MODE_STATIC)
+                        .build()
+
+                    track.write(pcm, 0, pcm.size)
+                    // 循环播放
+                    if (Build.VERSION.SDK_INT >= 23) {
+                        track.setLoopPoints(0, pcm.size, -1)
+                    }
+                    audioTrack = track
+                    if (playing) track.play()
+                } catch (_: Throwable) {
+                    // 播放失败不影响游戏
+                }
+            }.also { it.start() }
+        }
+
+        fun stop() {
+            playing = false
+            try { audioTrack?.pause() } catch (_: Throwable) {}
+            try { audioTrack?.flush() } catch (_: Throwable) {}
+            try { audioTrack?.release() } catch (_: Throwable) {}
+            audioTrack = null
+            thread = null
+        }
+
+        /**
+         * 生成一段 8-bit 风格循环 BGM
+         * 使用方波 + 短包络，避免爆音
+         */
+        private fun generateMelody(sampleRate: Int): ShortArray {
+            val N = 0f
+            val E5 = 659.25f; val G5 = 783.99f; val C6 = 1046.50f
+            val D5 = 587.33f; val F5 = 698.46f; val A5 = 880.00f
+            val C5 = 523.25f; val E4 = 329.63f; val G4 = 392.00f
+            val B4 = 493.88f; val A4 = 440.00f
+
+            // 音符序列：频率 Hz，时长 ms
+            val notes = listOf(
+                // 段落 A
+                E5 to 180, G5 to 180, C6 to 180, G5 to 180,
+                E5 to 180, G5 to 180, C6 to 260, N to 100,
+                D5 to 180, F5 to 180, A5 to 180, F5 to 180,
+                D5 to 180, F5 to 180, A5 to 260, N to 100,
+                // 段落 B
+                E5 to 180, G5 to 180, C6 to 180, G5 to 180,
+                E5 to 180, G5 to 180, C6 to 180, E4 to 180,
+                F5 to 180, A5 to 180, C6 to 180, A5 to 180,
+                G5 to 260, D5 to 260, C5 to 420, N to 260,
+                // 段落 C
+                C5 to 180, E5 to 180, G5 to 180, E5 to 180,
+                A4 to 180, C5 to 180, E5 to 180, C5 to 180,
+                G4 to 180, B4 to 180, D5 to 180, G5 to 180,
+                E5 to 220, D5 to 220, C5 to 420, N to 260,
+                // 收尾
+                E5 to 180, D5 to 180, C5 to 180, D5 to 180,
+                E5 to 260, G5 to 260,
+                C6 to 400, N to 200
+            )
+
+            val out = ArrayList<Short>()
+            for ((freq, durMs) in notes) {
+                val n = durMs * sampleRate / 1000
+                if (freq == N || freq <= 0f) {
+                    for (i in 0 until n) out.add(0)
+                } else {
+                    val period = (sampleRate / freq).toInt().coerceAtLeast(1)
+                    for (i in 0 until n) {
+                        val phase = (i % period) / period.toFloat()
+                        val t = i.toFloat() / n
+                        val env = when {
+                            t < 0.05f -> t / 0.05f
+                            t > 0.70f -> (1f - t) / 0.30f
+                            else -> 1f
+                        }.coerceIn(0f, 1f)
+                        val v = (if (phase < 0.5f) 1f else -1f) * env * 0.06f
+                        out.add((v * Short.MAX_VALUE).toInt().coerceIn(
+                            Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()
+                        ).toShort())
+                    }
+                }
+            }
+            return out.toShortArray()
+        }
     }
 }
