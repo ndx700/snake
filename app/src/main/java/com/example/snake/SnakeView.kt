@@ -167,6 +167,8 @@ class SnakeView @JvmOverloads constructor(
     private var bestScoreThisGen = 0f
     @Volatile
     private var bestScoreAllTime = 0f
+    @Volatile
+    private var evolving = false
     // =============================
 
     /*
@@ -404,12 +406,29 @@ class SnakeView @JvmOverloads constructor(
         }
 
         fun breed(child: TinyBrain) {
-            for (i in w1.indices) child.w1[i] = w1[i] + (Random.nextFloat() - 0.5f) * 0.1f
-            for (i in w2.indices) child.w2[i] = w2[i] + (Random.nextFloat() - 0.5f) * 0.1f
+            // 自适应变异：世代早期变异大，后期精细调整
+            val mut = if (generation < 10) 0.18f else if (generation < 30) 0.1f else 0.05f
+            for (i in w1.indices) child.w1[i] = w1[i] + (Random.nextFloat() - 0.5f) * mut
+            for (i in w2.indices) child.w2[i] = w2[i] + (Random.nextFloat() - 0.5f) * mut
+        }
+
+        // 交叉繁殖：两个大脑各取一半权重组合
+        fun crossover(other: TinyBrain, child: TinyBrain) {
+            for (i in w1.indices) {
+                child.w1[i] = if (Random.nextBoolean()) w1[i] else other.w1[i]
+            }
+            for (i in w2.indices) {
+                child.w2[i] = if (Random.nextBoolean()) w2[i] else other.w2[i]
+            }
+            // 交叉后再加小变异
+            val mut = if (generation < 10) 0.12f else 0.06f
+            for (i in child.w1.indices) child.w1[i] += (Random.nextFloat() - 0.5f) * mut
+            for (i in child.w2.indices) child.w2[i] += (Random.nextFloat() - 0.5f) * mut
         }
     }
 
     private fun evolveNextGeneration() {
+        evolving = true
         val scoresCopy = synchronized(sharedLock) {
             currentScores.copyOf()
         }
@@ -429,13 +448,27 @@ class SnakeView @JvmOverloads constructor(
         if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
 
         for (i in 0 until POPULATION_SIZE) {
-            if (i < 10) {
-                population[i] = bestBrains[i]
-            } else {
-                val parent = bestBrains[Random.nextInt(bestBrains.size)]
-                val child = TinyBrain()
-                parent.breed(child)
-                population[i] = child
+            when {
+                // 前8名精英直接保留
+                i < 8 -> population[i] = bestBrains[i]
+                // 中间32个：两个精英交叉繁殖
+                i < 40 -> {
+                    val p1 = bestBrains[Random.nextInt(bestBrains.size)]
+                    var p2 = bestBrains[Random.nextInt(bestBrains.size)]
+                    while (p2 === p1 && bestBrains.size > 1) {
+                        p2 = bestBrains[Random.nextInt(bestBrains.size)]
+                    }
+                    val child = TinyBrain()
+                    p1.crossover(p2, child)
+                    population[i] = child
+                }
+                // 最后10个：随机变异，保持种群多样性
+                else -> {
+                    val parent = bestBrains[Random.nextInt(bestBrains.size)]
+                    val child = TinyBrain()
+                    parent.breed(child)
+                    population[i] = child
+                }
             }
         }
 
@@ -459,6 +492,8 @@ class SnakeView @JvmOverloads constructor(
                 start()
             }
         }
+
+        evolving = false
     }
 
     private fun buildInputs(head: P, target: P, currentBody: ArrayDeque<P>): FloatArray {
@@ -954,6 +989,12 @@ class SnakeView @JvmOverloads constructor(
                         )
 
                     while (trainActive) {
+                        // 进化期间等待，避免读到正在替换的population
+                        if (evolving) {
+                            Thread.yield()
+                            continue
+                        }
+
                         var agentId = -1
                         
                         // 获取当前需要训练的个体 ID
