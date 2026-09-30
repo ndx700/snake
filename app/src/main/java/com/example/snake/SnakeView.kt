@@ -78,9 +78,6 @@ class SnakeView @JvmOverloads constructor(
     private var lastDeathInfo = ""
     private var ai = Snapshot()
 
-    // ============================================================
-    // 权重：HUD 的柱状图会显示这些。保留原字段名。
-    // ============================================================
     private var wRegion = 11f
     private var wMobility = 35f
     private var wTailGood = 180f
@@ -100,7 +97,7 @@ class SnakeView @JvmOverloads constructor(
     private val wSpace0 = 30f
 
     private var aggression = 1.15f
-    private var safetyMargin = 1.20f   // 提高默认值：吃完后的空间要求更严
+    private var safetyMargin = 1.10f
     private var shortcutBonus = 0.90f
 
     private var deathWall = 0
@@ -110,12 +107,12 @@ class SnakeView @JvmOverloads constructor(
 
     private var lastLearnAction = "初始化（暂无死亡）"
 
-    private val safeFollowLength = 30     // 从 60 降到 30：更早进入谨慎模式
+    // ★★★ 改动 1：60 → 40，更早进入长蛇谨慎模式 ★★★
+    private val safeFollowLength = 40
 
     private val recentScores = ArrayDeque<Int>()
     private var bestRecentScore = 0
 
-    // Q 表保留，用于 HUD 的热力图显示，同时作为策略先验
     private val q = Array(100) { FloatArray(4) }
     private val n = Array(100) { IntArray(4) }
 
@@ -163,12 +160,6 @@ class SnakeView @JvmOverloads constructor(
     private val bfsQueue = IntArray(cols * rows)
     private var beamNodes = 0
 
-    // BFS 路径用的独立缓冲区（避免和 freeRegion/distance 冲突）
-    private val pathBlocked = BooleanArray(cols * rows)
-    private val pathVisited = BooleanArray(cols * rows)
-    private val pathPrev = IntArray(cols * rows)
-    private val pathQueue = IntArray(cols * rows)
-
     private val autoBeamHunger = 120
     private val hungerKillLimit = 500
     private var autoRestartDelay = 250L
@@ -209,7 +200,7 @@ class SnakeView @JvmOverloads constructor(
         highScore = prefs.getInt("high_score", 0)
         money = prefs.getInt("money", 0)
         aggression = prefs.getFloat("learn_aggression", 1.15f)
-        safetyMargin = prefs.getFloat("learn_safety", 1.20f)
+        safetyMargin = prefs.getFloat("learn_safety", 1.10f)
         shortcutBonus = prefs.getFloat("learn_shortcut", 0.90f)
         wRegion = prefs.getFloat("w_region", wRegion0)
         wMobility = prefs.getFloat("w_mobility", wMobility0)
@@ -296,9 +287,6 @@ class SnakeView @JvmOverloads constructor(
         Choreographer.getInstance().removeFrameCallback(frame)
     }
 
-    // ============================================================
-    //                       游戏主循环
-    // ============================================================
     private fun updateGame() {
         if (gameOver) return
         if (hunger >= hungerKillLimit) { die("HUNGER"); return }
@@ -336,295 +324,166 @@ class SnakeView @JvmOverloads constructor(
         steps++
     }
 
-    // ============================================================
-    //                       AI 决策核心
-    // ============================================================
-    //
-    // 自动模式（forcedStrategy == -1）采用三层决策：
-    //
-    //   优先级 1：安全吃食物
-    //     - BFS 从蛇头到食物，允许穿尾
-    //     - 模拟吃完后的蛇身
-    //     - 要求：吃完后尾巴可达 + 空间 >= 蛇长 * safetyMargin
-    //     - 短蛇、饥饿时放宽阈值
-    //
-    //   优先级 2：追尾
-    //     - BFS 到蛇尾，验证该步后仍然尾巴可达、空间充足
-    //     - 目标始终是尾巴，保证蛇头一直在绕圈
-    //
-    //   优先级 3：紧急保命
-    //     - 在合法方向里选"空间最大 + 尾巴可达 + 机动性最好"的
-    //
-    // 强制模式（0/1/3）保留原有 BFS/TAIL/BEAM 语义
-    //
-    // ============================================================
+    private fun safeFollowScore(cand: Candidate): Float {
+        val sim = simulate(snake.first(), cand.d)
+        val body = sim.body
+        if (body.isEmpty()) return -1e9f
+        val region = freeRegion(body)
+        val tailOk = tailReachable(body)
+        val ratio = region.toFloat() / max(1, snake.size)
+        var s = 0f
+        if (!tailOk) s -= 5000f else s += 800f
+        s += region * 15f
+        s += when {
+            ratio >= 2.0f -> 1000f
+            ratio >= 1.5f -> 700f
+            ratio >= 1.2f -> 400f
+            ratio >= 1.0f -> 100f
+            ratio >= 0.8f -> -300f
+            else -> -1500f
+        }
+        val mobility = countSafeMoves(body)
+        s += mobility * 200f
+        val edge = min(min(body.first().x, cols - 1 - body.first().x), min(body.first().y, rows - 1 - body.first().y))
+        s -= max(0, 2 - edge) * 300f
+        val foodDist = distance(body.first(), food, body, true)
+        if (foodDist >= 0 && ratio >= 1.3f && foodDist < snake.size / 2) s += 250f / (foodDist + 1)
+        if (sim.ate) s += 500f
+        return s
+    }
 
     private fun chooseMove(): P {
         val candidates = dirs.map { d -> evaluate(d) }
         val legal = candidates.filter { it.legal }
         if (legal.isEmpty()) {
-            ai = Snapshot(
-                strategy = "NO MOVE",
-                reason = "四个方向都无法安全前进",
-                danger = 5, chosen = dir, candidates = candidates
-            )
+            ai = Snapshot(strategy = "NO MOVE", reason = "四个方向都无法安全前进", danger = 5, chosen = dir, candidates = candidates)
             return dir
         }
         val danger = calculateDanger()
         val state = learnState(snake.size, danger)
+        val strategy = selectStrategy(state, danger)
         val hungerFactor = when {
             hunger >= 60 -> 4f
             hunger >= 30 -> 2.5f
             hunger >= 15 -> 1.6f
             else -> 1f
         }
+        val forceEatThreshold = hungerForceEat()
+        val forceEat = hunger >= forceEatThreshold
 
-        // ---------- 强制 BFS ----------
-        if (forcedStrategy == 0) {
-            val best = legal.maxByOrNull { c -> c.score + if (c.d == dir) 15f else 0f } ?: legal.first()
-            return finishWith(best.d, candidates, legal, state, danger, hungerFactor,
-                "BFS 食物（强制）", "追逐最近食物，仅做局部评分")
-        }
-
-        // ---------- 强制追尾 ----------
-        if (forcedStrategy == 1) {
-            var best = legal.first()
-            var bestS = -Float.MAX_VALUE
-            for (c in legal) {
-                val sim = simulateOn(ArrayDeque(snake), c.d)
-                val ok = tailReachable(sim.body)
-                val s = c.score + if (ok) 350f else -500f
-                if (s > bestS) { bestS = s; best = c }
+        if (forceEat) {
+            var bestSafe: Candidate? = null; var bestSafeDist = Int.MAX_VALUE
+            var bestAny: Candidate? = null; var bestAnyDist = Int.MAX_VALUE
+            for (cand in legal) {
+                val sim = simulate(snake.first(), cand.d)
+                val fd = distance(sim.body.first(), food, sim.body, true)
+                if (fd in 0 until bestAnyDist) { bestAnyDist = fd; bestAny = cand }
+                val tailOk = tailReachable(sim.body)
+                val region = freeRegion(sim.body)
+                val need = (snake.size * 0.8f).toInt()
+                if (tailOk && region >= need && fd in 0 until bestSafeDist) { bestSafeDist = fd; bestSafe = cand }
             }
-            return finishWith(best.d, candidates, legal, state, danger, hungerFactor,
-                "TAIL 追尾（强制）", "优先保持尾巴可达")
-        }
-
-        // ---------- 强制 BEAM ----------
-        if (forcedStrategy == 3) {
-            val best = beamSearch(legal, 4, 12) ?: legal.first()
-            return finishWith(best.d, candidates, legal, state, danger, hungerFactor,
-                "BEAM 前瞻（强制）", "浅层搜索前瞻 4 层")
-        }
-
-        // ---------- 自动模式 ----------
-        return chooseAuto(candidates, legal, state, danger, hungerFactor)
-    }
-
-    /** 三层自动决策 */
-    private fun chooseAuto(
-        candidates: List<Candidate>,
-        legal: List<Candidate>,
-        state: Int,
-        danger: Int,
-        hungerFactor: Float
-    ): P {
-        val head = snake.first()
-
-        // ============ 优先级 1：安全吃食物 ============
-        val foodPath = bfsPathTo(head, food, snake, allowTail = true)
-        if (foodPath != null && foodPath.isNotEmpty()) {
-            val after = simulatePath(snake, foodPath)
-            val tailOkAfter = tailReachable(after)
-            val spaceAfter = freeRegion(after)
-            val need = (after.size * safetyMargin).toInt() + 2
-
-            val safeToEat = when {
-                // 短蛇可以贪
-                snake.size < 20 && tailOkAfter -> true
-                // 正常蛇：吃完后尾巴可达 + 空间足够
-                tailOkAfter && spaceAfter >= need -> true
-                // 长蛇饥饿时适度放宽，但仍要求尾巴可达
-                snake.size >= safeFollowLength && hunger > 60 && tailOkAfter && spaceAfter >= snake.size + 4 -> true
-                // 短蛇饥饿无所谓
-                snake.size < 20 && hunger > 50 -> true
-                else -> false
-            }
-
-            if (safeToEat) {
-                val action = dirs.indexOfFirst { it == foodPath[0] }.coerceAtLeast(0)
+            val chosenForce = bestSafe ?: bestAny
+            if (chosenForce != null) {
                 lastState = state
-                lastAction = action
-                val reason = when {
-                    snake.size < 20 -> "短蛇激进：${foodPath.size} 步到食物"
-                    snake.size >= safeFollowLength && hunger > 60 -> "长蛇饥饿 $hunger：放宽阈值进食"
-                    else -> "吃完后空间 $spaceAfter ≥ 需求 $need，尾巴可达"
-                }
+                lastAction = dirs.indexOfFirst { it == chosenForce.d }.coerceAtLeast(0)
+                val usingSafe = bestSafe != null
                 ai = Snapshot(
-                    strategy = "🍎 安全进食",
-                    reason = reason,
-                    danger = danger,
-                    region = spaceAfter,
-                    spaceRatio = spaceAfter.toFloat() / max(1, after.size),
-                    tailReachable = tailOkAfter,
-                    foodReachable = true,
-                    foodDistance = foodPath.size,
-                    hunger = hunger,
-                    chosen = foodPath[0],
-                    candidates = candidates,
-                    depth = foodPath.size,
-                    nodes = after.size,
-                    hungerFactor = hungerFactor,
-                    regionWeight = wRegion,
-                    strategyId = state,
-                    qValue = q[state][action],
-                    nVisits = n[state][action],
-                    forceEatActive = hunger > 50,
-                    forceEatSafe = true,
-                    safeFollowMode = false
+                    strategy = if (usingSafe) "🍎 饥饿强制(安全)" else "🍎 饥饿强制(兜底)",
+                    reason = if (usingSafe) "饥饿 $hunger ≥ $forceEatThreshold，安全方向内追食物"
+                             else "饥饿 $hunger ≥ $forceEatThreshold，无安全方向，冲最近的食物",
+                    danger = if (usingSafe) 2 else 4,
+                    region = freeRegion(snake),
+                    tailReachable = tailReachable(snake),
+                    foodReachable = (if (usingSafe) bestSafeDist else bestAnyDist) != Int.MAX_VALUE,
+                    foodDistance = if (usingSafe) bestSafeDist else bestAnyDist,
+                    hunger = hunger, chosen = chosenForce.d, candidates = candidates,
+                    depth = 1, nodes = legal.size,
+                    hungerFactor = hungerFactor, regionWeight = wRegion,
+                    strategyId = state, qValue = q[state][lastAction], nVisits = n[state][lastAction],
+                    forceEatActive = true, forceEatSafe = usingSafe, safeFollowMode = false
                 )
-                return foodPath[0]
+                return chosenForce.d
             }
         }
 
-        // ============ 优先级 2：追尾 ============
-        if (snake.size >= 4) {
-            val tailTarget = snake.last()
-            val tailPath = bfsPathTo(head, tailTarget, snake, allowTail = true)
-            if (tailPath != null && tailPath.isNotEmpty()) {
-                val sim = simulateOn(ArrayDeque(snake), tailPath[0])
-                if (sim.body.isNotEmpty()) {
-                    val spaceAfter = freeRegion(sim.body)
-                    val tailOkAfter = tailReachable(sim.body)
-                    val minSpace = max(4, snake.size / 2)
-                    if (tailOkAfter && spaceAfter >= minSpace) {
-                        val action = dirs.indexOfFirst { it == tailPath[0] }.coerceAtLeast(0)
-                        lastState = state
-                        lastAction = action
-                        ai = Snapshot(
-                            strategy = "🛡 追尾保命",
-                            reason = "食物不安全，追尾保持循环（距尾 ${tailPath.size}）",
-                            danger = danger,
-                            region = spaceAfter,
-                            spaceRatio = spaceAfter.toFloat() / max(1, snake.size),
-                            tailReachable = tailOkAfter,
-                            foodReachable = false,
-                            foodDistance = -1,
-                            hunger = hunger,
-                            chosen = tailPath[0],
-                            candidates = candidates,
-                            depth = tailPath.size,
-                            nodes = snake.size,
-                            hungerFactor = hungerFactor,
-                            regionWeight = wRegion * 2f,
-                            strategyId = state,
-                            qValue = q[state][action],
-                            nVisits = n[state][action],
-                            safeFollowMode = true
-                        )
-                        return tailPath[0]
-                    }
-                }
+        val safeFollowMode = snake.size >= safeFollowLength
+        if (safeFollowMode) {
+            var bestC: Candidate? = null
+            var bestS = -1e30f
+            for (cand in legal) {
+                val sc = safeFollowScore(cand)
+                if (sc > bestS) { bestS = sc; bestC = cand }
+            }
+            if (bestC != null) {
+                lastState = state
+                lastAction = dirs.indexOfFirst { it == bestC.d }.coerceAtLeast(0)
+                val reg = freeRegion(snake)
+                ai = Snapshot(
+                    strategy = "🛡 SAFE_FOLLOW 长蛇模式",
+                    reason = "蛇长 ${snake.size} ≥ $safeFollowLength，优先保命",
+                    danger = danger, region = reg,
+                    spaceRatio = reg.toFloat() / max(1, snake.size),
+                    tailReachable = tailReachable(snake), foodReachable = true, foodDistance = -1,
+                    hunger = hunger, chosen = bestC.d, candidates = candidates,
+                    depth = 1, nodes = legal.size,
+                    hungerFactor = hungerFactor, regionWeight = wRegion * 3f,
+                    strategyId = state, qValue = q[state][lastAction], nVisits = n[state][lastAction],
+                    forceEatActive = false, forceEatSafe = false, safeFollowMode = true
+                )
+                return bestC.d
             }
         }
 
-        // ============ 优先级 3：紧急保命 ============
-        var bestC = legal.first()
-        var bestS = -Float.MAX_VALUE
-        for (c in legal) {
-            val sim = simulateOn(ArrayDeque(snake), c.d)
-            if (sim.body.isEmpty()) continue
-            val space = freeRegion(sim.body)
-            val tailOk = tailReachable(sim.body)
-            val mobility = countSafeMoves(sim.body)
-            var s = space * 10f + mobility * 100f
-            if (tailOk) s += 5000f
-            if (s > bestS) { bestS = s; bestC = c }
-        }
-        val action = dirs.indexOfFirst { it == bestC.d }.coerceAtLeast(0)
-        lastState = state
-        lastAction = action
-        val reg = freeRegion(snake)
-        ai = Snapshot(
-            strategy = "⚠ 紧急保命",
-            reason = "无安全路径，选择最大空间方向",
-            danger = danger,
-            region = reg,
-            spaceRatio = reg.toFloat() / max(1, snake.size),
-            tailReachable = tailReachable(snake),
-            foodReachable = false,
-            foodDistance = -1,
-            hunger = hunger,
-            chosen = bestC.d,
-            candidates = candidates,
-            depth = 1,
-            nodes = legal.size,
-            hungerFactor = hungerFactor,
-            regionWeight = wRegion * 3f,
-            strategyId = state,
-            qValue = q[state][action],
-            nVisits = n[state][action]
-        )
-        return bestC.d
-    }
-
-    private fun finishWith(
-        move: P,
-        candidates: List<Candidate>,
-        legal: List<Candidate>,
-        state: Int,
-        danger: Int,
-        hungerFactor: Float,
-        strategyName: String,
-        reasonText: String
-    ): P {
-        val action = dirs.indexOfFirst { it == move }.coerceAtLeast(0)
-        lastState = state
-        lastAction = action
+        val autoBeam = hunger >= autoBeamHunger
+        val scored = when (strategy) {
+            0 -> legal.maxByOrNull { bfsScore(it) }
+            1 -> legal.maxByOrNull { tailScore(it) }
+            2 -> legal.maxByOrNull { hamScore(it) }
+            else -> beamBest(legal)
+        } ?: legal.first()
+        val final = if (autoBeam) beamBest(legal)
+        else if (forcedStrategy >= 0) {
+            val fs = forcedStrategy.coerceIn(0, 4)
+            when (fs) {
+                0 -> legal.maxByOrNull { bfsScore(it) }
+                1 -> legal.maxByOrNull { tailScore(it) }
+                2 -> legal.maxByOrNull { hamScore(it) }
+                4 -> beamBest(legal)
+                else -> legal.first()
+            } ?: scored
+        } else scored
+        val action = dirs.indexOfFirst { it == final.d }.coerceAtLeast(0)
+        lastState = state; lastAction = action
         val region = freeRegion(snake)
-        val fd = distance(snake.first(), food, snake, true)
+        val foodDistance = distance(snake.first(), food, snake, true)
+        val stratId = if (forcedStrategy >= 0) forcedStrategy else strategy
         ai = Snapshot(
-            strategy = strategyName,
-            reason = reasonText,
-            danger = danger,
-            region = region,
+            strategy = if (autoBeam) "BEAM 饥饿自动" else strategyName(stratId),
+            reason = if (autoBeam) "饥饿 $hunger 步未进食，切 BEAM 追食物" else reasonFor(final, strategy, danger),
+            danger = danger, region = region,
             spaceRatio = region.toFloat() / max(1, snake.size),
             tailReachable = tailReachable(snake),
-            foodReachable = fd >= 0,
-            foodDistance = fd,
-            hunger = hunger,
-            chosen = move,
-            candidates = candidates,
-            depth = 1,
-            nodes = legal.size,
-            hungerFactor = hungerFactor,
-            regionWeight = wRegion,
-            strategyId = state,
-            qValue = q[state][action],
-            nVisits = n[state][action]
+            foodReachable = foodDistance >= 0, foodDistance = foodDistance,
+            hunger = hunger, chosen = final.d, candidates = candidates,
+            depth = if (strategy == 3 || autoBeam) 4 else 2,
+            nodes = if (strategy == 3 || autoBeam) beamNodes else candidates.size,
+            hungerFactor = hungerFactor, regionWeight = wRegion,
+            strategyId = stratId, qValue = q[state][action], nVisits = n[state][action],
+            forceEatActive = false, forceEatSafe = false, safeFollowMode = false
         )
-        return move
+        return final.d
     }
 
-    // ============================================================
-    //                      Candidate 评估
-    // ============================================================
+    // ★★★ 改动 2：evaluate 增加"吃完后安全性检查" ★★★
     private fun evaluate(d: P): Candidate {
         if (!legalDirection(d)) return Candidate(d, -1e9f, "撞墙/身体", false)
-        val sim = simulateOn(ArrayDeque(snake), d)
-        val body = sim.body
-        if (body.isEmpty()) return Candidate(d, -1e9f, "非法", false)
-        val region = freeRegion(body)
-        val tail = tailReachable(body)
-        val foodDist = distance(body.first(), food, body, true)
+        val sim = simulate(snake.first(), d)
+        val region = freeRegion(sim.body)
+        val tail = tailReachable(sim.body)
+        val foodDist = distance(sim.body.first(), food, sim.body, true)
         val ate = sim.ate
-        val mobility = countSafeMoves(body)
-
-        // ★★★ 关键新增：吃完后安全性检查 ★★★
-        var eatBonus = 0f
-        var eatPenalty = 0f
-        if (ate) {
-            // body 已经是吃完之后的蛇身
-            val need = (body.size * safetyMargin).toInt() + 2
-            if (tail && region >= need) {
-                eatBonus = 2000f
-            } else if (tail && region >= body.size) {
-                eatBonus = 400f
-            } else {
-                eatPenalty = -2500f
-            }
-        }
-
+        val mobility = countSafeMoves(sim.body)
         val hungerFactor = when {
             hunger >= 60 -> 4f
             hunger >= 30 -> 2.5f
@@ -640,14 +499,28 @@ class SnakeView @JvmOverloads constructor(
         val tailScoreVal = if (tail) effTailGood else effTailBad
         var foodScoreVal = if (foodDist >= 0) hungerFactor * aggression * (wFoodNear / (foodDist + 1)) else -450f * hungerFactor
         if (ate) foodScoreVal += wFoodAte * aggression
-        val edge = min(min(body.first().x, cols - 1 - body.first().x), min(body.first().y, rows - 1 - body.first().y))
+
+        // ★★★ 新增：吃完后安全检查 ★★★
+        // sim.body 已经是"吃完之后"的蛇身（长度 +1）
+        // 如果吃完后尾巴不可达，或者剩余空间不够，重罚该方向
+        var eatPenalty = 0f
+        if (ate) {
+            val afterSize = sim.body.size
+            val needSpace = (afterSize * safetyMargin).toInt() + 2
+            val tailOkAfter = tail
+            val spaceOkAfter = region >= needSpace
+            if (!tailOkAfter || !spaceOkAfter) {
+                // 蛇越长罚越重，避免长蛇吃一个把自己锁死
+                eatPenalty = -2000f - snake.size * 30f
+            }
+        }
+
+        val edge = min(min(sim.body.first().x, cols - 1 - sim.body.first().x), min(sim.body.first().y, rows - 1 - sim.body.first().y))
         val edgeScoreVal = -max(0, 2 - edge) * wEdge
         val spacePenalty = max(0f, snake.size * safetyMargin - region.toFloat())
         val spaceScoreVal = -spacePenalty * wSpace
-
         val total = regionScoreVal + mobilityScoreVal + tailScoreVal + foodScoreVal +
-                edgeScoreVal + spaceScoreVal + eatBonus + eatPenalty
-
+                edgeScoreVal + spaceScoreVal + eatPenalty
         val reason = when {
             ate && eatPenalty < 0 -> "吃完会困死，避开"
             ate -> "马上吃到食物"
@@ -664,146 +537,46 @@ class SnakeView @JvmOverloads constructor(
         )
     }
 
-    // ============================================================
-    //                    BFS 路径（核心工具）
-    // ============================================================
-
-    /**
-     * 从 from 到 to 的最短路径（BFS）。
-     * 返回：路径列表（含 to，不含 from），第一步是蛇头下一步。
-     * 不可达返回 null。
-     */
-    private fun bfsPathTo(from: P, to: P, body: ArrayDeque<P>, allowTail: Boolean): List<P>? {
-        if (from == to) return emptyList()
-        if (from.x !in 0 until cols || from.y !in 0 until rows) return null
-        if (to.x !in 0 until cols || to.y !in 0 until rows) return null
-
-        java.util.Arrays.fill(pathBlocked, false)
-        java.util.Arrays.fill(pathVisited, false)
-
-        val head = body.firstOrNull() ?: return null
-        val tail = body.lastOrNull() ?: return null
-
-        for (p in body) {
-            if (p == head) continue
-            if (allowTail && p == tail) continue
-            if (p.x !in 0 until cols || p.y !in 0 until rows) continue
-            pathBlocked[p.y * cols + p.x] = true
-        }
-        // from 位置可通行
-        pathBlocked[from.y * cols + from.x] = false
-
-        val start = from.y * cols + from.x
-        val goal = to.y * cols + to.x
-
-        var headQ = 0
-        var tailQ = 0
-        pathQueue[tailQ++] = start
-        pathVisited[start] = true
-        pathPrev[start] = -1
-
-        var found = false
-        while (headQ < tailQ) {
-            val cur = pathQueue[headQ++]
-            if (cur == goal) { found = true; break }
-            val cx = cur % cols
-            val cy = cur / cols
-            if (cy > 0) {
-                val ni = cur - cols
-                if (!pathVisited[ni] && !pathBlocked[ni]) {
-                    pathVisited[ni] = true; pathPrev[ni] = cur; pathQueue[tailQ++] = ni
-                }
-            }
-            if (cy < rows - 1) {
-                val ni = cur + cols
-                if (!pathVisited[ni] && !pathBlocked[ni]) {
-                    pathVisited[ni] = true; pathPrev[ni] = cur; pathQueue[tailQ++] = ni
-                }
-            }
-            if (cx > 0) {
-                val ni = cur - 1
-                if (!pathVisited[ni] && !pathBlocked[ni]) {
-                    pathVisited[ni] = true; pathPrev[ni] = cur; pathQueue[tailQ++] = ni
-                }
-            }
-            if (cx < cols - 1) {
-                val ni = cur + 1
-                if (!pathVisited[ni] && !pathBlocked[ni]) {
-                    pathVisited[ni] = true; pathPrev[ni] = cur; pathQueue[tailQ++] = ni
-                }
-            }
-        }
-        if (!found) return null
-
-        val path = ArrayList<P>()
-        var cur = goal
-        while (cur != start && cur >= 0) {
-            path.add(P(cur % cols, cur / cols))
-            cur = pathPrev[cur]
-        }
-        path.reverse()
-        return path
+    private fun bfsScore(c: Candidate): Float = c.score + if (c.d == dir) 15f else 0f
+    private fun tailScore(c: Candidate): Float = c.score + if (tailReachable(simulate(snake.first(), c.d).body)) 350f else -500f
+    private fun hamScore(c: Candidate): Float {
+        val idx = hamIndex(c.d)
+        return c.score + if (idx >= 0) 140f * shortcutBonus else -80f
     }
 
-    /** 让蛇沿 path 走，模拟结束后的蛇身（处理吃食物） */
-    private fun simulatePath(start: ArrayDeque<P>, path: List<P>): ArrayDeque<P> {
-        val body = ArrayDeque(start)
-        for (p in path) {
-            val ate = p == food
-            body.addFirst(p)
-            if (!ate) body.removeLast()
-        }
-        return body
-    }
-
-    // ============================================================
-    //                     Beam 搜索（强制模式用）
-    // ============================================================
-    private fun beamSearch(legal: List<Candidate>, depth: Int, width: Int): Candidate? {
-        if (legal.isEmpty()) return null
-        data class Node(val body: ArrayDeque<P>, val firstDir: P, val score: Float)
-        var layer = legal.map {
-            val sim = simulateOn(ArrayDeque(snake), it.d)
-            Node(sim.body, it.d, it.score)
-        }
-        var bestFirstDir = layer.maxByOrNull { it.score }?.firstDir ?: legal.first().d
-        var bestScore = layer.maxOfOrNull { it.score } ?: -Float.MAX_VALUE
-
-        repeat(depth - 1) {
+    private fun beamBest(legal: List<Candidate>): Candidate {
+        var best = legal.maxByOrNull { it.score } ?: legal.first()
+        var bestScore = -1e30f
+        beamNodes = 0
+        data class Node(val body: ArrayDeque<P>, val first: P, val score: Float, val depth: Int)
+        var layer = legal.map { Node(simulate(snake.first(), it.d).body, it.d, it.score, 1) }
+        val beamDepth = if (snake.size >= safeFollowLength) 7 else 3
+        repeat(beamDepth) {
             val next = ArrayList<Node>()
-            for (node in layer) {
-                if (node.body.isEmpty()) continue
-                val curDir = directionOfFirst(node.body)
+            for (nod in layer) {
+                beamNodes++
+                if (nod.score > bestScore) {
+                    bestScore = nod.score
+                    best = legal.firstOrNull { it.d == nod.first } ?: best
+                }
                 for (d in dirs) {
-                    if (isReverse(d, curDir)) continue
-                    if (!canSim(node.body, d)) continue
-                    val sim = simulateOn(node.body, d)
-                    if (sim.body.isEmpty()) continue
-                    val space = freeRegion(sim.body)
-                    val tailOk = tailReachable(sim.body)
-                    val foodDist = distance(sim.body.first(), food, sim.body, true)
-                    var s = node.score * 0.5f + space * 5f
-                    if (tailOk) s += 2000f
-                    if (foodDist >= 0) s += 300f / (foodDist + 1)
-                    if (sim.ate) s += 1500f
-                    next.add(Node(sim.body, node.firstDir, s))
+                    if (isReverse(d, directionOfFirst(nod.body))) continue
+                    if (!canSim(nod.body, d)) continue
+                    val sm = simulateOn(nod.body, d)
+                    val r = freeRegion(sm.body)
+                    val t = tailReachable(sm.body)
+                    val fd = distance(sm.body.first(), food, sm.body, true)
+                    var sc = nod.score + r * (wRegion * 0.55f) +
+                            if (t) wTailGood * 0.5f else wTailBad * 0.55f
+                    if (fd >= 0) sc += wFoodNear * 0.33f / (fd + 1)
+                    if (sm.ate) sc += wFoodAte * 0.6f
+                    next.add(Node(sm.body, nod.first, sc, nod.depth + 1))
                 }
             }
-            if (next.isEmpty()) return@repeat
-            layer = next.sortedByDescending { it.score }.take(width)
-            val layerBest = layer.first()
-            if (layerBest.score > bestScore) {
-                bestScore = layerBest.score
-                bestFirstDir = layerBest.firstDir
-            }
+            layer = next.sortedByDescending { it.score }.take(8)
         }
-        beamNodes = layer.size
-        return legal.firstOrNull { it.d == bestFirstDir }
+        return best
     }
-
-    // ============================================================
-    //                      学习相关
-    // ============================================================
 
     private fun learnState(len: Int, danger: Int): Int {
         val lenStage = when { len < 15 -> 0; len < 30 -> 1; len < 50 -> 2; len < 75 -> 3; else -> 4 }
@@ -813,17 +586,12 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun clampW(v: Float, lo: Float, hi: Float): Float = v.coerceIn(lo, hi)
-
     private fun rewardEatStep() {
         wFoodAte = clampW(wFoodAte * 1.01f, 300f, 3000f)
         wTailGood = clampW(wTailGood * 1.005f, 60f, 800f)
     }
 
-    /**
-     * ★★★ 关键修改：去掉"每次调整后衰减回默认"的代码 ★★★
-     * 原代码末尾有一段 k=0.98 的衰减，导致刚学会的调整立刻被抹掉。
-     * 现在只强化，不衰减。真正的收敛控制交给 die() 里的自适应逻辑。
-     */
+    // ★★★ 改动 3：去掉末尾的 k=0.98 衰减，让学习真正累积 ★★★
     private fun adjustWeights(cause: String) {
         val beforeEdge = wEdge; val beforeTail = wTailGood
         val beforeSpace = wSpace; val beforeFood = wFoodNear; val beforeRegion = wRegion
@@ -850,10 +618,29 @@ class SnakeView @JvmOverloads constructor(
             "HUNGER" -> "食物近 ${"%.0f→%.0f".format(beforeFood, wFoodNear)}"
             else -> "无变化"
         }
-        // 保留了区域权重只做非常缓慢的回调，避免极端值
-        // 不再对 wEdge/wTailGood/wSpace/wFoodNear 做衰减
+        // 只对区域/机动做极缓慢回归，防止极端值；其余权重不再衰减
         wRegion = wRegion * 0.999f + wRegion0 * 0.001f
         wMobility = wMobility * 0.999f + wMobility0 * 0.001f
+    }
+
+    private fun selectStrategy(state: Int, danger: Int): Int {
+        if (forcedStrategy >= 0) return forcedStrategy.coerceIn(0, 4).let { if (it == 4) 3 else it }
+        val hungerBias = if (hunger > 18) 1.5f else 0f
+        val dangerBias = if (danger >= 4) 2.5f else 0f
+        val prior = floatArrayOf(
+            if (snake.size < 35) 1.2f + hungerBias else 0.5f,
+            1f + dangerBias,
+            if (snake.size >= 35) 1.8f else 0.4f,
+            if (snake.size < 100) 1.3f else 0.7f,
+            0f
+        )
+        var best = 0; var value = -1e9f
+        for (a in 0..3) {
+            val bonus = if (n[state][a] == 0) 0.8f else q[state][a]
+            val ucb = bonus + prior[a]
+            if (ucb > value) { value = ucb; best = a }
+        }
+        return best
     }
 
     private fun learn(reward: Float) {
@@ -907,17 +694,7 @@ class SnakeView @JvmOverloads constructor(
             "HUNGER" -> min(3f, aggression * 1.15f)
             else -> max(0.5f, aggression * 0.94f)
         }
-        // ★ 自适应安全系数：被困死就加严，跑得顺就放松
-        if (cause == "TRAP") safetyMargin = min(2.5f, safetyMargin * 1.04f)
-        if (cause == "SELF") safetyMargin = min(2.5f, safetyMargin * 1.02f)
-        // 连续高分时放松一点
-        if (recentScores.size >= 10) {
-            val avg = recentScores.average()
-            if (avg > bestRecentScore * 0.85 && safetyMargin > 1.05f) {
-                safetyMargin = max(1.05f, safetyMargin * 0.995f)
-            }
-        }
-
+        if (cause == "TRAP") safetyMargin = min(3f, safetyMargin * 1.04f)
         lastDeathInfo = "死亡=$cause 长度=${snake.size} 分数=$score " +
                 "空间=${ai.region} 需求=${(snake.size * safetyMargin).toInt()} " +
                 "尾巴=${if (ai.tailReachable) "可达" else "不可达"}"
@@ -930,9 +707,19 @@ class SnakeView @JvmOverloads constructor(
         invalidate()
     }
 
-    // ============================================================
-    //                      模拟 & 工具
-    // ============================================================
+    private fun reasonFor(c: Candidate, strategy: Int, danger: Int): String = when {
+        !c.legal -> "此方向不合法"
+        c.d == dir && danger >= 4 -> "危险较高，保持可控路线"
+        c.reason == "马上吃到食物" -> "食物可安全取得，收益高"
+        c.reason == "吃完会困死，避开" -> "吃完会困死，避开该方向"
+        c.reason == "保持尾巴可达" -> "优先保持尾巴出口，避免困死"
+        else -> "综合空间、食物、尾巴与边界风险"
+    }
+
+    private fun strategyName(s: Int): String = when (s) {
+        0 -> "BFS 食物"; 1 -> "TAIL 追尾"; 2 -> "HAM 路线"
+        3 -> "BEAM 前瞻"; 4 -> "BEAM 前瞻"; else -> "AUTO"
+    }
 
     private fun simulate(head: P, d: P): Sim = simulateOn(ArrayDeque(snake), d)
 
@@ -989,22 +776,16 @@ class SnakeView @JvmOverloads constructor(
             if (curr !in 0 until total) continue
             val cx = curr % cols; val cy = curr / cols
             count++
-            if (cx > 0) {
-                val ni = curr - 1
-                if (ni in 0 until total && !bfsVisited[ni]) { bfsVisited[ni] = true; bfsQueue[tail++] = ni }
+            fun addNode(index: Int) {
+                if (index !in 0 until total) return
+                if (bfsVisited[index]) return
+                bfsVisited[index] = true
+                if (tail < bfsQueue.size) bfsQueue[tail++] = index
             }
-            if (cx < cols - 1) {
-                val ni = curr + 1
-                if (ni in 0 until total && !bfsVisited[ni]) { bfsVisited[ni] = true; bfsQueue[tail++] = ni }
-            }
-            if (cy > 0) {
-                val ni = curr - cols
-                if (ni in 0 until total && !bfsVisited[ni]) { bfsVisited[ni] = true; bfsQueue[tail++] = ni }
-            }
-            if (cy < rows - 1) {
-                val ni = curr + cols
-                if (ni in 0 until total && !bfsVisited[ni]) { bfsVisited[ni] = true; bfsQueue[tail++] = ni }
-            }
+            if (cx > 0) addNode(curr - 1)
+            if (cx < cols - 1) addNode(curr + 1)
+            if (cy > 0) addNode(curr - cols)
+            if (cy < rows - 1) addNode(curr + cols)
         }
         return count
     }
@@ -1043,22 +824,16 @@ class SnakeView @JvmOverloads constructor(
                 if (curr !in 0 until total) continue
                 val cx = curr % cols; val cy = curr / cols
                 if (cx == target.x && cy == target.y) return dist
-                if (cx > 0) {
-                    val ni = curr - 1
-                    if (ni in 0 until total && !bfsVisited[ni]) { bfsVisited[ni] = true; bfsQueue[tail++] = ni }
+                fun addNode(index: Int) {
+                    if (index !in 0 until total) return
+                    if (bfsVisited[index]) return
+                    bfsVisited[index] = true
+                    if (tail < bfsQueue.size) bfsQueue[tail++] = index
                 }
-                if (cx < cols - 1) {
-                    val ni = curr + 1
-                    if (ni in 0 until total && !bfsVisited[ni]) { bfsVisited[ni] = true; bfsQueue[tail++] = ni }
-                }
-                if (cy > 0) {
-                    val ni = curr - cols
-                    if (ni in 0 until total && !bfsVisited[ni]) { bfsVisited[ni] = true; bfsQueue[tail++] = ni }
-                }
-                if (cy < rows - 1) {
-                    val ni = curr + cols
-                    if (ni in 0 until total && !bfsVisited[ni]) { bfsVisited[ni] = true; bfsQueue[tail++] = ni }
-                }
+                if (cx > 0) addNode(curr - 1)
+                if (cx < cols - 1) addNode(curr + 1)
+                if (cy > 0) addNode(curr - cols)
+                if (cy < rows - 1) addNode(curr + cols)
             }
             dist++
         }
@@ -1077,7 +852,6 @@ class SnakeView @JvmOverloads constructor(
 
     private fun tailReachable(body: ArrayDeque<P>): Boolean =
         if (body.isEmpty()) false
-        else if (body.size <= 3) true
         else distance(body.first(), body.last(), body, true) >= 0
 
     private fun calculateDanger(): Int {
@@ -1094,9 +868,12 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // ============================================================
-    //                      食物 / 特效
-    // ============================================================
+    private fun hamIndex(d: P): Int {
+        val h = snake.first()
+        val next = P(h.x + d.x, h.y + d.y)
+        if (!inside(next)) return -1
+        return next.x * rows + next.y
+    }
 
     private fun placeFood() {
         val free = ArrayList<P>()
@@ -1121,10 +898,6 @@ class SnakeView @JvmOverloads constructor(
         floats.forEach { it.y -= dt * 0.04f; it.life -= dt * 0.025f }
         floats.removeAll { it.life <= 0f }
     }
-
-    // ============================================================
-    //                      渲染（保持原样）
-    // ============================================================
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         val hudReserve = 760f + 24f
