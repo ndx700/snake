@@ -144,11 +144,6 @@ class SnakeView @JvmOverloads constructor(
 
     private val sharedLock = Any()
 
-    /*
-     * =========================
-     * V2 RULE WEIGHTS
-     * =========================
-     */
     private var wRegion = 11f
     private var wMobility = 35f
     private var wTailGood = 180f
@@ -180,12 +175,6 @@ class SnakeView @JvmOverloads constructor(
 
     private val recentScores = ArrayDeque<Int>()
     private var bestRecentScore = 0
-
-    /*
-     * ============================================================
-     * V2 REAL RL CORE
-     * ============================================================
-     */
 
     private companion object {
         const val V2_FOOD_DIR = 4
@@ -260,10 +249,6 @@ class SnakeView @JvmOverloads constructor(
     private fun qRead(state: Int, action: Int): Float {
         if (state !in 0 until V2_STATE_COUNT) return 0f
         if (action !in 0 until V2_ACTIONS) return 0f
-        /*
-         * 无锁读：float 在 JVM 上是 32 位原子访问。
-         * 即使偶尔读到稍旧的值，对 RL 收敛也无影响。
-         */
         return qV2[qIndex(state, action)]
     }
 
@@ -300,11 +285,6 @@ class SnakeView @JvmOverloads constructor(
 
         val idx = qIndex(state, action)
 
-        /*
-         * 无锁更新：
-         * 多线程偶尔同时写同一 idx 时会丢一次更新，
-         * 但 RL 本身就是靠大量带噪声的样本平均来收敛的。
-         */
         val visits = nV2[idx]
         val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
 
@@ -350,23 +330,11 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    /*
-     * =========================
-     * CALLBACKS
-     * =========================
-     */
-
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
 
     private val prefs =
         context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
-
-    /*
-     * =========================
-     * EFFECTS / AUDIO
-     * =========================
-     */
 
     private val vibrator: Vibrator? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -428,18 +396,9 @@ class SnakeView @JvmOverloads constructor(
     private val reinforceButtonRect = RectF()
     private var lastReinforceTap = 0L
 
-    /*
-     * 渲染插值：
-     * 游戏逻辑按 gameSpeed 离散步进，
-     * 但渲染每帧插值，让蛇在格子之间平滑滑动，
-     * 达到 120fps 丝滑效果。
-     */
     private var prevSnake: List<P> = emptyList()
     private var moveProgress: Float = 0f
 
-    /*
-     * 复用 Paint，避免每帧分配。
-     */
     private val gaugeArcPaint =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
@@ -457,21 +416,12 @@ class SnakeView @JvmOverloads constructor(
     @Volatile
     private var trainActive = false
 
-    /*
-     * 每一轮强化训练使用一个独立的 generation 号。
-     * 旧线程只会看到旧 generation，自然退出，
-     * 绝不会混进新一代的训练。
-     */
     @Volatile
     private var trainGeneration = 0L
 
     private val trainThreads: MutableList<Thread> =
         mutableListOf()
 
-    /*
-     * 训练是纯 CPU 密集任务，主线程在训练期间几乎闲置。
-     * 直接用满可用核心。
-     */
     private val TRAIN_THREADS =
         Runtime.getRuntime()
             .availableProcessors()
@@ -572,12 +522,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    /*
-     * =========================
-     * FRAME LOOP
-     * =========================
-     */
-
     private val frame = object : Choreographer.FrameCallback {
 
         override fun doFrame(ns: Long) {
@@ -594,10 +538,6 @@ class SnakeView @JvmOverloads constructor(
             lastFrame = ns
 
             if (reinforceTraining && trainActive) {
-                /*
-                 * 训练期间 HUD 每 120 帧刷新一次（约 1Hz）。
-                 * drawDebug 里的 Q 表热度 + 权重柱 + 饼图都不便宜。
-                 */
                 if ((++renderSkipCounter % 120) == 0) {
                     invalidate()
                 }
@@ -609,7 +549,6 @@ class SnakeView @JvmOverloads constructor(
                 return
             }
 
-            // 自愈：标志位卡住时自动恢复，避免“点了取消蛇不走”
             if (reinforceTraining && !trainActive) {
                 reinforceTraining = false
                 trainingMode = false
@@ -642,7 +581,6 @@ class SnakeView @JvmOverloads constructor(
                     accumulator = 0L
                 }
 
-                // 渲染插值因子：0..1
                 moveProgress =
                     if (gameSpeed > 0L) {
                         (
@@ -672,12 +610,6 @@ class SnakeView @JvmOverloads constructor(
                 .postFrameCallback(this)
         }
     }
-
-    /*
-     * =========================
-     * INIT
-     * =========================
-     */
 
     init {
         highScore = prefs.getInt("high_score", 0)
@@ -847,16 +779,9 @@ class SnakeView @JvmOverloads constructor(
     fun isTrainingMode(): Boolean =
         trainingMode
 
-    /*
-     * =========================
-     * PARALLEL TRAINING
-     * =========================
-     */
-
     private fun startParallelTraining() {
         if (trainActive) return
 
-        // 开一代新的
         val myGen = ++trainGeneration
 
         reinforceTraining = true
@@ -897,11 +822,6 @@ class SnakeView @JvmOverloads constructor(
             )
 
             t.isDaemon = true
-
-            /*
-             * 训练期间主线程几乎不干活，
-             * 用 NORMAL 优先级让训练线程吃满 CPU。
-             */
             t.priority = Thread.NORM_PRIORITY
 
             t.start()
@@ -911,24 +831,14 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun stopParallelTraining() {
-        /*
-         * 关键修复：
-         * 无论 trainActive / reinforceTraining 当前是什么状态，
-         * 都强制清理标志位。
-         */
         val hadTraining =
             trainActive || reinforceTraining
 
-        // 让所有旧 generation 线程立刻看到“该退出了”
         trainGeneration++
         trainActive = false
         reinforceTraining = false
         trainingMode = false
 
-        /*
-         * 不阻塞 UI 线程去 join。
-         * 旧线程会在下一轮循环检查 generation / trainActive 后自行退出。
-         */
         trainThreads.clear()
 
         if (hadTraining) {
@@ -946,12 +856,6 @@ class SnakeView @JvmOverloads constructor(
         forcedStrategy = s
         invalidate()
     }
-
-    /*
-     * =========================
-     * SKIN / BOARD
-     * =========================
-     */
 
     fun updateCurrentSkin(id: String? = null) {
         when (
@@ -1065,12 +969,6 @@ class SnakeView @JvmOverloads constructor(
         invalidate()
     }
 
-    /*
-     * =========================
-     * RESET / LIFECYCLE
-     * =========================
-     */
-
     fun reset() {
         snake.clear()
         queue.clear()
@@ -1158,12 +1056,6 @@ class SnakeView @JvmOverloads constructor(
             .getInstance()
             .removeFrameCallback(frame)
     }
-
-    /*
-     * =========================
-     * MAIN GAME UPDATE
-     * =========================
-     */
 
     private fun updateGame() {
         if (gameOver) return
@@ -1276,7 +1168,6 @@ class SnakeView @JvmOverloads constructor(
             return
         }
 
-        // 捕获移动前位置，用于渲染插值
         prevSnake = snake.toList()
 
         snake.addFirst(nh)
@@ -1388,12 +1279,6 @@ class SnakeView @JvmOverloads constructor(
         lastV2State = nextState
         lastV2Action = oldAction
     }
-
-    /*
-     * =========================
-     * V2 STATE
-     * =========================
-     */
 
     private fun directionIndex(d: P): Int =
         when {
@@ -1650,12 +1535,6 @@ class SnakeView @JvmOverloads constructor(
         )
     }
 
-    /*
-     * =========================
-     * V2 ACTION SELECTION
-     * =========================
-     */
-
     private fun selectV2Action(
         state: Int,
         legal: List<Candidate>,
@@ -1792,12 +1671,6 @@ class SnakeView @JvmOverloads constructor(
         return best
     }
 
-    /*
-     * =========================
-     * MAIN AI
-     * =========================
-     */
-
     private fun chooseMove(): P {
         aiStepStartNs =
             System.nanoTime()
@@ -1870,9 +1743,6 @@ class SnakeView @JvmOverloads constructor(
                 hunger
             )
 
-        /*
-         * 第一层：真正安全的食物路线。
-         */
         val safeFood =
             findSafeFoodStep()
 
@@ -1931,9 +1801,6 @@ class SnakeView @JvmOverloads constructor(
             return safeFood
         }
 
-        /*
-         * 第二层：尾巴安全层。
-         */
         val tailStep =
             followTailStep(legal)
 
@@ -1995,9 +1862,6 @@ class SnakeView @JvmOverloads constructor(
             return tailStep
         }
 
-        /*
-         * 第三层：饥饿压力。
-         */
         val forceThreshold =
             hungerForceEat()
 
@@ -2092,9 +1956,6 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
-        /*
-         * 第四层：V2 Q-learning 正式决策。
-         */
         val shielded =
             legal.filter {
                 val ratio =
@@ -2201,12 +2062,6 @@ class SnakeView @JvmOverloads constructor(
             hunger >= 15 -> 1.6f
             else -> 1f
         }
-
-    /*
-     * =========================
-     * SAFE FOOD / TAIL
-     * =========================
-     */
 
     private fun followTailStep(
         legal: List<Candidate>
@@ -2366,12 +2221,6 @@ class SnakeView @JvmOverloads constructor(
 
         return path.first()
     }
-
-    /*
-     * =========================
-     * SURVIVAL HEURISTIC
-     * =========================
-     */
 
     private fun bestSurvivalStep(
         legal: List<Candidate>
@@ -2606,12 +2455,6 @@ class SnakeView @JvmOverloads constructor(
 
         return best
     }
-
-    /*
-     * =========================
-     * EVALUATION
-     * =========================
-     */
 
     private fun evaluate(d: P): Candidate {
         if (!legalDirection(d)) {
@@ -2876,12 +2719,6 @@ class SnakeView @JvmOverloads constructor(
         )
     }
 
-    /*
-     * =========================
-     * OLD ADAPTIVE WEIGHTS
-     * =========================
-     */
-
     private fun clampW(
         v: Float,
         lo: Float,
@@ -3108,87 +2945,27 @@ class SnakeView @JvmOverloads constructor(
             }
     }
 
-    /*
-     * =========================
-     * PERSISTENCE
-     * =========================
-     */
-
     private fun saveLearning() {
         synchronized(sharedLock) {
             prefs.edit()
-                .putFloat(
-                    "learn_aggression",
-                    aggression
-                )
-                .putFloat(
-                    "learn_safety",
-                    safetyMargin
-                )
-                .putFloat(
-                    "learn_shortcut",
-                    shortcutBonus
-                )
-                .putFloat(
-                    "w_region",
-                    wRegion
-                )
-                .putFloat(
-                    "w_mobility",
-                    wMobility
-                )
-                .putFloat(
-                    "w_tail_good",
-                    wTailGood
-                )
-                .putFloat(
-                    "w_tail_bad",
-                    wTailBad
-                )
-                .putFloat(
-                    "w_food_near",
-                    wFoodNear
-                )
-                .putFloat(
-                    "w_food_ate",
-                    wFoodAte
-                )
-                .putFloat(
-                    "w_edge",
-                    wEdge
-                )
-                .putFloat(
-                    "w_space",
-                    wSpace
-                )
-                .putString(
-                    "last_learn_action",
-                    lastLearnAction
-                )
-                .putInt(
-                    "stat_wall",
-                    deathWall
-                )
-                .putInt(
-                    "stat_self",
-                    deathSelf
-                )
-                .putInt(
-                    "stat_trap",
-                    deathTrap
-                )
-                .putInt(
-                    "stat_total",
-                    totalGames
-                )
-                .putInt(
-                    "money",
-                    money
-                )
-                .putInt(
-                    "high_score",
-                    highScore
-                )
+                .putFloat("learn_aggression", aggression)
+                .putFloat("learn_safety", safetyMargin)
+                .putFloat("learn_shortcut", shortcutBonus)
+                .putFloat("w_region", wRegion)
+                .putFloat("w_mobility", wMobility)
+                .putFloat("w_tail_good", wTailGood)
+                .putFloat("w_tail_bad", wTailBad)
+                .putFloat("w_food_near", wFoodNear)
+                .putFloat("w_food_ate", wFoodAte)
+                .putFloat("w_edge", wEdge)
+                .putFloat("w_space", wSpace)
+                .putString("last_learn_action", lastLearnAction)
+                .putInt("stat_wall", deathWall)
+                .putInt("stat_self", deathSelf)
+                .putInt("stat_trap", deathTrap)
+                .putInt("stat_total", totalGames)
+                .putInt("money", money)
+                .putInt("high_score", highScore)
                 .apply()
         }
     }
@@ -3311,12 +3088,6 @@ class SnakeView @JvmOverloads constructor(
 
         invalidate()
     }
-
-    /*
-     * =========================
-     * SIMULATION / PATH
-     * =========================
-     */
 
     private fun simulate(
         head: P,
@@ -3664,12 +3435,6 @@ class SnakeView @JvmOverloads constructor(
 
         return steps
     }
-
-    /*
-     * =========================
-     * FLOOD / DISTANCE
-     * =========================
-     */
 
     private fun freeRegion(
         body: ArrayDeque<P>
@@ -4056,12 +3821,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    /*
-     * =========================
-     * EFFECTS
-     * =========================
-     */
-
     private fun spawnFoodEffect(
         p: P
     ) {
@@ -4125,12 +3884,6 @@ class SnakeView @JvmOverloads constructor(
             it.life <= 0f
         }
     }
-
-    /*
-     * =========================
-     * DRAWING
-     * =========================
-     */
 
     override fun onSizeChanged(
         w: Int,
@@ -4356,7 +4109,6 @@ class SnakeView @JvmOverloads constructor(
         val n = snake.size
         val t = moveProgress
 
-        // 计算每个身体节点的插值位置
         val xs = FloatArray(n)
         val ys = FloatArray(n)
 
@@ -4373,7 +4125,6 @@ class SnakeView @JvmOverloads constructor(
             ys[i] = old.y + (cur.y - old.y) * t
         }
 
-        // 绘制身体
         for (i in 0 until n - 1) {
             snakePaint.color =
                 if (rainbowSkin) {
@@ -4393,7 +4144,6 @@ class SnakeView @JvmOverloads constructor(
             )
         }
 
-        // 头部
         headPaint.color = headColor
 
         c.drawCircle(
@@ -5034,148 +4784,138 @@ class SnakeView @JvmOverloads constructor(
         h: Float
     ) {
         val grid = 10
-        val cellW =
-            w / grid
+        val cellW = w / grid
+        val cellH = h / grid
 
-        val cellH =
-            h / grid
+        val bucketCount = 100
+        val bucketSize =
+            max(1, V2_STATE_COUNT / bucketCount)
 
-        var visitedStates = 0
-        var positive = 0
-        var negative = 0
-        var maxAbs = 0.001f
+        val visitSum = IntArray(bucketCount)
+        val qSum = FloatArray(bucketCount)
 
-        val sampleStep =
-            max(
-                1,
-                V2_STATE_COUNT /
-                    100
-            )
+        var maxAbsQ = 0.001f
 
-        for (s in 0 until V2_STATE_COUNT step sampleStep) {
-            var touched = false
+        for (b in 0 until bucketCount) {
+            val startState = b * bucketSize
+            val endState =
+                min(V2_STATE_COUNT, startState + bucketSize)
 
-            for (a in 0 until 4) {
-                val idx =
-                    qIndex(s, a)
+            var totalVisits = 0
+            var totalQ = 0f
+            var slotCount = 0
+            var localMaxAbs = 0f
 
-                val visits =
-                    nV2[idx]
+            for (s in startState until endState) {
+                for (a in 0 until 4) {
+                    val idx = qIndex(s, a)
+                    val v = nV2[idx]
 
-                if (visits > 0) {
-                    touched = true
+                    if (v > 0) {
+                        totalVisits += v
+                        totalQ += qV2[idx]
+                        slotCount++
 
-                    val qv =
-                        qV2[idx]
-
-                    maxAbs =
-                        max(
-                            maxAbs,
-                            abs(qv)
-                        )
-
-                    if (qv >= 0f) {
-                        positive++
-                    } else {
-                        negative++
+                        val absQ = abs(qV2[idx])
+                        if (absQ > localMaxAbs) {
+                            localMaxAbs = absQ
+                        }
                     }
                 }
             }
 
-            if (touched) {
-                visitedStates++
+            visitSum[b] = totalVisits
+            qSum[b] =
+                if (slotCount > 0) {
+                    totalQ / slotCount
+                } else {
+                    0f
+                }
+
+            if (localMaxAbs > maxAbsQ) {
+                maxAbsQ = localMaxAbs
             }
         }
 
-        for (i in 0 until 100) {
-            val s =
-                min(
-                    V2_STATE_COUNT - 1,
-                    i * sampleStep
-                )
-
-            var best =
-                0f
-
-            var touched =
-                false
-
-            for (a in 0 until 4) {
-                val idx =
-                    qIndex(s, a)
-
-                if (nV2[idx] > 0) {
-                    touched = true
-
-                    if (!touched ||
-                        qV2[idx] > best
-                    ) {
-                        best =
-                            qV2[idx]
-                    }
-                }
+        var maxVisit = 1
+        for (b in 0 until bucketCount) {
+            if (visitSum[b] > maxVisit) {
+                maxVisit = visitSum[b]
             }
+        }
 
-            val x =
-                left +
-                    (i % grid) *
-                    cellW
+        for (i in 0 until bucketCount) {
+            val x = left + (i % grid) * cellW
+            val y = top + (i / grid) * cellH
 
-            val y =
-                top +
-                    (i / grid) *
-                    cellH
-
-            if (!touched) {
+            if (visitSum[i] == 0) {
                 barPaint.color =
-                    Color.rgb(
-                        35,
-                        35,
-                        35
-                    )
+                    Color.rgb(35, 35, 35)
             } else {
+                val visitRatio =
+                    visitSum[i].toFloat() / maxVisit
+
+                val brightness =
+                    0.35f +
+                        0.65f *
+                        visitRatio.coerceIn(0f, 1f)
+
                 val t =
-                    (
-                        best /
-                            maxAbs
-                        ).coerceIn(
-                            -1f,
-                            1f
-                        )
+                    (qSum[i] / maxAbsQ)
+                        .coerceIn(-1f, 1f)
 
                 barPaint.color =
                     if (t >= 0f) {
                         Color.rgb(
                             (
                                 60 *
-                                    (1f - t)
-                                ).toInt(),
+                                    (1f - t) *
+                                    brightness
+                                ).toInt()
+                                .coerceIn(0, 255),
+
                             (
-                                60 +
-                                    195 * t
-                                ).toInt(),
+                                (
+                                    60 +
+                                        195 * t
+                                    ) *
+                                    brightness
+                                ).toInt()
+                                .coerceIn(0, 255),
+
                             (
                                 60 *
-                                    (1f - t)
+                                    (1f - t) *
+                                    brightness
                                 ).toInt()
+                                .coerceIn(0, 255)
                         )
                     } else {
-                        val nt =
-                            -t
+                        val nt = -t
 
                         Color.rgb(
                             (
-                                60 +
-                                    195 * nt
-                                ).toInt(),
-                            (
-                                60 *
-                                    (1f - nt)
-                                ).toInt(),
-                            (
-                                60 *
-                                    (1f - nt)
+                                (
+                                    60 +
+                                        195 * nt
+                                    ) *
+                                    brightness
                                 ).toInt()
+                                .coerceIn(0, 255),
+
+                            (
+                                60 *
+                                    (1f - nt) *
+                                    brightness
+                                ).toInt()
+                                .coerceIn(0, 255),
+
+                            (
+                                60 *
+                                    (1f - nt) *
+                                    brightness
+                                ).toInt()
+                                .coerceIn(0, 255)
                         )
                     }
             }
@@ -5189,12 +4929,6 @@ class SnakeView @JvmOverloads constructor(
             )
         }
     }
-
-    /*
-     * =========================
-     * DEBUG HUD
-     * =========================
-     */
 
     private fun drawDebug(
         c: Canvas
@@ -5885,33 +5619,17 @@ class SnakeView @JvmOverloads constructor(
         var cntQ =
             0
 
-        val sampleStep =
-            max(
-                1,
-                V2_STATE_COUNT /
-                    400
-            )
+        val totalSlots =
+            V2_STATE_COUNT * 4
 
-        for (
-            s in
-            0 until
-                V2_STATE_COUNT
-                step sampleStep
-        ) {
-            for (a in 0 until 4) {
-                val idx =
-                    qIndex(
-                        s,
-                        a
-                    )
-
-                if (nV2[idx] > 0) {
-                    visited++
-                    sumQ +=
-                        qV2[idx]
-                    cntQ++
-                }
+        var k = 0
+        while (k < totalSlots) {
+            if (nV2[k] > 0) {
+                visited++
+                sumQ += qV2[k]
+                cntQ++
             }
+            k++
         }
 
         val avgQ =
@@ -6146,12 +5864,6 @@ class SnakeView @JvmOverloads constructor(
         )
     }
 
-    /*
-     * =========================
-     * TOUCH
-     * =========================
-     */
-
     private var touchStartX = 0f
     private var touchStartY = 0f
 
@@ -6295,7 +6007,6 @@ class SnakeView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
 
-        // 同时清掉所有强化训练标志，避免重新 attach 后卡住
         trainGeneration++
         trainActive = false
         reinforceTraining = false
@@ -6316,18 +6027,9 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    /*
-     * ============================================================
-     * TRAINING GAME
-     * ============================================================
-     */
-
     private inner class TrainGame(
         seed: Long
     ) {
-        /*
-         * 捕获创建时的 generation。
-         */
         private val myGeneration =
             trainGeneration
 
@@ -6420,9 +6122,6 @@ class SnakeView @JvmOverloads constructor(
                 iter++
             }
 
-            /*
-             * 只有“本 generation 内正常死亡”才记入统计。
-             */
             if (
                 gOver &&
                 trainActive &&
@@ -6462,11 +6161,6 @@ class SnakeView @JvmOverloads constructor(
         }
 
         fun gStep() {
-            /*
-             * 快速退出：
-             * 如果这一代已经停止，或 generation 已经变了，
-             * 立刻返回，不再往下做任何重计算。
-             */
             if (
                 !trainActive ||
                 trainGeneration != myGeneration
@@ -8159,12 +7853,6 @@ class SnakeView @JvmOverloads constructor(
             }
         }
     }
-
-    /*
-     * =========================
-     * BGM
-     * =========================
-     */
 
     private class BgmPlayer {
 
