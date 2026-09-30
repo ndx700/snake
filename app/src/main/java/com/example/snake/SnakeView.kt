@@ -873,10 +873,24 @@ class SnakeView @JvmOverloads constructor(
         floats.removeAll { it.life <= 0f }
     }
 
+    /*
+     * ============================================================
+     * 棋盘区域限制在顶部按钮和底部 HUD 之间
+     *
+     * HUD 面板高度 760 + 上下间距 24 = 784
+     * 棋盘可用区域：[12, h-784] 之间垂直居中
+     * ============================================================
+     */
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        cell = min(w.toFloat() / cols, h.toFloat() / rows)
+        val hudReserve = 760f + 24f
+        val availTop = 12f
+        val availBottom = (h - hudReserve)
+            .coerceAtLeast(availTop + h * 0.30f)
+        val availH = availBottom - availTop
+
+        cell = min(w.toFloat() / cols, availH / rows)
         ox = (w - cols * cell) / 2f
-        oy = (h - rows * cell) / 2f
+        oy = availTop + (availH - rows * cell) / 2f
     }
 
     override fun onDraw(c: Canvas) {
@@ -1116,18 +1130,12 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    /*
-     * ============================================================
-     * HUD：贴底 + 放大版（字号 ×1.3，面板高度 760）
-     * ============================================================
-     */
     private fun drawDebug(c: Canvas) {
         if (aiMode == 0 && !gameOver) return
 
         val w = min(width * 0.97f, 720f)
         val h = 760f
         val left = (width - w) / 2f
-        // 面板贴底
         val top = max(12f, height - h - 12f)
 
         panel.color = Color.argb(232, 0, 0, 0)
@@ -1146,19 +1154,16 @@ class SnakeView @JvmOverloads constructor(
 
         text.textAlign = Paint.Align.LEFT
 
-        // 标题
         text.isFakeBoldText = true
         text.textSize = 26f
         text.color = Color.WHITE
         c.drawText("🧠 ${ai.strategy}", left + 16f, top + 36f, text)
 
-        // 原因
         text.isFakeBoldText = false
         text.textSize = 14f
         text.color = Color.YELLOW
         c.drawText(ai.reason, left + 16f, top + 58f, text)
 
-        // 危险圆环
         val gaugeCX = left + 58f
         val gaugeCY = top + 116f
         val gaugeR = 42f
@@ -1174,7 +1179,6 @@ class SnakeView @JvmOverloads constructor(
         text.color = Color.LTGRAY
         c.drawText("危险", gaugeCX, gaugeCY + 28f, text)
 
-        // 状态
         text.textAlign = Paint.Align.LEFT
         text.textSize = 16f
         text.color = Color.WHITE
@@ -1193,7 +1197,6 @@ class SnakeView @JvmOverloads constructor(
             left + 118f, top + 134f, text
         )
 
-        // 权重柱状图
         val wbY = top + 175f
         text.textAlign = Paint.Align.LEFT
         text.isFakeBoldText = true
@@ -1203,7 +1206,6 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = false
         drawWeightBars(c, left + 16f, wbY + 8f, w - 32f, 66f)
 
-        // 上次学习
         val learnY = top + 290f
         text.textSize = 14f
         text.isFakeBoldText = true
@@ -1213,7 +1215,6 @@ class SnakeView @JvmOverloads constructor(
         text.color = Color.WHITE
         c.drawText("$deathCause → $lastLearnAction", left + 118f, learnY, text)
 
-        // 四方向安全条
         val barStartX = left + 118f
         val barEndX = left + w - 16f
         val barW = barEndX - barStartX
@@ -1272,7 +1273,6 @@ class SnakeView @JvmOverloads constructor(
             barY += 28f
         }
 
-        // 饥饿
         val hungerY = barY + 8f
         text.isFakeBoldText = true
         text.textSize = 14f
@@ -1308,7 +1308,6 @@ class SnakeView @JvmOverloads constructor(
             barStartX + 8f, hungerY + 18f, text
         )
 
-        // 学习曲线 + 死亡饼图
         val chartY = hungerY + 40f
         val chartH = 72f
 
@@ -1342,7 +1341,6 @@ class SnakeView @JvmOverloads constructor(
         text.color = Color.rgb(255, 200, 100)
         c.drawText("T $deathTrap", pieCX + 42f, pieCY + 24f, text)
 
-        // Q表热度
         val heatY = chartY + chartH + 30f
         text.textAlign = Paint.Align.LEFT
         text.isFakeBoldText = true
@@ -1352,7 +1350,6 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = false
         drawQHeatmap(c, left + 16f, heatY + 8f, w - 32f, 66f)
 
-        // 底部信息
         val infoY = heatY + 8f + 66f + 22f
         val avg = if (recentScores.isEmpty()) 0f else recentScores.average().toFloat()
 
