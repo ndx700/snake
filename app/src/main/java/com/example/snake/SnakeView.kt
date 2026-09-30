@@ -5446,48 +5446,46 @@ class SnakeView @JvmOverloads constructor(
         val gaugeCY =
             top + 116f
 
-        drawDangerGauge(
-            c,
-            gaugeCX,
-            gaugeCY,
-            42f,
-            ai.danger
-        )
+        if (reinforceTraining) {
+            // 训练模式：圆环显示进化进度
+            val progRatio = currentAgentIndex.toFloat() / POPULATION_SIZE
+            val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+            arcPaint.style = Paint.Style.STROKE
+            arcPaint.strokeWidth = 13f
+            arcPaint.strokeCap = Paint.Cap.ROUND
+            val oval = RectF(gaugeCX - 42f, gaugeCY - 42f, gaugeCX + 42f, gaugeCY + 42f)
+            arcPaint.color = Color.rgb(50, 50, 50)
+            c.drawArc(oval, -90f, 360f, false, arcPaint)
+            arcPaint.color = Color.rgb(46, 204, 113)
+            c.drawArc(oval, -90f, 360f * progRatio, false, arcPaint)
 
-        text.textAlign =
-            Paint.Align.CENTER
-
-        text.isFakeBoldText =
-            true
-
-        text.textSize =
-            26f
-
-        text.color =
-            Color.WHITE
-
-        c.drawText(
-            "${ai.danger}",
-            gaugeCX,
-            gaugeCY + 9f,
-            text
-        )
-
-        text.isFakeBoldText =
-            false
-
-        text.textSize =
-            12f
-
-        text.color =
-            Color.LTGRAY
-
-        c.drawText(
-            "危险",
-            gaugeCX,
-            gaugeCY + 28f,
-            text
-        )
+            text.textAlign = Paint.Align.CENTER
+            text.isFakeBoldText = true
+            text.textSize = 22f
+            text.color = Color.WHITE
+            c.drawText("$currentAgentIndex", gaugeCX, gaugeCY + 8f, text)
+            text.isFakeBoldText = false
+            text.textSize = 11f
+            text.color = Color.LTGRAY
+            c.drawText("进度", gaugeCX, gaugeCY + 28f, text)
+        } else {
+            drawDangerGauge(
+                c,
+                gaugeCX,
+                gaugeCY,
+                42f,
+                ai.danger
+            )
+            text.textAlign = Paint.Align.CENTER
+            text.isFakeBoldText = true
+            text.textSize = 26f
+            text.color = Color.WHITE
+            c.drawText("${ai.danger}", gaugeCX, gaugeCY + 9f, text)
+            text.isFakeBoldText = false
+            text.textSize = 12f
+            text.color = Color.LTGRAY
+            c.drawText("危险", gaugeCX, gaugeCY + 28f, text)
+        }
 
         text.textAlign =
             Paint.Align.LEFT
@@ -5531,14 +5529,25 @@ class SnakeView @JvmOverloads constructor(
             }
 
         c.drawText(
-            "模式 $threadInfo   主蛇长 ${snake.size}",
+            "模式 $threadInfo   主蛇长 ${snake.size}   Q覆盖${visitedStates.size}",
             left + 118f,
             top + 134f,
             text
         )
 
+        // 进化进度条
+        if (reinforceTraining) {
+            val progBarY = top + 158f
+            barPaint.color = Color.rgb(40, 40, 50)
+            barPaint.style = Paint.Style.FILL
+            c.drawRoundRect(left + 16f, progBarY, left + w - 16f, progBarY + 6f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(46, 204, 113)
+            val progR = currentAgentIndex.toFloat() / POPULATION_SIZE
+            c.drawRoundRect(left + 16f, progBarY, left + 16f + (w - 32f) * progR, progBarY + 6f, 3f, 3f, barPaint)
+        }
+
         val wbY =
-            top + 175f
+            top + 180f
 
         text.isFakeBoldText =
             true
