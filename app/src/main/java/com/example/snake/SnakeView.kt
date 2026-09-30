@@ -144,6 +144,18 @@ class SnakeView @JvmOverloads constructor(
 
     private val sharedLock = Any()
 
+    // ===== 神经进化新增变量 =====
+    private val POPULATION_SIZE = 50
+    private var generation = 0
+    private val population = MutableList(POPULATION_SIZE) { TinyBrain() }
+    private var currentAgentIndex = 0
+    private val currentScores = FloatArray(POPULATION_SIZE)
+    private var qWeight = 1.0f
+    private var nnWeight = 0.0f
+    private var bestScoreThisGen = 0f
+    private var bestScoreAllTime = 0f
+    // =============================
+
     /*
      * =========================
      * V2 RULE WEIGHTS
@@ -340,20 +352,15 @@ class SnakeView @JvmOverloads constructor(
         v2LearningSteps++
     }
 
-    // ==========================================
-    // 只改这里：基于蛇长限制探索率
-    // ==========================================
     private fun currentEpsilon(): Float {
         if (!trainingMode && !reinforceTraining) return 0f
 
-        val len = snake.size
-        val capEpsilon = when {
-            len > 100 -> 0.0f
-            len > 60 -> 0.01f
-            len > 30 -> 0.05f
-            else -> 0.15f
-        }
+        val e = v2Epsilon
 
+        /*
+         * Slowly reduce exploration instead of killing it.
+         * Reinforcement training continues to explore occasionally.
+         */
         if (v2LearningSteps > 0L && v2LearningSteps % 4096L == 0L) {
             v2Epsilon = max(
                 EPS_MIN,
@@ -361,7 +368,7 @@ class SnakeView @JvmOverloads constructor(
             )
         }
 
-        return min(v2Epsilon, capEpsilon)
+        return e
     }
 
     private fun resetV2Learning() {
@@ -372,6 +379,81 @@ class SnakeView @JvmOverloads constructor(
             v2Episodes = 0L
             v2Epsilon = EPS_START
         }
+    }
+
+    /*
+     * =========================
+     * 神经进化大脑 (TinyBrain)
+     * =========================
+     */
+    private inner class TinyBrain {
+        var w1 = FloatArray(8 * 16) { Random.nextFloat() * 2f - 1f }
+        var w2 = FloatArray(16 * 4) { Random.nextFloat() * 2f - 1f }
+
+        fun think(inputs: FloatArray): FloatArray {
+            val hidden = FloatArray(16)
+            for (i in 0 until 16) {
+                var sum = 0f
+                for (j in 0 until 8) sum += inputs[j] * w1[j * 16 + i]
+                hidden[i] = max(0f, sum)
+            }
+            val outputs = FloatArray(4)
+            for (i in 0 until 4) {
+                var sum = 0f
+                for (j in 0 until 16) sum += hidden[j] * w2[j * 4 + i]
+                outputs[i] = sum
+            }
+            return outputs
+        }
+
+        fun breed(child: TinyBrain) {
+            for (i in w1.indices) child.w1[i] = w1[i] + (Random.nextFloat() - 0.5f) * 0.1f
+            for (i in w2.indices) child.w2[i] = w2[i] + (Random.nextFloat() - 0.5f) * 0.1f
+        }
+    }
+
+    private fun evolveNextGeneration() {
+        val sortedIndices = (0 until POPULATION_SIZE).sortedByDescending { currentScores[it] }
+        val bestBrains = sortedIndices.take(10).map { population[it] }
+
+        bestScoreThisGen = currentScores[sortedIndices[0]]
+        if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
+
+        for (i in 0 until POPULATION_SIZE) {
+            if (i < 10) {
+                population[i] = bestBrains[i]
+            } else {
+                val parent = bestBrains[Random.nextInt(bestBrains.size)]
+                val child = TinyBrain()
+                parent.breed(child)
+                population[i] = child
+            }
+            currentScores[i] = 0f
+        }
+        generation++
+        val nnRatio = (generation / 50f).coerceIn(0f, 0.8f)
+        nnWeight = nnRatio
+        qWeight = 1.0f - nnRatio
+    }
+
+    private fun buildInputs(head: P, target: P, currentBody: ArrayDeque<P>): FloatArray {
+        val inputs = FloatArray(8)
+        inputs[0] = if (isSafeForBody(head.x, head.y - 1, currentBody)) 0f else 1f
+        inputs[1] = if (isSafeForBody(head.x, head.y + 1, currentBody)) 0f else 1f
+        inputs[2] = if (isSafeForBody(head.x - 1, head.y, currentBody)) 0f else 1f
+        inputs[3] = if (isSafeForBody(head.x + 1, head.y, currentBody)) 0f else 1f
+        inputs[4] = if (target.y < head.y) 1f else 0f
+        inputs[5] = if (target.y > head.y) 1f else 0f
+        inputs[6] = if (target.x < head.x) 1f else 0f
+        inputs[7] = if (target.x > head.x) 1f else 0f
+        return inputs
+    }
+
+    private fun isSafeForBody(nx: Int, ny: Int, body: ArrayDeque<P>): Boolean {
+        val p = P(nx, ny)
+        if (!inside(p)) return false
+        if (body.contains(p) && p != body.last()) return false
+        return true
     }
 
     /*
@@ -811,7 +893,7 @@ class SnakeView @JvmOverloads constructor(
 
     /*
      * =========================
-     * PARALLEL TRAINING
+     * PARALLEL TRAINING (神经进化 + Q表融合)
      * =========================
      */
 
@@ -828,6 +910,18 @@ class SnakeView @JvmOverloads constructor(
 
         trainThreads.clear()
 
+        // 初始化进化参数
+        generation = 0
+        currentAgentIndex = 0
+        bestScoreThisGen = 0f
+        bestScoreAllTime = 0f
+        qWeight = 1.0f
+        nnWeight = 0.0f
+        for (i in 0 until POPULATION_SIZE) {
+            population[i] = TinyBrain()
+            currentScores[i] = 0f
+        }
+
         for (i in 0 until TRAIN_THREADS) {
             val t = Thread(
                 {
@@ -839,7 +933,19 @@ class SnakeView @JvmOverloads constructor(
                         )
 
                     while (trainActive) {
-                        game.playOneGame()
+                        // 每次循环，按顺序取一个个体进行训练
+                        val agentId = synchronized(sharedLock) {
+                            if (currentAgentIndex >= POPULATION_SIZE) {
+                                // 如果这一代全部跑完，就进化，并重置索引
+                                evolveNextGeneration()
+                                currentAgentIndex = 0
+                            }
+                            val id = currentAgentIndex++
+                            id
+                        }
+
+                        // 让游戏用这个个体去跑，并记录得分
+                        game.playOneGame(agentId)
                     }
                 },
                 "snake-train-$i"
@@ -1763,9 +1869,12 @@ class SnakeView @JvmOverloads constructor(
         return best
     }
 
-    // =========================================================
-    // 只改这里：真正让 Q 表主导决策，规则只做安全掩码与保底
-    // =========================================================
+    /*
+     * =========================
+     * MAIN AI (Q表 + 神经网络混合，规则只做安全掩码)
+     * =========================
+     */
+
     private fun chooseMove(): P {
         aiStepStartNs =
             System.nanoTime()
@@ -1838,7 +1947,235 @@ class SnakeView @JvmOverloads constructor(
                 hunger
             )
 
-        // 1. 动作掩码：只屏蔽立即致死的动作（空间过小或尾巴不可达）
+        /*
+         * 第一层：真正安全的食物路线。
+         * 这是硬安全层，不交给探索破坏。
+         */
+        val safeFood =
+            findSafeFoodStep()
+
+        if (safeFood != null) {
+            val action =
+                dirs.indexOfFirst {
+                    it == safeFood
+                }.coerceAtLeast(0)
+
+            val q =
+                qRead(
+                    state,
+                    action
+                )
+
+            lastV2State = state
+            lastV2Action = action
+
+            ai =
+                Snapshot(
+                    strategy = "V2 SAFE FOOD",
+                    reason =
+                        "安全路径可吃食物，吃后尾巴仍可达",
+                    danger = danger,
+                    region = regionNow,
+                    spaceRatio =
+                        regionNow.toFloat() /
+                            max(
+                                1,
+                                snake.size
+                            ),
+                    tailReachable =
+                        tailReachable(snake),
+                    foodReachable = true,
+                    foodDistance = foodDistNow,
+                    hunger = hunger,
+                    chosen = safeFood,
+                    candidates = candidates,
+                    depth = 2,
+                    nodes = legal.size,
+                    hungerFactor =
+                        hungerFactorValue(),
+                    regionWeight = wRegion,
+                    strategyId = 10,
+                    qValue = q,
+                    nVisits =
+                        qVisit(
+                            state,
+                            action
+                        ),
+                    forceEatActive = false,
+                    forceEatSafe = true,
+                    safeFollowMode = false
+                )
+
+            return safeFood
+        }
+
+        /*
+         * 第二层：尾巴安全层。
+         */
+        val tailStep =
+            followTailStep(legal)
+
+        if (
+            tailStep != null &&
+            hunger < hungerForceEat()
+        ) {
+            val action =
+                dirs.indexOfFirst {
+                    it == tailStep
+                }.coerceAtLeast(0)
+
+            val q =
+                qRead(
+                    state,
+                    action
+                )
+
+            lastV2State = state
+            lastV2Action = action
+
+            ai =
+                Snapshot(
+                    strategy = "V2 TAIL",
+                    reason =
+                        "食物路线风险较高，沿尾巴保持循环空间",
+                    danger = danger,
+                    region = regionNow,
+                    spaceRatio =
+                        regionNow.toFloat() /
+                            max(
+                                1,
+                                snake.size
+                            ),
+                    tailReachable = true,
+                    foodReachable =
+                        foodDistNow >= 0,
+                    foodDistance = foodDistNow,
+                    hunger = hunger,
+                    chosen = tailStep,
+                    candidates = candidates,
+                    depth = 1,
+                    nodes = legal.size,
+                    hungerFactor =
+                        hungerFactorValue(),
+                    regionWeight = wRegion,
+                    strategyId = 11,
+                    qValue = q,
+                    nVisits =
+                        qVisit(
+                            state,
+                            action
+                        ),
+                    forceEatActive = false,
+                    forceEatSafe = false,
+                    safeFollowMode = true
+                )
+
+            return tailStep
+        }
+
+        /*
+         * 第三层：饥饿压力。
+         * 仍然只允许尾巴/空间安全动作。
+         */
+        val forceThreshold =
+            hungerForceEat()
+
+        if (
+            hunger >= forceThreshold &&
+            foodDistNow >= 0
+        ) {
+            val safeFoodCandidates =
+                legal.filter {
+                    it.tailOk &&
+                        it.foodDist >= 0
+                }
+
+            if (
+                safeFoodCandidates.isNotEmpty()
+            ) {
+                val selected =
+                    selectV2Action(
+                        state,
+                        safeFoodCandidates,
+                        training = trainingMode ||
+                            reinforceTraining
+                    )
+
+                val action =
+                    dirs.indexOfFirst {
+                        it == selected.d
+                    }.coerceAtLeast(0)
+
+                lastV2State = state
+                lastV2Action = action
+
+                ai =
+                    Snapshot(
+                        strategy = "V2 HUNGER",
+                        reason =
+                            "饥饿压力提高食物收益，但仍受安全屏蔽",
+                        danger = max(
+                            danger,
+                            3
+                        ),
+                        region = regionNow,
+                        spaceRatio =
+                            regionNow.toFloat() /
+                                max(
+                                    1,
+                                    snake.size
+                                ),
+                        tailReachable =
+                            selected.tailOk,
+                        foodReachable = true,
+                        foodDistance =
+                            selected.foodDist,
+                        hunger = hunger,
+                        chosen = selected.d,
+                        candidates =
+                            candidates.map {
+                                if (it.d == selected.d) {
+                                    it.copy(
+                                        qValue =
+                                            qRead(
+                                                state,
+                                                action
+                                            )
+                                    )
+                                } else {
+                                    it
+                                }
+                            },
+                        depth = 1,
+                        nodes = legal.size,
+                        hungerFactor =
+                            hungerFactorValue(),
+                        regionWeight = wRegion,
+                        strategyId = 12,
+                        qValue =
+                            qRead(
+                                state,
+                                action
+                            ),
+                        nVisits =
+                            qVisit(
+                                state,
+                                action
+                            ),
+                        forceEatActive = true,
+                        forceEatSafe = true,
+                        safeFollowMode = false
+                    )
+
+                return selected.d
+            }
+        }
+
+        /*
+         * 第四层：V2 Q-learning 正式决策。
+         *
+         * 先做安全屏蔽，再让 Q 值在安全动作中选择。
+         */
         val shielded =
             legal.filter {
                 val ratio =
@@ -1849,10 +2186,10 @@ class SnakeView @JvmOverloads constructor(
                         )
 
                 it.tailOk ||
-                    ratio >= 0.8f ||
+                    ratio >= 1.0f ||
                     (
                         snake.size < 15 &&
-                            ratio >= 0.5f
+                            ratio >= 0.75f
                         )
             }
 
@@ -1863,87 +2200,35 @@ class SnakeView @JvmOverloads constructor(
                 legal
             }
 
-        // 2. Q 表正式决策
-        val selected =
-            selectV2Action(
-                state,
-                pool,
-                training =
-                    trainingMode ||
-                        reinforceTraining
-            )
+        // =========================================================
+        // 融合：神经网络 + Q表 混合决策
+        // =========================================================
+        val brain = if (trainingMode || reinforceTraining) population[currentAgentIndex % POPULATION_SIZE] else population[0]
+        val nnInputs = buildInputs(snake.first(), food, snake)
+        val nnVals = brain.think(nnInputs)
 
-        // 3. 绝境保底：如果 Q 表选出的动作极度危险，用启发式规则抢救
-        val needRescue =
-            selected.region < snake.size / 2 ||
-                (
-                    !selected.tailOk &&
-                        snake.size > 30
-                    )
+        var best = pool.first()
+        var bestValue = -Float.MAX_VALUE
 
-        if (needRescue && legal.isNotEmpty()) {
-            val survivalChoice =
-                bestSurvivalStep(legal)
+        for (candidate in pool) {
+            val action = dirs.indexOfFirst { it == candidate.d }
+            if (action < 0) continue
 
-            val action =
-                dirs.indexOfFirst {
-                    it == survivalChoice.d
-                }.coerceAtLeast(0)
+            val q = qRead(state, action)
+            val nn = nnVals[action]
+            val rule = candidate.score
 
-            lastV2State = state
-            lastV2Action = action
-
-            ai =
-                Snapshot(
-                    strategy = "V2 EMERGENCY",
-                    reason =
-                        "陷入绝境，启用生存保底",
-                    danger = max(
-                        danger,
-                        4
-                    ),
-                    region = regionNow,
-                    spaceRatio =
-                        regionNow.toFloat() /
-                            max(
-                                1,
-                                snake.size
-                            ),
-                    tailReachable =
-                        survivalChoice.tailOk,
-                    foodReachable =
-                        foodDistNow >= 0,
-                    foodDistance = foodDistNow,
-                    hunger = hunger,
-                    chosen = survivalChoice.d,
-                    candidates = candidates,
-                    depth = 1,
-                    nodes = legal.size,
-                    hungerFactor =
-                        hungerFactorValue(),
-                    regionWeight = wRegion,
-                    strategyId = 99,
-                    qValue =
-                        qRead(
-                            state,
-                            action
-                        ),
-                    nVisits =
-                        qVisit(
-                            state,
-                            action
-                        ),
-                    forceEatActive = false,
-                    forceEatSafe = false,
-                    safeFollowMode = false
-                )
-
-            return survivalChoice.d
+            // 混合分数：Q表分数 * 权重 + 神经网络分数 * 权重 * 放大系数 + 规则分数微调
+            val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f
+            if (mixed > bestValue) {
+                bestValue = mixed
+                best = candidate.copy(qValue = q)
+            }
         }
 
         val action =
             dirs.indexOfFirst {
-                it == selected.d
+                it == best.d
             }.coerceAtLeast(0)
 
         lastV2State = state
@@ -1951,9 +2236,8 @@ class SnakeView @JvmOverloads constructor(
 
         ai =
             Snapshot(
-                strategy = "V2 Q-LEARNING",
-                reason =
-                    "安全掩码后由 V2 Q 值选择动作",
+                strategy = "混合进化 (Q表+NN)",
+                reason = "规则过滤后，Q表与NN选出最优动作",
                 danger = danger,
                 region = regionNow,
                 spaceRatio =
@@ -1968,10 +2252,10 @@ class SnakeView @JvmOverloads constructor(
                     foodDistNow >= 0,
                 foodDistance = foodDistNow,
                 hunger = hunger,
-                chosen = selected.d,
+                chosen = best.d,
                 candidates =
                     candidates.map {
-                        if (it.d == selected.d) {
+                        if (it.d == best.d) {
                             it.copy(
                                 qValue =
                                     qRead(
@@ -2004,7 +2288,7 @@ class SnakeView @JvmOverloads constructor(
                 safeFollowMode = false
             )
 
-        return selected.d
+        return best.d
     }
 
     private fun hungerFactorValue(): Float =
@@ -4035,7 +4319,7 @@ class SnakeView @JvmOverloads constructor(
                 )
 
             c.drawText(
-                "强化训练中",
+                "混合进化中",
                 width / 2f,
                 140f,
                 text
@@ -4051,7 +4335,7 @@ class SnakeView @JvmOverloads constructor(
                 Color.LTGRAY
 
             c.drawText(
-                "8 线程并行 · V2 Q-Learning · 全速计算",
+                "Q表 + 神经网络 在规则约束下自我迭代",
                 width / 2f,
                 178f,
                 text
@@ -5169,7 +5453,7 @@ class SnakeView @JvmOverloads constructor(
 
         c.drawText(
             if (reinforceTraining)
-                "并行训练中 · 8 线程"
+                "混合进化中 · 世代 $generation"
             else
                 ai.strategy,
             left + 16f,
@@ -5188,7 +5472,7 @@ class SnakeView @JvmOverloads constructor(
 
         c.drawText(
             if (reinforceTraining) {
-                "8 个独立棋盘同时训练，共享 V2 Q 表"
+                "规则过滤 + Q表 + 神经网络 自我迭代"
             } else {
                 ai.reason
             },
@@ -5288,7 +5572,7 @@ class SnakeView @JvmOverloads constructor(
             }
 
         c.drawText(
-            "线程 $threadInfo   主蛇长 ${snake.size}",
+            "模式 $threadInfo   主蛇长 ${snake.size}",
             left + 118f,
             top + 134f,
             text
@@ -5805,46 +6089,67 @@ class SnakeView @JvmOverloads constructor(
         text.textAlign =
             Paint.Align.LEFT
 
-        c.drawText(
-            "局数 $totalGames   近50均分 ${
-                "%.0f".format(avg)
-            }   最佳 $bestRecentScore",
-            left + 16f,
-            infoY,
-            text
-        )
+        if (reinforceTraining) {
+            c.drawText(
+                "世代 $generation   当前个体 $currentAgentIndex/$POPULATION_SIZE",
+                left + 16f,
+                infoY,
+                text
+            )
+            c.drawText(
+                "本代最佳 ${"%.0f".format(bestScoreThisGen)}   历史最佳 ${"%.0f".format(bestScoreAllTime)}",
+                left + 16f,
+                infoY + 20f,
+                text
+            )
+            c.drawText(
+                "Q表权重 ${"%.2f".format(qWeight)}   神经网络权重 ${"%.2f".format(nnWeight)}",
+                left + 16f,
+                infoY + 40f,
+                text
+            )
+        } else {
+            c.drawText(
+                "局数 $totalGames   近50均分 ${
+                    "%.0f".format(avg)
+                }   最佳 $bestRecentScore",
+                left + 16f,
+                infoY,
+                text
+            )
 
-        c.drawText(
-            "V2覆盖 ${
-                visited
-            }   平均Q ${
-                "%.2f".format(avgQ)
-            }   学习步 ${
-                v2LearningSteps
-            }",
-            left + 16f,
-            infoY + 20f,
-            text
-        )
+            c.drawText(
+                "V2覆盖 ${
+                    visited
+                }   平均Q ${
+                    "%.2f".format(avgQ)
+                }   学习步 ${
+                    v2LearningSteps
+                }",
+                left + 16f,
+                infoY + 20f,
+                text
+            )
 
-        c.drawText(
-            "ε ${
-                "%.3f".format(
-                    v2Epsilon
-                )
-            }   攻击x${
-                "%.2f".format(
-                    aggression
-                )
-            }   安全x${
-                "%.2f".format(
-                    safetyMargin
-                )
-            }",
-            left + 16f,
-            infoY + 40f,
-            text
-        )
+            c.drawText(
+                "ε ${
+                    "%.3f".format(
+                        v2Epsilon
+                    )
+                }   攻击x${
+                    "%.2f".format(
+                        aggression
+                    )
+                }   安全x${
+                    "%.2f".format(
+                        safetyMargin
+                    )
+                }",
+                left + 16f,
+                infoY + 40f,
+                text
+            )
+        }
 
         if (
             gameOver &&
@@ -5931,9 +6236,9 @@ class SnakeView @JvmOverloads constructor(
 
         c.drawText(
             if (reinforceTraining)
-                "停止强化"
+                "停止进化"
             else
-                "强化训练",
+                "神经进化",
             reinforceButtonRect.centerX(),
             reinforceButtonRect.centerY() + 7f,
             text
@@ -6246,7 +6551,10 @@ class SnakeView @JvmOverloads constructor(
         private var prevAction =
             -1
 
-        fun playOneGame() {
+        private var currentAgentId = 0
+
+        fun playOneGame(agentId: Int) {
+            currentAgentId = agentId
             gSnake.clear()
 
             gSnake.add(
@@ -6547,9 +6855,11 @@ class SnakeView @JvmOverloads constructor(
             prevAction = -1
         }
 
-        // =========================================================
-        // 只改这里：训练环境的决策逻辑，与主游戏保持完全一致
-        // =========================================================
+        /*
+         * Training action:
+         * same safety shield + same
+         * V2 Q table as visible game.
+         */
         fun gChooseMove(
             state: Int
         ): P {
@@ -6567,7 +6877,123 @@ class SnakeView @JvmOverloads constructor(
                 return gDir
             }
 
-            // 1. 安全掩码过滤必死动作
+            /*
+             * Early game:
+             * take a provably safe food route.
+             */
+            if (
+                gSnake.size < 35
+            ) {
+                val path =
+                    gShortestPath(
+                        gSnake.first(),
+                        gFood,
+                        gSnake,
+                        true
+                    )
+
+                if (
+                    path != null &&
+                    path.isNotEmpty()
+                ) {
+                    val simBody =
+                        ArrayDeque(
+                            gSnake
+                        )
+
+                    var ate = false
+                    var valid = true
+
+                    for (step in path) {
+                        val nh =
+                            P(
+                                simBody.first().x +
+                                    step.x,
+                                simBody.first().y +
+                                    step.y
+                            )
+
+                        if (!gInside(nh)) {
+                            valid = false
+                            break
+                        }
+
+                        val willEat =
+                            nh == gFood
+
+                        if (
+                            simBody.contains(nh) &&
+                            !(
+                                nh ==
+                                    simBody.last() &&
+                                    !willEat
+                                )
+                        ) {
+                            valid = false
+                            break
+                        }
+
+                        simBody.addFirst(nh)
+
+                        if (!willEat) {
+                            simBody.removeLast()
+                        } else {
+                            ate = true
+                        }
+                    }
+
+                    if (
+                        valid &&
+                        ate &&
+                        gTailReachable(
+                            simBody
+                        )
+                    ) {
+                        return path.first()
+                    }
+                }
+            }
+
+            val safeFood =
+                gFindSafeFoodStep()
+
+            if (safeFood != null) {
+                return safeFood
+            }
+
+            val tailStep =
+                gFollowTailStep(
+                    legal
+                )
+
+            if (
+                tailStep != null &&
+                gHunger <
+                    gHungerForceEat()
+            ) {
+                return tailStep
+            }
+
+            val threshold =
+                gHungerForceEat()
+
+            if (
+                gHunger >= threshold
+            ) {
+                val safe =
+                    legal.filter {
+                        it.tailOk &&
+                            it.foodDist >= 0
+                    }
+
+                if (safe.isNotEmpty()) {
+                    return gSelectAction(
+                        state,
+                        safe
+                    ).d
+                }
+            }
+
             val shielded =
                 legal.filter {
                     val ratio =
@@ -6578,10 +7004,10 @@ class SnakeView @JvmOverloads constructor(
                             )
 
                     it.tailOk ||
-                        ratio >= 0.8f ||
+                        ratio >= 1.0f ||
                         (
                             gSnake.size < 15 &&
-                                ratio >= 0.5f
+                                ratio >= 0.75f
                             )
                 }
 
@@ -6592,26 +7018,10 @@ class SnakeView @JvmOverloads constructor(
                     legal
                 }
 
-            // 2. Q 表决策
-            val selected =
-                gSelectAction(
-                    state,
-                    pool
-                )
-
-            // 3. 绝境保底
-            val needRescue =
-                selected.region < gSnake.size / 2 ||
-                    (
-                        !selected.tailOk &&
-                            gSnake.size > 30
-                        )
-
-            if (needRescue && legal.isNotEmpty()) {
-                return gBestSurvival(legal).d
-            }
-
-            return selected.d
+            return gSelectAction(
+                state,
+                pool
+            ).d
         }
 
         private fun gSelectAction(
@@ -6651,6 +7061,13 @@ class SnakeView @JvmOverloads constructor(
                 }
             }
 
+            // =========================================================
+            // 融合：神经网络 + Q表 混合决策 (训练环境)
+            // =========================================================
+            val brain = population[currentAgentId % POPULATION_SIZE]
+            val nnInputs = buildInputs(gSnake.first(), gFood, gSnake)
+            val nnVals = brain.think(nnInputs)
+
             var best =
                 legal.first()
 
@@ -6671,69 +7088,17 @@ class SnakeView @JvmOverloads constructor(
                         a
                     )
 
-                val visits =
-                    qVisit(
-                        state,
-                        a
-                    )
+                val nn = nnVals[a]
+                val rule = candidate.score
 
-                val ratio =
-                    candidate.region.toFloat() /
-                        max(
-                            1,
-                            gSnake.size
-                        )
-
-                val safety =
-                    when {
-                        candidate.tailOk &&
-                            ratio >= 1.5f ->
-                            2.2f
-
-                        candidate.tailOk ->
-                            1.1f
-
-                        ratio >= 1f ->
-                            0.25f
-
-                        else ->
-                            -1.5f
-                    }
-
-                val food =
-                    if (candidate.ate) {
-                        4f
-                    } else if (
-                        candidate.foodDist >= 0
-                    ) {
-                        0.7f /
-                            (
-                                candidate.foodDist + 1
-                                )
-                    } else {
-                        0f
-                    }
-
-                val explore =
-                    0.12f /
-                        kotlin.math.sqrt(
-                            (
-                                visits + 1
-                                ).toFloat()
-                        )
-
-                val value =
-                    q +
-                        safety +
-                        food +
-                        explore
+                val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f
 
                 if (
-                    value >
+                    mixed >
                     bestValue
                 ) {
                     bestValue =
-                        value
+                        mixed
 
                     best =
                         candidate.copy(
@@ -7880,6 +8245,9 @@ class SnakeView @JvmOverloads constructor(
                     bestRecentScore =
                         gScore
                 }
+
+                // 记录当前个体的成绩
+                currentScores[currentAgentId % POPULATION_SIZE] = max(currentScores[currentAgentId % POPULATION_SIZE], gScore.toFloat())
 
                 adjustWeights(
                     cause
