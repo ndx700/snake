@@ -344,9 +344,15 @@ class SnakeView @JvmOverloads constructor(
         if (state !in 0 until V2_STATE_COUNT) return
         if (action !in 0 until V2_ACTIONS) return
 
+        val isNewState = !visitedStates.contains(state)
         visitedStates.add(state)
 
+        // 好奇心：新状态给额外小奖励，鼓励探索
+        val curiosityBonus = if (isNewState) 0.02f else 0f
+        val effectiveReward = reward + curiosityBonus
+
         // 计算TD误差用于优先经验回放
+        val tdErr = if (terminal) effectiveReward else (effectiveReward + GAMMA * qMax(nextState, nextMask) - qV2[idx])
         val tdErr = if (terminal) reward else (reward + GAMMA * qMax(nextState, nextMask) - qV2[idx])
         // 存入经验回放buffer
         synchronized(replayBuffer) {
@@ -365,8 +371,8 @@ class SnakeView @JvmOverloads constructor(
                 else qMax(nextState, nextMask)
 
             val target =
-                if (terminal) reward
-                else reward + GAMMA * nextBest
+                if (terminal) effectiveReward
+                else effectiveReward + GAMMA * nextBest
 
             val old = qV2[idx]
             val updated = old + alpha * (target - old)
@@ -555,7 +561,7 @@ class SnakeView @JvmOverloads constructor(
             nnWeight = nnRatio
             qWeight = 1.0f - nnRatio
 
-            // 每5代自动保存一次进度
+            // 每代自动保存一次进度
             if (generation % 1 == 0) {
                 Thread {
                     saveTrainingState()
