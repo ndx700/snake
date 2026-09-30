@@ -167,8 +167,7 @@ class SnakeView @JvmOverloads constructor(
     private var bestScoreThisGen = 0f
     @Volatile
     private var bestScoreAllTime = 0f
-    @Volatile
-    private var evolving = false
+    @Volatile private val visitedStates = mutableSetOf<Int>()
     // =============================
 
     /*
@@ -207,10 +206,6 @@ class SnakeView @JvmOverloads constructor(
 
     private val recentScores = ArrayDeque<Int>()
     private var bestRecentScore = 0
-
-    // 权重变化检测：记录上一次的8个权重比值
-    private val prevWeights = FloatArray(8) { 1f }
-    private val weightFlash = FloatArray(8) { 0f } // 闪烁强度 0~1
 
     /*
      * ============================================================
@@ -331,7 +326,7 @@ class SnakeView @JvmOverloads constructor(
         if (state !in 0 until V2_STATE_COUNT) return
         if (action !in 0 until V2_ACTIONS) return
 
-        visitedStateSet.add(state)
+        visitedStates.add(state)
         val idx = qIndex(state, action)
 
         synchronized(qLock(idx)) {
@@ -378,6 +373,7 @@ class SnakeView @JvmOverloads constructor(
             v2LearningSteps = 0L
             v2Episodes = 0L
             v2Epsilon = EPS_START
+            visitedStates.clear()
         }
     }
 
@@ -407,29 +403,12 @@ class SnakeView @JvmOverloads constructor(
         }
 
         fun breed(child: TinyBrain) {
-            // 自适应变异：世代早期变异大，后期精细调整
-            val mut = if (generation < 10) 0.18f else if (generation < 30) 0.1f else 0.05f
-            for (i in w1.indices) child.w1[i] = w1[i] + (Random.nextFloat() - 0.5f) * mut
-            for (i in w2.indices) child.w2[i] = w2[i] + (Random.nextFloat() - 0.5f) * mut
-        }
-
-        // 交叉繁殖：两个大脑各取一半权重组合
-        fun crossover(other: TinyBrain, child: TinyBrain) {
-            for (i in w1.indices) {
-                child.w1[i] = if (Random.nextBoolean()) w1[i] else other.w1[i]
-            }
-            for (i in w2.indices) {
-                child.w2[i] = if (Random.nextBoolean()) w2[i] else other.w2[i]
-            }
-            // 交叉后再加小变异
-            val mut = if (generation < 10) 0.12f else 0.06f
-            for (i in child.w1.indices) child.w1[i] += (Random.nextFloat() - 0.5f) * mut
-            for (i in child.w2.indices) child.w2[i] += (Random.nextFloat() - 0.5f) * mut
+            for (i in w1.indices) child.w1[i] = w1[i] + (Random.nextFloat() - 0.5f) * 0.1f
+            for (i in w2.indices) child.w2[i] = w2[i] + (Random.nextFloat() - 0.5f) * 0.1f
         }
     }
 
     private fun evolveNextGeneration() {
-        evolving = true
         val scoresCopy = synchronized(sharedLock) {
             currentScores.copyOf()
         }
@@ -449,27 +428,13 @@ class SnakeView @JvmOverloads constructor(
         if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
 
         for (i in 0 until POPULATION_SIZE) {
-            when {
-                // 前8名精英直接保留
-                i < 8 -> population[i] = bestBrains[i]
-                // 中间32个：两个精英交叉繁殖
-                i < 40 -> {
-                    val p1 = bestBrains[Random.nextInt(bestBrains.size)]
-                    var p2 = bestBrains[Random.nextInt(bestBrains.size)]
-                    while (p2 === p1 && bestBrains.size > 1) {
-                        p2 = bestBrains[Random.nextInt(bestBrains.size)]
-                    }
-                    val child = TinyBrain()
-                    p1.crossover(p2, child)
-                    population[i] = child
-                }
-                // 最后10个：随机变异，保持种群多样性
-                else -> {
-                    val parent = bestBrains[Random.nextInt(bestBrains.size)]
-                    val child = TinyBrain()
-                    parent.breed(child)
-                    population[i] = child
-                }
+            if (i < 10) {
+                population[i] = bestBrains[i]
+            } else {
+                val parent = bestBrains[Random.nextInt(bestBrains.size)]
+                val child = TinyBrain()
+                parent.breed(child)
+                population[i] = child
             }
         }
 
@@ -493,8 +458,6 @@ class SnakeView @JvmOverloads constructor(
                 start()
             }
         }
-
-        evolving = false
     }
 
     private fun buildInputs(head: P, target: P, currentBody: ArrayDeque<P>): FloatArray {
@@ -990,12 +953,6 @@ class SnakeView @JvmOverloads constructor(
                         )
 
                     while (trainActive) {
-                        // 进化期间等待，避免读到正在替换的population
-                        if (evolving) {
-                            Thread.yield()
-                            continue
-                        }
-
                         var agentId = -1
                         
                         // 获取当前需要训练的个体 ID
@@ -4909,17 +4866,6 @@ class SnakeView @JvmOverloads constructor(
                             maxRatio
                         )
 
-            // ===== 涨跌检测与闪烁 =====
-            val diff = values[i] - prevWeights[i]
-            if (Math.abs(diff) > 0.001f) {
-                weightFlash[i] = 1f
-                prevWeights[i] = values[i]
-            } else {
-                weightFlash[i] = (weightFlash[i] - 0.05f).coerceAtLeast(0f)
-            }
-            val isUp = diff > 0
-            val flash = weightFlash[i]
-
             barPaint.style =
                 Paint.Style.FILL
 
@@ -4962,19 +4908,36 @@ class SnakeView @JvmOverloads constructor(
                 barPaint
             )
 
-            // 柱子颜色：基础色 + 涨跌闪烁色混合
-            val baseColor = when {
-                ratio > 1.3f -> Color.rgb(231, 76, 60)
-                ratio > 1.1f -> Color.rgb(241, 196, 15)
-                ratio < 0.8f -> Color.rgb(52, 152, 219)
-                else -> Color.rgb(46, 204, 113)
-            }
-            val flashColor = if (isUp) Color.GREEN else Color.RED
-            barPaint.color = if (flash > 0f) {
-                blendColor(baseColor, flashColor, flash)
-            } else {
-                baseColor
-            }
+            barPaint.color =
+                when {
+                    ratio > 1.3f ->
+                        Color.rgb(
+                            231,
+                            76,
+                            60
+                        )
+
+                    ratio > 1.1f ->
+                        Color.rgb(
+                            241,
+                            196,
+                            15
+                        )
+
+                    ratio < 0.8f ->
+                        Color.rgb(
+                            52,
+                            152,
+                            219
+                        )
+
+                    else ->
+                        Color.rgb(
+                            46,
+                            204,
+                            113
+                        )
+                }
 
             c.drawRect(
                 x + 3f,
@@ -4983,19 +4946,6 @@ class SnakeView @JvmOverloads constructor(
                 top + h,
                 barPaint
             )
-
-            // 涨跌箭头
-            if (flash > 0.1f) {
-                text.textAlign = Paint.Align.CENTER
-                text.textSize = 14f
-                text.color = if (isUp) Color.GREEN else Color.RED
-                c.drawText(
-                    if (isUp) "↑" else "↓",
-                    x + (barW - 5f) / 2f,
-                    top + 14f,
-                    text
-                )
-            }
 
             text.textAlign =
                 Paint.Align.CENTER
@@ -5032,13 +4982,6 @@ class SnakeView @JvmOverloads constructor(
 
         text.textAlign =
             Paint.Align.LEFT
-    }
-
-    private fun blendColor(c1: Int, c2: Int, t: Float): Int {
-        val r = ((1 - t) * Color.red(c1) + t * Color.red(c2)).toInt()
-        val g = ((1 - t) * Color.green(c1) + t * Color.green(c2)).toInt()
-        val b = ((1 - t) * Color.blue(c1) + t * Color.blue(c2)).toInt()
-        return Color.rgb(r, g, b)
     }
 
     private fun drawLearningCurve(
@@ -5329,11 +5272,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // 最近访问过的状态（用于Q热度图）
-    private val visitedStateSet = java.util.Collections.newSetFromMap(
-        java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
-    )
-
     private fun drawQHeatmap(
         c: Canvas,
         left: Float,
@@ -5345,178 +5283,49 @@ class SnakeView @JvmOverloads constructor(
         val cellW = w / grid
         val cellH = h / grid
 
-        val stateList = synchronized(visitedStateSet) {
-            visitedStateSet.toList().take(100)
-        }
+        barPaint.style = Paint.Style.FILL
+        barPaint.color = Color.rgb(35, 35, 35)
+        c.drawRect(left, top, left + w, top + h, barPaint)
 
+        val sampleList = visitedStates.take(100)
         var maxAbs = 0.001f
-        for (s in stateList) {
+        for (s in sampleList) {
             for (a in 0 until 4) {
-                val idx = qIndex(s, a)
-                val visits = nV2[idx]
-                if (visits > 0) {
-                    val qv = qV2[idx]
-                    if (abs(qv) > maxAbs) maxAbs = abs(qv)
-                }
+                val qv = qRead(s, a)
+                if (abs(qv) > maxAbs) maxAbs = abs(qv)
             }
         }
 
         for (i in 0 until 100) {
-            val x = left + (i % grid) * cellW
-            val y = top + (i / grid) * cellH
+            val px = left + (i % grid) * cellW
+            val py = top + (i / grid) * cellH
 
-            if (i >= stateList.size) {
-                barPaint.color = Color.rgb(35, 35, 40)
+            if (i >= sampleList.size) {
+                barPaint.color = Color.rgb(30, 30, 35)
             } else {
-                val s = stateList[i]
-                var best = -999f
-                var touched = false
+                val s = sampleList[i]
+                var bestQ = -Float.MAX_VALUE
                 for (a in 0 until 4) {
-                    val idx = qIndex(s, a)
-                    if (nV2[idx] > 0) {
-                        touched = true
-                        val qv = qV2[idx]
-                        if (qv > best) best = qv
-                    }
+                    val qv = qRead(s, a)
+                    if (qv > bestQ) bestQ = qv
                 }
-                if (!touched) {
-                    barPaint.color = Color.rgb(35, 35, 40)
-                } else {
-                    val t = (best / maxAbs).coerceIn(-1f, 1f)
-                    barPaint.color = if (t >= 0f) {
-                        Color.rgb(
-                            (40 * (1f - t)).toInt(),
-                            (60 + 195 * t).toInt(),
-                            (40 * (1f - t)).toInt()
-                        )
-                    } else {
-                        val nt = -t
-                        Color.rgb(
-                            (200 + 55 * nt).toInt(),
-                            (60 * (1f - nt)).toInt(),
-                            (60 * (1f - nt)).toInt()
-                        )
-                    }
-                }
-            }
-
-            c.drawRect(
-                x + 1f,
-                y + 1f,
-                x + cellW - 2f,
-                y + cellH - 2f,
-                barPaint
-            )
-        }
-    }
-                }
-            }
-
-            if (touched) {
-                visitedStates++
-            }
-        }
-
-        for (i in 0 until 100) {
-            val s =
-                min(
-                    V2_STATE_COUNT - 1,
-                    i * sampleStep
-                )
-
-            var best =
-                0f
-
-            var touched =
-                false
-
-            for (a in 0 until 4) {
-                val idx =
-                    qIndex(s, a)
-
-                if (nV2[idx] > 0) {
-                    touched = true
-
-                    if (!touched ||
-                        qV2[idx] > best
-                    ) {
-                        best =
-                            qV2[idx]
-                    }
-                }
-            }
-
-            val x =
-                left +
-                    (i % grid) *
-                    cellW
-
-            val y =
-                top +
-                    (i / grid) *
-                    cellH
-
-            if (!touched) {
-                barPaint.color =
+                val t = (bestQ / maxAbs).coerceIn(-1f, 1f)
+                barPaint.color = if (t >= 0f) {
                     Color.rgb(
-                        35,
-                        35,
-                        35
+                        (60 * (1f - t)).toInt(),
+                        (60 + 195 * t).toInt(),
+                        60
                     )
-            } else {
-                val t =
-                    (
-                        best /
-                            maxAbs
-                        ).coerceIn(
-                            -1f,
-                            1f
-                        )
-
-                barPaint.color =
-                    if (t >= 0f) {
-                        Color.rgb(
-                            (
-                                60 *
-                                    (1f - t)
-                                ).toInt(),
-                            (
-                                60 +
-                                    195 * t
-                                ).toInt(),
-                            (
-                                60 *
-                                    (1f - t)
-                                ).toInt()
-                        )
-                    } else {
-                        val nt =
-                            -t
-
-                        Color.rgb(
-                            (
-                                60 +
-                                    195 * nt
-                                ).toInt(),
-                            (
-                                60 *
-                                    (1f - nt)
-                                ).toInt(),
-                            (
-                                60 *
-                                    (1f - nt)
-                                ).toInt()
-                        )
-                    }
+                } else {
+                    val nt = -t
+                    Color.rgb(
+                        (60 + 195 * nt).toInt(),
+                        (60 * (1f - nt)).toInt(),
+                        (60 * (1f - nt)).toInt()
+                    )
+                }
             }
-
-            c.drawRect(
-                x,
-                y,
-                x + cellW - 1f,
-                y + cellH - 1f,
-                barPaint
-            )
+            c.drawRect(px, py, px + cellW - 1f, py + cellH - 1f, barPaint)
         }
     }
 
@@ -5532,11 +5341,11 @@ class SnakeView @JvmOverloads constructor(
 
         val w =
             min(
-                width * 0.95f,
-                680f
+                width * 0.97f,
+                720f
             )
 
-        val h = 720f
+        val h = 760f
 
         val left =
             (width - w) / 2f
@@ -5544,16 +5353,15 @@ class SnakeView @JvmOverloads constructor(
         val top =
             max(
                 12f,
-                height - h - 24f
+                height - h - 12f
             )
 
-        // ===== 背景面板 =====
         panel.color =
             Color.argb(
-                238,
-                10,
-                10,
-                18
+                232,
+                0,
+                0,
+                0
             )
 
         c.drawRoundRect(
@@ -5566,7 +5374,6 @@ class SnakeView @JvmOverloads constructor(
             panel
         )
 
-        // ===== 细边框（融入背景） =====
         border.color =
             Color.argb(
                 60,
@@ -5586,280 +5393,680 @@ class SnakeView @JvmOverloads constructor(
             top,
             left + w,
             top + h,
-            16f,
-            16f,
+            22f,
+            22f,
             border
         )
 
-        // ===== 顶部：世代大标题 =====
-        text.textAlign = Paint.Align.LEFT
-        text.isFakeBoldText = true
-        text.textSize = 32f
-        text.color = Color.rgb(46, 204, 113)
+        text.textAlign =
+            Paint.Align.LEFT
 
-        if (reinforceTraining) {
-            c.drawText(
-                "GEN $generation",
-                left + 16f,
-                top + 40f,
-                text
-            )
-        } else {
-            c.drawText(
-                ai.strategy,
-                left + 16f,
-                top + 40f,
-                text
-            )
-        }
+        text.isFakeBoldText =
+            true
 
-        text.isFakeBoldText = false
-        text.textSize = 13f
-        text.color = Color.GRAY
+        text.textSize =
+            26f
+
+        text.color =
+            Color.WHITE
+
         c.drawText(
-            if (reinforceTraining) "规则 + Q表 + 神经网络 混合进化" else ai.reason,
+            if (reinforceTraining)
+                "混合进化中 · 世代 $generation"
+            else
+                ai.strategy,
             left + 16f,
-            top + 60f,
+            top + 36f,
             text
         )
 
-        // ===== 学习状态行（平均分+epsilon+Q覆盖） =====
-        if (reinforceTraining) {
-            val avgScore = if (recentScores.isNotEmpty()) recentScores.average().toInt() else 0
-            val coveredStates = visitedStateSet.size
-            text.textSize = 13f
-            text.isFakeBoldText = true
-            text.color = Color.rgb(120, 255, 200)
-            c.drawText("均分:$avgScore", left + 16f, top + 76f, text)
-            text.isFakeBoldText = false
-            text.color = Color.rgb(180, 180, 255)
-            c.drawText(" ε:${"%.2f".format(v2Epsilon)}", left + 110f, top + 76f, text)
-            text.color = Color.rgb(255, 200, 100)
-            c.drawText(" Q覆盖:$coveredStates", left + 220f, top + 76f, text)
-        }
+        text.isFakeBoldText =
+            false
 
-        // ===== 三个统计卡片 =====
-        val cardY = top + 80f
-        val cardH = 60f
-        val cardW = (w - 48f) / 3f
-        val cardGap = 8f
+        text.textSize =
+            14f
 
-        // 卡片1：本代最佳
-        panel.color = Color.argb(180, 30, 30, 40)
-        c.drawRoundRect(left + 16f, cardY, left + 16f + cardW, cardY + cardH, 10f, 10f, panel)
-        text.textAlign = Paint.Align.CENTER
-        text.textSize = 11f
-        text.color = Color.rgb(255, 200, 100)
-        c.drawText("本代最佳", left + 16f + cardW/2, cardY + 16f, text)
-        text.textSize = 22f
-        text.isFakeBoldText = true
-        text.color = Color.WHITE
-        c.drawText("${bestScoreThisGen.toInt()}", left + 16f + cardW/2, cardY + 42f, text)
-        text.isFakeBoldText = false
+        text.color =
+            Color.YELLOW
 
-        // 卡片2：历史最佳
-        val cx2 = left + 16f + cardW + cardGap
-        panel.color = Color.argb(180, 30, 30, 40)
-        c.drawRoundRect(cx2, cardY, cx2 + cardW, cardY + cardH, 10f, 10f, panel)
-        text.textSize = 11f
-        text.color = Color.rgb(255, 150, 150)
-        c.drawText("历史最佳", cx2 + cardW/2, cardY + 16f, text)
-        text.textSize = 22f
-        text.isFakeBoldText = true
-        text.color = Color.rgb(255, 215, 0)
-        c.drawText("${bestScoreAllTime.toInt()}", cx2 + cardW/2, cardY + 42f, text)
-        text.isFakeBoldText = false
+        c.drawText(
+            if (reinforceTraining) {
+                "规则过滤 + Q表 + 神经网络 自我迭代"
+            } else {
+                ai.reason
+            },
+            left + 16f,
+            top + 58f,
+            text
+        )
 
-        // 卡片3：总局数
-        val cx3 = left + 16f + (cardW + cardGap) * 2
-        panel.color = Color.argb(180, 30, 30, 40)
-        c.drawRoundRect(cx3, cardY, cx3 + cardW, cardY + cardH, 10f, 10f, panel)
-        text.textSize = 11f
-        text.color = Color.rgb(150, 200, 255)
-        c.drawText("总局数", cx3 + cardW/2, cardY + 16f, text)
-        text.textSize = 22f
-        text.isFakeBoldText = true
-        text.color = Color.WHITE
-        c.drawText("$totalGames", cx3 + cardW/2, cardY + 42f, text)
-        text.isFakeBoldText = false
+        val gaugeCX =
+            left + 58f
 
-        text.textAlign = Paint.Align.LEFT
+        val gaugeCY =
+            top + 116f
 
-        // ===== 个体进度条 =====
-        if (reinforceTraining) {
-            val progY = cardY + cardH + 16f
-            text.textSize = 12f
-            text.color = Color.LTGRAY
-            c.drawText("进化进度", left + 16f, progY, text)
-            c.drawText("$currentAgentIndex / $POPULATION_SIZE", left + w - 16f, progY, text)
+        drawDangerGauge(
+            c,
+            gaugeCX,
+            gaugeCY,
+            42f,
+            ai.danger
+        )
 
-            val progBarX = left + 16f
-            val progBarW = w - 32f
-            val progBarH = 10f
-            panel.color = Color.rgb(40, 40, 50)
-            c.drawRoundRect(progBarX, progY + 6f, progBarX + progBarW, progY + 6f + progBarH, 5f, 5f, panel)
-            panel.color = Color.rgb(46, 204, 113)
-            val progRatio = currentAgentIndex.toFloat() / POPULATION_SIZE
-            c.drawRoundRect(progBarX, progY + 6f, progBarX + progBarW * progRatio, progY + 6f + progBarH, 5f, 5f, panel)
+        text.textAlign =
+            Paint.Align.CENTER
 
-            // Q/NN权重条
-            val qnY = progY + 28f
-            text.textSize = 12f
-            text.color = Color.LTGRAY
-            c.drawText("Q表 ${(qWeight*100).toInt()}%", left + 16f, qnY, text)
-            c.drawText("神经 ${(nnWeight*100).toInt()}%", left + w - 16f, qnY, text)
-            panel.color = Color.rgb(40, 40, 50)
-            c.drawRoundRect(progBarX, qnY + 6f, progBarX + progBarW, qnY + 6f + progBarH, 5f, 5f, panel)
-            panel.color = Color.rgb(155, 89, 182)
-            c.drawRoundRect(progBarX, qnY + 6f, progBarX + progBarW * qWeight, qnY + 6f + progBarH, 5f, 5f, panel)
-        }
+        text.isFakeBoldText =
+            true
 
-        // ===== 危险仪表盘（非训练模式保留） =====
-        if (!reinforceTraining) {
-            val gaugeCX = left + 50f
-            val gaugeCY = cardY + cardH + 50f
-            drawDangerGauge(c, gaugeCX, gaugeCY, 36f, ai.danger)
-            text.textAlign = Paint.Align.CENTER
-            text.isFakeBoldText = true
-            text.textSize = 22f
-            text.color = Color.WHITE
-            c.drawText("${ai.danger}", gaugeCX, gaugeCY + 8f, text)
-            text.isFakeBoldText = false
-            text.textSize = 11f
-            text.color = Color.LTGRAY
-            c.drawText("危险", gaugeCX, gaugeCY + 24f, text)
-            text.textAlign = Paint.Align.LEFT
-        }
+        text.textSize =
+            26f
 
-        // ===== 权重柱状图 =====
-        val wbY = top + 200f
-        text.isFakeBoldText = true
-        text.textSize = 13f
-        text.color = Color.rgb(255, 200, 100)
-        c.drawText("【权重分布】", left + 16f, wbY, text)
-        text.isFakeBoldText = false
-        drawWeightBars(c, left + 16f, wbY + 10f, w - 32f, 70f)
+        text.color =
+            Color.WHITE
 
-        // ===== V2学习行 =====
-        val learnY = top + 300f
-        text.isFakeBoldText = true
-        text.textSize = 13f
-        text.color = Color.rgb(255, 150, 255)
-        c.drawText("【V2学习】", left + 16f, learnY, text)
-        text.isFakeBoldText = false
-        text.color = Color.WHITE
-        text.textSize = 13f
-        c.drawText("$deathCause → $lastLearnAction", left + 110f, learnY, text)
+        c.drawText(
+            "${ai.danger}",
+            gaugeCX,
+            gaugeCY + 9f,
+            text
+        )
 
-        // ===== 四方向安全条（非训练模式） =====
-        var barY = learnY + 18f
-        val barStartX = left + 110f
-        val barEndX = left + w - 16f
-        val barW = barEndX - barStartX
+        text.isFakeBoldText =
+            false
 
-        if (!reinforceTraining) {
-            text.isFakeBoldText = true
-            text.textSize = 13f
-            text.color = Color.rgb(255, 200, 100)
-            c.drawText("【方向安全】", left + 16f, barY, text)
-            text.isFakeBoldText = false
-            barY += 8f
+        text.textSize =
+            12f
 
-            val dirNames = listOf("上", "下", "左", "右")
-            ai.candidates.forEachIndexed { idx, cand ->
-                text.textSize = 16f
-                text.color = if (!cand.legal) Color.GRAY
-                    else if (cand.d == ai.chosen) Color.CYAN
-                    else Color.WHITE
-                c.drawText(dirNames[idx], left + 16f, barY + 18f, text)
+        text.color =
+            Color.LTGRAY
 
-                if (!cand.legal) {
-                    text.textSize = 12f
-                    text.color = Color.GRAY
-                    c.drawText("非法", barStartX, barY + 18f, text)
-                } else {
-                    val regionRatio = if (snake.isNotEmpty()) cand.region.toFloat() / snake.size else 0f
-                    val safeScore = when {
-                        cand.tailOk && regionRatio >= 1.5f -> 1.0f
-                        cand.tailOk && regionRatio >= 1.0f -> 0.75f
-                        regionRatio >= 1.0f -> 0.5f
-                        regionRatio >= 0.6f -> 0.3f
-                        else -> 0.15f
-                    }
-                    barPaint.color = Color.rgb(40, 40, 40)
-                    barPaint.style = Paint.Style.FILL
-                    c.drawRoundRect(barStartX, barY, barEndX, barY + 22f, 4f, 4f, barPaint)
-                    barPaint.color = when {
-                        safeScore >= 0.9f -> Color.rgb(46, 204, 113)
-                        safeScore >= 0.7f -> Color.rgb(241, 196, 15)
-                        safeScore >= 0.5f -> Color.rgb(230, 126, 34)
-                        else -> Color.rgb(231, 76, 60)
-                    }
-                    c.drawRoundRect(barStartX, barY, barStartX + barW * safeScore, barY + 22f, 4f, 4f, barPaint)
-                    text.textSize = 12f
-                    text.color = Color.WHITE
-                    c.drawText("空${cand.region} 尾${if(cand.tailOk)"Y" else "N"} 食${if(cand.foodDist<0)"∞" else cand.foodDist} Q${"%.2f".format(cand.qValue)}",
-                        barStartX + 6f, barY + 16f, text)
-                }
-                barY += 26f
+        c.drawText(
+            "危险",
+            gaugeCX,
+            gaugeCY + 28f,
+            text
+        )
+
+        text.textAlign =
+            Paint.Align.LEFT
+
+        text.textSize =
+            16f
+
+        text.color =
+            Color.WHITE
+
+        c.drawText(
+            "局数 $totalGames",
+            left + 118f,
+            top + 86f,
+            text
+        )
+
+        val avg =
+            if (recentScores.isEmpty()) {
+                0f
+            } else {
+                recentScores
+                    .average()
+                    .toFloat()
             }
+
+        c.drawText(
+            "近50均分 ${
+                "%.0f".format(avg)
+            }   最佳 $bestRecentScore",
+            left + 118f,
+            top + 110f,
+            text
+        )
+
+        val threadInfo =
+            if (reinforceTraining) {
+                "${trainThreads.size} 线程"
+            } else {
+                "单局"
+            }
+
+        c.drawText(
+            "模式 $threadInfo   主蛇长 ${snake.size}",
+            left + 118f,
+            top + 134f,
+            text
+        )
+
+        val wbY =
+            top + 175f
+
+        text.isFakeBoldText =
+            true
+
+        text.textSize =
+            14f
+
+        text.color =
+            Color.rgb(
+                255,
+                200,
+                100
+            )
+
+        c.drawText(
+            "【权重柱状图】",
+            left + 16f,
+            wbY,
+            text
+        )
+
+        text.isFakeBoldText =
+            false
+
+        drawWeightBars(
+            c,
+            left + 16f,
+            wbY + 8f,
+            w - 32f,
+            66f
+        )
+
+        val learnY =
+            top + 290f
+
+        text.isFakeBoldText =
+            true
+
+        text.textSize =
+            14f
+
+        text.color =
+            Color.rgb(
+                255,
+                150,
+                255
+            )
+
+        c.drawText(
+            "【V2学习】",
+            left + 16f,
+            learnY,
+            text
+        )
+
+        text.isFakeBoldText =
+            false
+
+        text.color =
+            Color.WHITE
+
+        c.drawText(
+            "$deathCause -> $lastLearnAction",
+            left + 118f,
+            learnY,
+            text
+        )
+
+        val barStartX =
+            left + 118f
+
+        val barEndX =
+            left + w - 16f
+
+        val barW =
+            barEndX - barStartX
+
+        var barY =
+            top + 318f
+
+        if (!reinforceTraining) {
+            text.isFakeBoldText =
+                true
+
+            text.textSize =
+                14f
+
+            text.color =
+                Color.rgb(
+                    255,
+                    200,
+                    100
+                )
+
+            c.drawText(
+                "【四方向安全 / Q】",
+                left + 16f,
+                barY,
+                text
+            )
+
+            text.isFakeBoldText =
+                false
+
+            barY += 10f
+
+            val dirNames =
+                listOf(
+                    "UP",
+                    "DN",
+                    "LF",
+                    "RT"
+                )
+
+            ai.candidates
+                .forEachIndexed {
+                    idx,
+                    cand ->
+                    text.textSize =
+                        18f
+
+                    text.color =
+                        if (!cand.legal) {
+                            Color.GRAY
+                        } else if (
+                            cand.d ==
+                            ai.chosen
+                        ) {
+                            Color.CYAN
+                        } else {
+                            Color.WHITE
+                        }
+
+                    c.drawText(
+                        dirNames[idx],
+                        left + 16f,
+                        barY + 19f,
+                        text
+                    )
+
+                    if (!cand.legal) {
+                        text.textSize =
+                            14f
+
+                        text.color =
+                            Color.GRAY
+
+                        c.drawText(
+                            "非法",
+                            barStartX,
+                            barY + 19f,
+                            text
+                        )
+                    } else {
+                        val regionRatio =
+                            if (snake.isNotEmpty()) {
+                                cand.region.toFloat() /
+                                    snake.size
+                            } else {
+                                0f
+                            }
+
+                        val safeScore =
+                            when {
+                                cand.tailOk &&
+                                    regionRatio >= 1.5f ->
+                                    1.0f
+
+                                cand.tailOk &&
+                                    regionRatio >= 1.0f ->
+                                    0.75f
+
+                                regionRatio >= 1.0f ->
+                                    0.5f
+
+                                regionRatio >= 0.6f ->
+                                    0.3f
+
+                                else ->
+                                    0.15f
+                            }
+
+                        barPaint.color =
+                            Color.rgb(
+                                40,
+                                40,
+                                40
+                            )
+
+                        barPaint.style =
+                            Paint.Style.FILL
+
+                        c.drawRoundRect(
+                            barStartX,
+                            barY,
+                            barEndX,
+                            barY + 24f,
+                            4f,
+                            4f,
+                            barPaint
+                        )
+
+                        val barColor =
+                            when {
+                                safeScore >= 0.9f ->
+                                    Color.rgb(
+                                        46,
+                                        204,
+                                        113
+                                    )
+
+                                safeScore >= 0.7f ->
+                                    Color.rgb(
+                                        241,
+                                        196,
+                                        15
+                                    )
+
+                                safeScore >= 0.5f ->
+                                    Color.rgb(
+                                        230,
+                                        126,
+                                        34
+                                    )
+
+                                else ->
+                                    Color.rgb(
+                                        231,
+                                        76,
+                                        60
+                                    )
+                            }
+
+                        barPaint.color =
+                            barColor
+
+                        c.drawRoundRect(
+                            barStartX,
+                            barY,
+                            barStartX +
+                                barW *
+                                safeScore,
+                            barY + 24f,
+                            4f,
+                            4f,
+                            barPaint
+                        )
+
+                        text.textSize =
+                            13f
+
+                        text.color =
+                            Color.WHITE
+
+                        c.drawText(
+                            "空间${cand.region} 尾${
+                                if (cand.tailOk) "Y"
+                                else "N"
+                            } 食${
+                                if (cand.foodDist < 0)
+                                    "∞"
+                                else
+                                    cand.foodDist
+                            } Q${
+                                "%.2f".format(
+                                    cand.qValue
+                                )
+                            }",
+                            barStartX + 8f,
+                            barY + 18f,
+                            text
+                        )
+                    }
+
+                    barY += 28f
+                }
         } else {
-            barY = learnY + 18f
+            barY =
+                top + 318f
         }
 
-        // ===== 学习曲线 + 死亡饼图 =====
-        val chartY = barY + 12f
-        val chartH = 80f
-        val curveX = left + 16f
-        val curveW = (w - 32f) * 0.58f
+        val chartY =
+            barY + 20f
 
-        text.isFakeBoldText = true
-        text.textSize = 13f
-        text.color = Color.rgb(120, 255, 180)
-        c.drawText("【分数曲线】", curveX, chartY, text)
-        text.isFakeBoldText = false
-        drawLearningCurve(c, curveX, chartY + 6f, curveW, chartH)
+        val chartH =
+            72f
 
-        val pieCX = left + w - 100f
-        val pieCY = chartY + chartH / 2f + 10f
-        val pieR = 30f
+        val curveX =
+            left + 16f
 
-        text.isFakeBoldText = true
-        text.textSize = 13f
-        text.color = Color.rgb(255, 150, 150)
-        c.drawText("【死因】", pieCX - 30f, chartY, text)
-        text.isFakeBoldText = false
-        drawDeathPie(c, pieCX, pieCY, pieR)
+        val curveW =
+            (w - 32f) * 0.55f
 
-        text.textSize = 11f
-        text.color = Color.rgb(255, 100, 100)
-        c.drawText("墙 $deathWall", pieCX + 36f, pieCY - 14f, text)
-        text.color = Color.rgb(100, 150, 255)
-        c.drawText("自 $deathSelf", pieCX + 36f, pieCY + 2f, text)
-        text.color = Color.rgb(255, 200, 100)
-        c.drawText("困 $deathTrap", pieCX + 36f, pieCY + 18f, text)
+        text.isFakeBoldText =
+            true
 
-        // ===== Q表热度图 =====
-        val heatY = chartY + chartH + 24f
-        text.isFakeBoldText = true
-        text.textSize = 13f
-        text.color = Color.rgb(200, 180, 255)
-        c.drawText("【Q表热度】", left + 16f, heatY, text)
-        text.isFakeBoldText = false
-        drawQHeatmap(c, left + 16f, heatY + 8f, w - 32f, 60f)
+        text.textSize =
+            14f
 
-        // ===== 底部信息行 =====
-        val infoY = heatY + 56f + 20f
-        text.textSize = 12f
-        text.color = Color.LTGRAY
-        text.textAlign = Paint.Align.LEFT
+        text.color =
+            Color.rgb(
+                120,
+                255,
+                180
+            )
 
-        val threadInfo = if (reinforceTraining) "${trainThreads.size}线程" else "单局"
-        c.drawText("$threadInfo  蛇长${snake.size}  步数:$v2LearningSteps", left + 16f, infoY, text)
-        c.drawText("攻击x${"%.2f".format(aggression)}  安全x${"%.2f".format(safetyMargin)}", left + 16f, infoY + 16f, text)
+        c.drawText(
+            "【历史分数】",
+            curveX,
+            chartY,
+            text
+        )
 
-        // AI学习状态提示
+        text.isFakeBoldText =
+            false
+
+        drawLearningCurve(
+            c,
+            curveX,
+            chartY + 8f,
+            curveW,
+            chartH
+        )
+
+        val pieCX =
+            left + w - 130f
+
+        val pieCY =
+            chartY +
+                chartH / 2f +
+                14f
+
+        val pieR =
+            34f
+
+        text.isFakeBoldText =
+            true
+
+        text.textSize =
+            14f
+
+        text.color =
+            Color.rgb(
+                255,
+                150,
+                150
+            )
+
+        c.drawText(
+            "【死亡统计】",
+            pieCX - 52f,
+            chartY,
+            text
+        )
+
+        text.isFakeBoldText =
+            false
+
+        drawDeathPie(
+            c,
+            pieCX,
+            pieCY,
+            pieR
+        )
+
+        text.textSize =
+            13f
+
+        text.color =
+            Color.rgb(
+                255,
+                100,
+                100
+            )
+
+        c.drawText(
+            "W $deathWall",
+            pieCX + 42f,
+            pieCY - 16f,
+            text
+        )
+
+        text.color =
+            Color.rgb(
+                100,
+                150,
+                255
+            )
+
+        c.drawText(
+            "S $deathSelf",
+            pieCX + 42f,
+            pieCY + 4f,
+            text
+        )
+
+        text.color =
+            Color.rgb(
+                255,
+                200,
+                100
+            )
+
+        c.drawText(
+            "T $deathTrap",
+            pieCX + 42f,
+            pieCY + 24f,
+            text
+        )
+
+        val heatY =
+            chartY +
+                chartH +
+                30f
+
+        text.textAlign =
+            Paint.Align.LEFT
+
+        text.isFakeBoldText =
+            true
+
+        text.textSize =
+            14f
+
+        text.color =
+            Color.rgb(
+                200,
+                180,
+                255
+            )
+
+        c.drawText(
+            "【V2 Q表热度】",
+            left + 16f,
+            heatY,
+            text
+        )
+
+        text.isFakeBoldText =
+            false
+
+        drawQHeatmap(
+            c,
+            left + 16f,
+            heatY + 8f,
+            w - 32f,
+            66f
+        )
+
+        val infoY =
+            heatY +
+                8f +
+                66f +
+                22f
+
+        var visited =
+            0
+
+        var sumQ =
+            0f
+
+        var cntQ =
+            0
+
+        val sampleStep =
+            max(
+                1,
+                V2_STATE_COUNT /
+                    400
+            )
+
+        for (
+            s in
+            0 until
+                V2_STATE_COUNT
+                step sampleStep
+        ) {
+            for (a in 0 until 4) {
+                val idx =
+                    qIndex(
+                        s,
+                        a
+                    )
+
+                if (nV2[idx] > 0) {
+                    visited++
+                    sumQ +=
+                        qV2[idx]
+                    cntQ++
+                }
+            }
+        }
+
+        val avgQ =
+            if (cntQ > 0) {
+                sumQ / cntQ
+            } else {
+                0f
+            }
+
+        text.textSize =
+            14f
+
+        text.color =
+            Color.WHITE
+
+        text.textAlign =
+            Paint.Align.LEFT
+
         if (reinforceTraining) {
+            c.drawText(
+                "世代 $generation   当前个体 $currentAgentIndex/$POPULATION_SIZE   Q覆盖${visitedStates.size}",
+                left + 16f,
+                infoY,
+                text
+            )
+            c.drawText(
+                "本代最佳 ${"%.0f".format(bestScoreThisGen)}   历史最佳 ${"%.0f".format(bestScoreAllTime)}",
+                left + 16f,
+                infoY + 20f,
+                text
+            )
+            c.drawText(
+                "Q表权重 ${"%.2f".format(qWeight)}   神经网络权重 ${"%.2f".format(nnWeight)}",
+                left + 16f,
+                infoY + 40f,
+                text
+            )
             val learnStatus = when {
                 generation < 3 -> "🧬 初始化种群，随机试错中..."
                 v2Epsilon > 0.15f -> "🔍 探索阶段：尝试新策略"
@@ -5868,34 +6075,155 @@ class SnakeView @JvmOverloads constructor(
                 bestScoreThisGen < bestScoreAllTime * 0.3f && bestScoreAllTime > 1000 -> "⚡ 瓶颈期，等待变异突破"
                 else -> "📊 正常进化中..."
             }
-            text.textSize = 12f
+            text.textSize = 13f
             text.isFakeBoldText = true
             text.color = Color.rgb(100, 220, 255)
-            c.drawText(learnStatus, left + 16f, infoY + 32f, text)
+            c.drawText(learnStatus, left + 16f, infoY + 60f, text)
             text.isFakeBoldText = false
+            text.color = Color.WHITE
+            text.textSize = 14f
+        } else {
+            c.drawText(
+                "局数 $totalGames   近50均分 ${
+                    "%.0f".format(avg)
+                }   最佳 $bestRecentScore",
+                left + 16f,
+                infoY,
+                text
+            )
+
+            c.drawText(
+                "V2覆盖 ${
+                    visited
+                }   平均Q ${
+                    "%.2f".format(avgQ)
+                }   学习步 ${
+                    v2LearningSteps
+                }",
+                left + 16f,
+                infoY + 20f,
+                text
+            )
+
+            c.drawText(
+                "ε ${
+                    "%.3f".format(
+                        v2Epsilon
+                    )
+                }   攻击x${
+                    "%.2f".format(
+                        aggression
+                    )
+                }   安全x${
+                    "%.2f".format(
+                        safetyMargin
+                    )
+                }",
+                left + 16f,
+                infoY + 40f,
+                text
+            )
         }
 
-        // ===== 进化按钮 =====
-        val btnW = 140f
-        val btnH = 38f
-        val btnLeft = left + w - btnW - 16f
-        val btnTop = infoY - 10f
+        if (
+            gameOver &&
+            !reinforceTraining
+        ) {
+            text.color =
+                Color.RED
 
-        reinforceButtonRect.set(btnLeft, btnTop, btnLeft + btnW, btnTop + btnH)
-        val btnColor = if (reinforceTraining) Color.rgb(231, 76, 60) else Color.rgb(46, 204, 113)
-        panel.color = btnColor
-        c.drawRoundRect(reinforceButtonRect, 10f, 10f, panel)
+            text.isFakeBoldText =
+                true
 
-        text.textAlign = Paint.Align.CENTER
-        text.isFakeBoldText = true
-        text.textSize = 16f
-        text.color = Color.WHITE
-        c.drawText(if (reinforceTraining) "停止进化" else "开始进化",
-            reinforceButtonRect.centerX(), reinforceButtonRect.centerY() + 6f, text)
-        text.isFakeBoldText = false
-        text.textAlign = Paint.Align.LEFT
+            text.textSize =
+                16f
+
+            c.drawText(
+                "死亡原因：$deathCause",
+                left + 16f,
+                infoY + 62f,
+                text
+            )
+
+            text.isFakeBoldText =
+                false
+        }
+
+        val btnW =
+            160f
+
+        val btnH =
+            42f
+
+        val btnLeft =
+            left +
+                w -
+                btnW -
+                16f
+
+        val btnTop =
+            infoY + 48f
+
+        reinforceButtonRect.set(
+            btnLeft,
+            btnTop,
+            btnLeft + btnW,
+            btnTop + btnH
+        )
+
+        val btnColor =
+            if (reinforceTraining) {
+                Color.rgb(
+                    231,
+                    76,
+                    60
+                )
+            } else {
+                Color.rgb(
+                    46,
+                    204,
+                    113
+                )
+            }
+
+        panel.color =
+            btnColor
+
+        c.drawRoundRect(
+            reinforceButtonRect,
+            12f,
+            12f,
+            panel
+        )
+
+        text.textAlign =
+            Paint.Align.CENTER
+
+        text.isFakeBoldText =
+            true
+
+        text.textSize =
+            18f
+
+        text.color =
+            Color.WHITE
+
+        c.drawText(
+            if (reinforceTraining)
+                "停止进化"
+            else
+                "神经进化",
+            reinforceButtonRect.centerX(),
+            reinforceButtonRect.centerY() + 7f,
+            text
+        )
+
+        text.isFakeBoldText =
+            false
+
+        text.textAlign =
+            Paint.Align.LEFT
     }
-
 
     private fun drawGameOver(
         c: Canvas
