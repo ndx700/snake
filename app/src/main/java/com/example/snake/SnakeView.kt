@@ -15,6 +15,12 @@ import android.util.AttributeSet
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
@@ -143,19 +149,24 @@ class SnakeView @JvmOverloads constructor(
     private var ai = Snapshot(chosen = dir)
 
     private val sharedLock = Any()
+    private val evolveLock = Any()
 
     // ===== 神经进化新增变量 =====
     private val POPULATION_SIZE = 50
+    @Volatile
     private var generation = 0
     private val population = MutableList(POPULATION_SIZE) { TinyBrain() }
+    @Volatile
     private var currentAgentIndex = 0
     private val currentScores = FloatArray(POPULATION_SIZE)
+    @Volatile
     private var qWeight = 1.0f
+    @Volatile
     private var nnWeight = 0.0f
+    @Volatile
     private var bestScoreThisGen = 0f
+    @Volatile
     private var bestScoreAllTime = 0f
-    // 【新增】用来在 HUD 展示繁殖过程
-    private var generationLog = "等待第一条蛇出生..."
     // =============================
 
     /*
@@ -198,22 +209,6 @@ class SnakeView @JvmOverloads constructor(
     /*
      * ============================================================
      * V2 REAL RL CORE
-     *
-     * state:
-     * food direction       4
-     * danger mask          16
-     * mobility              5
-     * free-space bucket     4
-     * hunger bucket         5
-     * length bucket         8
-     * tail reachable        2
-     * heading               4
-     *
-     * 4*16*5*4*5*8*2*4 = 204800 states
-     *
-     * 4 actions / state.
-     *
-     * ~= 819200 floats ~= 3.1 MB
      * ============================================================
      */
 
@@ -359,10 +354,6 @@ class SnakeView @JvmOverloads constructor(
 
         val e = v2Epsilon
 
-        /*
-         * Slowly reduce exploration instead of killing it.
-         * Reinforcement training continues to explore occasionally.
-         */
         if (v2LearningSteps > 0L && v2LearningSteps % 4096L == 0L) {
             v2Epsilon = max(
                 EPS_MIN,
@@ -415,10 +406,22 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun evolveNextGeneration() {
-        val sortedIndices = (0 until POPULATION_SIZE).sortedByDescending { currentScores[it] }
-        val bestBrains = sortedIndices.take(10).map { population[it] }
+        val scoresCopy = synchronized(sharedLock) {
+            currentScores.copyOf()
+        }
 
-        bestScoreThisGen = currentScores[sortedIndices[0]]
+        val sortedIndices = (0 until POPULATION_SIZE)
+            .filter { !scoresCopy[it].isNaN() }
+            .sortedByDescending { scoresCopy[it] }
+
+        val bestBrains = if (sortedIndices.isNotEmpty()) {
+            sortedIndices.take(10).map { population[it] }
+        } else {
+            (0 until 10).map { population[it] }
+        }
+
+        val bestScore = if (sortedIndices.isNotEmpty()) scoresCopy[sortedIndices[0]] else 0f
+        bestScoreThisGen = bestScore
         if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
 
         for (i in 0 until POPULATION_SIZE) {
@@ -430,16 +433,28 @@ class SnakeView @JvmOverloads constructor(
                 parent.breed(child)
                 population[i] = child
             }
-            currentScores[i] = 0f
         }
+
+        synchronized(sharedLock) {
+            for (i in 0 until POPULATION_SIZE) {
+                currentScores[i] = 0f
+            }
+        }
+
         generation++
-
-        // 【新增】记录繁殖日志给 HUD 展示
-        generationLog = "第${generation}代诞生: 最佳${bestScoreThisGen.toInt()}分, 繁衍40条新蛇"
-
         val nnRatio = (generation / 50f).coerceIn(0f, 0.8f)
         nnWeight = nnRatio
         qWeight = 1.0f - nnRatio
+
+        // 每5代自动保存一次进度
+        if (generation % 5 == 0) {
+            Thread {
+                saveTrainingState()
+            }.apply {
+                isDaemon = true
+                start()
+            }
+        }
     }
 
     private fun buildInputs(head: P, target: P, currentBody: ArrayDeque<P>): FloatArray {
@@ -851,6 +866,7 @@ class SnakeView @JvmOverloads constructor(
         updateCurrentSkin()
         updateCurrentBoard()
 
+        loadTrainingState()
         reset()
     }
 
@@ -916,54 +932,95 @@ class SnakeView @JvmOverloads constructor(
 
         trainThreads.clear()
 
-        generation = 0
+        // 初始化进化参数
         currentAgentIndex = 0
         bestScoreThisGen = 0f
-        bestScoreAllTime = 0f
-        qWeight = 1.0f
-        nnWeight = 0.0f
-        generationLog = "等待第一条蛇出生..."
         for (i in 0 until POPULATION_SIZE) {
-            population[i] = TinyBrain()
             currentScores[i] = 0f
         }
 
         for (i in 0 until TRAIN_THREADS) {
             val t = Thread(
                 {
-                    val game = TrainGame(seed = System.nanoTime() + i * 999983L)
+                    val game =
+                        TrainGame(
+                            seed =
+                                System.nanoTime() +
+                                    i * 999983L
+                        )
+
                     while (trainActive) {
-                        val agentId = synchronized(sharedLock) {
-                            if (currentAgentIndex >= POPULATION_SIZE) {
-                                evolveNextGeneration()
-                                currentAgentIndex = 0
+                        var agentId = -1
+                        
+                        // 获取当前需要训练的个体 ID
+                        synchronized(sharedLock) {
+                            if (currentAgentIndex < POPULATION_SIZE) {
+                                agentId = currentAgentIndex++
                             }
-                            val id = currentAgentIndex++
-                            id
                         }
-                        game.playOneGame(agentId)
+
+                        // 如果当前代所有个体都跑完了，则触发进化
+                        if (agentId == -1) {
+                            synchronized(evolveLock) {
+                                if (currentAgentIndex >= POPULATION_SIZE) {
+                                    evolveNextGeneration()
+                                    currentAgentIndex = 0
+                                }
+                            }
+                            continue
+                        }
+
+                        // 让游戏用这个个体去跑，并记录得分
+                        try {
+                            game.playOneGame(agentId)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
                     }
                 },
                 "snake-train-$i"
             )
+
             t.isDaemon = true
             t.priority = Thread.MAX_PRIORITY
             t.start()
+
             trainThreads.add(t)
         }
     }
 
-    // 【修复】移除 t.join() 防止 UI 线程卡死
     private fun stopParallelTraining() {
         if (!trainActive) return
+
         trainActive = false
         reinforceTraining = false
         trainingMode = false
 
+        val deadline =
+            System.currentTimeMillis() + 2000L
+
+        for (t in trainThreads) {
+            try {
+                val remain =
+                    deadline -
+                        System.currentTimeMillis()
+
+                if (remain > 0) {
+                    t.join(remain)
+                }
+            } catch (_: Throwable) {
+            }
+        }
+
         trainThreads.clear()
 
         saveLearning()
-        if (running) bgm?.start()
+        saveTrainingState()
+
+        if (running) {
+            bgm?.start()
+        }
+
         reset()
     }
 
@@ -1732,10 +1789,6 @@ class SnakeView @JvmOverloads constructor(
             training &&
             Random.nextFloat() < epsilon
         ) {
-            /*
-             * 探索也不能突破安全屏蔽：
-             * 优先从尾巴可达/空间足够的动作中随机。
-             */
             val safe =
                 legal.filter {
                     it.tailOk ||
@@ -3183,11 +3236,78 @@ class SnakeView @JvmOverloads constructor(
      * =========================
      * PERSISTENCE
      *
-     * V2 table is intentionally
-     * not persisted. Reinstalling
-     * the app starts fresh.
+     * Training state (Population + Q table) is now persisted
+     * to internal storage to allow resuming after app restart.
      * =========================
      */
+
+    private fun saveTrainingState() {
+        try {
+            val file = context.getFileStreamPath("snake_training.dat")
+            
+            val genCopy: Int
+            val scoreCopy: Float
+            val qCopy: FloatArray
+            val nCopy: IntArray
+            val popCopy: List<TinyBrain>
+
+            synchronized(sharedLock) {
+                genCopy = generation
+                scoreCopy = bestScoreAllTime
+                qCopy = qV2.copyOf()
+                nCopy = nV2.copyOf()
+                popCopy = population.map { brain ->
+                    TinyBrain().apply {
+                        System.arraycopy(brain.w1, 0, w1, 0, brain.w1.size)
+                        System.arraycopy(brain.w2, 0, w2, 0, brain.w2.size)
+                    }
+                }
+            }
+
+            DataOutputStream(BufferedOutputStream(FileOutputStream(file))).use { out ->
+                out.writeInt(genCopy)
+                out.writeFloat(scoreCopy)
+                for (brain in popCopy) {
+                    for (v in brain.w1) out.writeFloat(v)
+                    for (v in brain.w2) out.writeFloat(v)
+                }
+                for (q in qCopy) out.writeFloat(q)
+                for (n in nCopy) out.writeInt(n)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun loadTrainingState() {
+        try {
+            val file = context.getFileStreamPath("snake_training.dat")
+            if (!file.exists()) return
+            
+            DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
+                generation = input.readInt()
+                bestScoreAllTime = input.readFloat()
+                for (i in 0 until POPULATION_SIZE) {
+                    val brain = TinyBrain()
+                    for (j in brain.w1.indices) brain.w1[j] = input.readFloat()
+                    for (j in brain.w2.indices) brain.w2[j] = input.readFloat()
+                    population[i] = brain
+                }
+                for (i in qV2.indices) qV2[i] = input.readFloat()
+                for (i in nV2.indices) nV2[i] = input.readInt()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            // 如果读取失败，重置训练状态
+            generation = 0
+            bestScoreAllTime = 0f
+            for (i in 0 until POPULATION_SIZE) {
+                population[i] = TinyBrain()
+            }
+            java.util.Arrays.fill(qV2, 0f)
+            java.util.Arrays.fill(nV2, 0)
+        }
+    }
 
     private fun saveLearning() {
         synchronized(sharedLock) {
@@ -5149,11 +5269,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    /*
-     * V2 heatmap:
-     * 不再显示旧的 100×4 Q 表，
-     * 改为显示 Q 表整体状态覆盖/平均价值。
-     */
     private fun drawQHeatmap(
         c: Canvas,
         left: Float,
@@ -5317,17 +5432,6 @@ class SnakeView @JvmOverloads constructor(
             )
         }
     }
-
-    /*
-     * =========================
-     * DEBUG HUD
-     * =========================
-     *
-     * 位置、尺寸保持原版：
-     * width = min(width*0.97,720)
-     * height = 760
-     * bottom = height-12
-     */
 
     private fun drawDebug(
         c: Canvas
@@ -6082,20 +6186,6 @@ class SnakeView @JvmOverloads constructor(
                 infoY + 40f,
                 text
             )
-
-            // 【新增】在右侧空白区展示每一代最高分与繁殖过程
-            val logX = left + w / 2f + 30f
-            text.textSize = 15f
-            text.color = Color.CYAN
-            text.isFakeBoldText = true
-            c.drawText("【进化繁衍日志】", logX, infoY, text)
-            
-            text.isFakeBoldText = false
-            text.color = Color.WHITE
-            text.textSize = 14f
-            c.drawText("本代最高分: ${"%.0f".format(bestScoreThisGen)} 分", logX, infoY + 22f, text)
-            c.drawText(generationLog, logX, infoY + 42f, text)
-
         } else {
             c.drawText(
                 "局数 $totalGames   近50均分 ${
@@ -6476,6 +6566,8 @@ class SnakeView @JvmOverloads constructor(
             aiPool.shutdownNow()
         } catch (_: Throwable) {
         }
+
+        saveTrainingState()
     }
 
     /*
@@ -6529,10 +6621,6 @@ class SnakeView @JvmOverloads constructor(
         val parDir =
             arrayOfNulls<P>(total)
 
-        /*
-         * Each training board keeps
-         * its own previous transition.
-         */
         private var prevState =
             -1
 
@@ -6582,9 +6670,13 @@ class SnakeView @JvmOverloads constructor(
                 iter++
             }
 
-            // 【修复】无论跑满超时还是死掉，都要记录成绩
-            if (trainActive) {
-                gDie(if (gOver) lastDeathCause else "TIMEOUT")
+            // 防止无限循环或超时未死亡的情况
+            if (trainActive && !gOver) {
+                lastDeathCause = "TIMEOUT"
+                gOver = true
+                gDie(lastDeathCause)
+            } else if (gOver && trainActive) {
+                gDie(lastDeathCause)
             }
         }
 
@@ -6839,11 +6931,6 @@ class SnakeView @JvmOverloads constructor(
             prevAction = -1
         }
 
-        /*
-         * Training action:
-         * same safety shield + same
-         * V2 Q table as visible game.
-         */
         fun gChooseMove(
             state: Int
         ): P {
@@ -6861,10 +6948,6 @@ class SnakeView @JvmOverloads constructor(
                 return gDir
             }
 
-            /*
-             * Early game:
-             * take a provably safe food route.
-             */
             if (
                 gSnake.size < 35
             ) {
@@ -7045,9 +7128,6 @@ class SnakeView @JvmOverloads constructor(
                 }
             }
 
-            // =========================================================
-            // 融合：神经网络 + Q表 混合决策 (训练环境)
-            // =========================================================
             val brain = population[currentAgentId % POPULATION_SIZE]
             val nnInputs = buildInputs(gSnake.first(), gFood, gSnake)
             val nnVals = brain.think(nnInputs)
@@ -8198,7 +8278,6 @@ class SnakeView @JvmOverloads constructor(
         fun gDie(
             cause: String
         ) {
-            var shouldSave = false
             synchronized(sharedLock) {
                 when (cause) {
                     "WALL" ->
@@ -8263,12 +8342,8 @@ class SnakeView @JvmOverloads constructor(
                 if (
                     totalGames % 200 == 0
                 ) {
-                    shouldSave = true
+                    saveLearning()
                 }
-            }
-            // 【修复】把存盘操作移出同步锁，防止卡死其他线程
-            if (shouldSave) {
-                saveLearning()
             }
         }
     }
