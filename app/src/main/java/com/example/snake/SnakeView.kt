@@ -154,6 +154,8 @@ class SnakeView @JvmOverloads constructor(
     private var nnWeight = 0.0f
     private var bestScoreThisGen = 0f
     private var bestScoreAllTime = 0f
+    // 【新增】用来在 HUD 展示繁殖过程
+    private var generationLog = "等待第一条蛇出生..."
     // =============================
 
     /*
@@ -431,6 +433,10 @@ class SnakeView @JvmOverloads constructor(
             currentScores[i] = 0f
         }
         generation++
+
+        // 【新增】记录繁殖日志给 HUD 展示
+        generationLog = "第${generation}代诞生: 最佳${bestScoreThisGen.toInt()}分, 繁衍40条新蛇"
+
         val nnRatio = (generation / 50f).coerceIn(0f, 0.8f)
         nnWeight = nnRatio
         qWeight = 1.0f - nnRatio
@@ -910,13 +916,13 @@ class SnakeView @JvmOverloads constructor(
 
         trainThreads.clear()
 
-        // 初始化进化参数
         generation = 0
         currentAgentIndex = 0
         bestScoreThisGen = 0f
         bestScoreAllTime = 0f
         qWeight = 1.0f
         nnWeight = 0.0f
+        generationLog = "等待第一条蛇出生..."
         for (i in 0 until POPULATION_SIZE) {
             population[i] = TinyBrain()
             currentScores[i] = 0f
@@ -925,71 +931,39 @@ class SnakeView @JvmOverloads constructor(
         for (i in 0 until TRAIN_THREADS) {
             val t = Thread(
                 {
-                    val game =
-                        TrainGame(
-                            seed =
-                                System.nanoTime() +
-                                    i * 999983L
-                        )
-
+                    val game = TrainGame(seed = System.nanoTime() + i * 999983L)
                     while (trainActive) {
-                        // 每次循环，按顺序取一个个体进行训练
                         val agentId = synchronized(sharedLock) {
                             if (currentAgentIndex >= POPULATION_SIZE) {
-                                // 如果这一代全部跑完，就进化，并重置索引
                                 evolveNextGeneration()
                                 currentAgentIndex = 0
                             }
                             val id = currentAgentIndex++
                             id
                         }
-
-                        // 让游戏用这个个体去跑，并记录得分
                         game.playOneGame(agentId)
                     }
                 },
                 "snake-train-$i"
             )
-
             t.isDaemon = true
             t.priority = Thread.MAX_PRIORITY
             t.start()
-
             trainThreads.add(t)
         }
     }
 
+    // 【修复】移除 t.join() 防止 UI 线程卡死
     private fun stopParallelTraining() {
         if (!trainActive) return
-
         trainActive = false
         reinforceTraining = false
         trainingMode = false
 
-        val deadline =
-            System.currentTimeMillis() + 2000L
-
-        for (t in trainThreads) {
-            try {
-                val remain =
-                    deadline -
-                        System.currentTimeMillis()
-
-                if (remain > 0) {
-                    t.join(remain)
-                }
-            } catch (_: Throwable) {
-            }
-        }
-
         trainThreads.clear()
 
         saveLearning()
-
-        if (running) {
-            bgm?.start()
-        }
-
+        if (running) bgm?.start()
         reset()
     }
 
@@ -6108,6 +6082,20 @@ class SnakeView @JvmOverloads constructor(
                 infoY + 40f,
                 text
             )
+
+            // 【新增】在右侧空白区展示每一代最高分与繁殖过程
+            val logX = left + w / 2f + 30f
+            text.textSize = 15f
+            text.color = Color.CYAN
+            text.isFakeBoldText = true
+            c.drawText("【进化繁衍日志】", logX, infoY, text)
+            
+            text.isFakeBoldText = false
+            text.color = Color.WHITE
+            text.textSize = 14f
+            c.drawText("本代最高分: ${"%.0f".format(bestScoreThisGen)} 分", logX, infoY + 22f, text)
+            c.drawText(generationLog, logX, infoY + 42f, text)
+
         } else {
             c.drawText(
                 "局数 $totalGames   近50均分 ${
@@ -6594,13 +6582,9 @@ class SnakeView @JvmOverloads constructor(
                 iter++
             }
 
-            if (
-                gOver &&
-                trainActive
-            ) {
-                gDie(
-                    lastDeathCause
-                )
+            // 【修复】无论跑满超时还是死掉，都要记录成绩
+            if (trainActive) {
+                gDie(if (gOver) lastDeathCause else "TIMEOUT")
             }
         }
 
@@ -8214,6 +8198,7 @@ class SnakeView @JvmOverloads constructor(
         fun gDie(
             cause: String
         ) {
+            var shouldSave = false
             synchronized(sharedLock) {
                 when (cause) {
                     "WALL" ->
@@ -8278,8 +8263,12 @@ class SnakeView @JvmOverloads constructor(
                 if (
                     totalGames % 200 == 0
                 ) {
-                    saveLearning()
+                    shouldSave = true
                 }
+            }
+            // 【修复】把存盘操作移出同步锁，防止卡死其他线程
+            if (shouldSave) {
+                saveLearning()
             }
         }
     }
