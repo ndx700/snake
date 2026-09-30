@@ -174,6 +174,7 @@ class SnakeView @JvmOverloads constructor(
 
     private val autoBeamHunger = 120
     private val hungerKillLimit = 500
+    private val safeFollowLength = 32
     private var beamNodes = 0
     private var restartCountdown = 0L
 
@@ -296,7 +297,6 @@ class SnakeView @JvmOverloads constructor(
         wEdge = prefs.getFloat("w_edge", wEdge0)
         wSpace = prefs.getFloat("w_space", wSpace0)
 
-        // ★ 关键改动 1：所有静态权重锁死在 ±15%，防止学炸
         fun fixW(v: Float, base: Float) = v.coerceIn(base * 0.85f, base * 1.15f)
         wRegion = fixW(wRegion, wRegion0)
         wMobility = fixW(wMobility, wMobility0)
@@ -666,7 +666,6 @@ class SnakeView @JvmOverloads constructor(
         }
         if (!ate) return null
         if (!tailReachable(simBody)) return null
-        // ★ 关键改动 2：后期 freeLeft 阈值放宽，避免过度保守拒绝进食
         val len = simBody.size
         val freeLeft = cols * rows - len
         if (len > 180 && freeLeft < 4) return null
@@ -879,7 +878,6 @@ class SnakeView @JvmOverloads constructor(
         wFoodNear = clampW(wFoodNear * 1.001f, wFoodNear0 * 0.85f, wFoodNear0 * 1.15f)
     }
 
-    // ★ 关键改动 3：adjustWeights 改为极简温和版，只做 ±3% 微调 + 强回归
     private fun adjustWeights(cause: String) {
         val beforeEdge = wEdge
         val beforeTail = wTailGood
@@ -902,7 +900,6 @@ class SnakeView @JvmOverloads constructor(
                 wSpace = clampW(wSpace * 1.04f, wSpace0 * 0.9f, wSpace0 * 1.1f)
                 wRegion = clampW(wRegion * 1.02f, wRegion0 * 0.9f, wRegion0 * 1.1f)
                 safetyMargin = clampW(safetyMargin * 1.01f, 1.0f, 1.20f)
-                // TRAP 死大部分原因是太保守 → 反而要鼓励吃食物
                 aggression = clampW(aggression * 1.005f, 0.95f, 1.35f)
                 wFoodAte = clampW(wFoodAte * 1.02f, wFoodAte0 * 0.9f, wFoodAte0 * 1.1f)
             }
@@ -915,7 +912,6 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
-        // ★ 强回归：每次死亡拉回默认 5%
         wRegion = wRegion * 0.95f + wRegion0 * 0.05f
         wMobility = wMobility * 0.95f + wMobility0 * 0.05f
         wEdge = wEdge * 0.95f + wEdge0 * 0.05f
@@ -1000,7 +996,6 @@ class SnakeView @JvmOverloads constructor(
         while (recentScores.size > 50) recentScores.removeFirst()
         if (score > bestRecentScore) bestRecentScore = score
 
-        // ★ 关键改动 4：死因调整 + 强回归
         aggression = when (cause) {
             "WALL" -> max(0.9f, aggression * 0.99f)
             "SELF" -> max(0.9f, aggression * 0.995f)
@@ -1686,9 +1681,6 @@ class SnakeView @JvmOverloads constructor(
         try { aiPool.shutdownNow() } catch (_: Throwable) {}
     }
 
-    // ============================================================
-    // 并行训练：每个 TrainGame 一局独立游戏
-    // ============================================================
     private inner class TrainGame(seed: Long) {
         val rng = Random(seed)
         val gSnake = ArrayDeque<P>()
@@ -1767,7 +1759,6 @@ class SnakeView @JvmOverloads constructor(
             val legal = cands.filter { it.legal }
             if (legal.isEmpty()) return gDir
 
-            // ★ 关键改动 5：短蛇（< 35）强制追食物
             if (gSnake.size < 35) {
                 val foodPath = gShortestPath(gSnake.first(), gFood, gSnake, allowTail = true)
                 if (foodPath != null && foodPath.isNotEmpty()) {
@@ -1847,7 +1838,6 @@ class SnakeView @JvmOverloads constructor(
             }
             if (!ate) return null
             if (!gTailReachable(simBody)) return null
-            // ★ 关键改动 6：freeLeft 阈值放宽
             val len = simBody.size
             val freeLeft = total - len
             if (len > 180 && freeLeft < 4) return null
@@ -2104,7 +2094,6 @@ class SnakeView @JvmOverloads constructor(
                 while (recentScores.size > 50) recentScores.removeFirst()
                 if (gScore > bestRecentScore) bestRecentScore = gScore
                 adjustWeights(cause)
-                // ★ 关键改动：每局强回归
                 safetyMargin = safetyMargin * 0.95f + 1.08f * 0.05f
                 aggression = aggression * 0.95f + 1.15f * 0.05f
                 safetyMargin = safetyMargin.coerceIn(1.0f, 1.20f)
@@ -2114,9 +2103,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // ============================================================
-    // BGM
-    // ============================================================
     private class BgmPlayer {
         private var audioTrack: AudioTrack? = null
         @Volatile private var playing = false
