@@ -77,7 +77,6 @@ class SnakeView @JvmOverloads constructor(
     private var aiMode = 1
     private var forcedStrategy = -1
 
-    // 速度：正式模式开局慢、随蛇长加快；训练模式固定 2ms
     private var gameSpeed = 220L
     private val gameSpeedMin = 45L
     private val gameSpeedStart = 220L
@@ -176,6 +175,8 @@ class SnakeView @JvmOverloads constructor(
 
     private val autoBeamHunger = 120
     private val hungerKillLimit = 500
+    private var beamNodes = 0
+    private var restartCountdown = 0L
 
     // ============================================================
     // 训练模式
@@ -270,15 +271,12 @@ class SnakeView @JvmOverloads constructor(
 
             updateEffects(dt / 16f)
 
-            // 训练模式：每 5 帧渲染一次，把 CPU 让给 AI
             if (!trainingMode || (++renderSkipCounter % 5 == 0)) {
                 invalidate()
             }
             Choreographer.getInstance().postFrameCallback(this)
         }
     }
-
-    private var restartCountdown = 0L
 
     init {
         highScore = prefs.getInt("high_score", 0)
@@ -486,7 +484,6 @@ class SnakeView @JvmOverloads constructor(
         aiStepStartNs = System.nanoTime()
         aiStepBudgetNs = if (trainingMode) 3_000_000L else budgetFor(gameSpeed)
 
-        // 4 方向并行评估
         val futures: List<Future<Candidate>> = dirs.map { d ->
             aiPool.submit(Callable { evaluate(d) })
         }
@@ -1364,11 +1361,9 @@ class SnakeView @JvmOverloads constructor(
                 "距离 ${if (ai.foodDistance < 0) "∞" else ai.foodDistance}",
             left + 118f, top + 110f, text
         )
-        c.drawText(
-            "速度 ${(1000f / gameSpeed).toInt()}步/秒   深度 ${ai.depth}" +
-                if (trainingMode) "   [训练中]" else "",
-            left + 118f, top + 134f, text
-        )
+        val speedText = "速度 ${(1000f / gameSpeed).toInt()}步/秒   深度 ${ai.depth}" +
+                if (trainingMode) "   [训练中]" else ""
+        c.drawText(speedText, left + 118f, top + 134f, text)
 
         val wbY = top + 175f
         text.textAlign = Paint.Align.LEFT
