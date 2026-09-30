@@ -316,13 +316,14 @@ class SnakeView @JvmOverloads constructor(
         return if (best == -Float.MAX_VALUE) 0f else best
     }
 
-    // 经验回放buffer
+    // 经验回放buffer（用ArrayList支持O(1)随机访问）
     private data class Experience(
         val state: Int, val action: Int, val reward: Float,
         val nextState: Int, val nextMask: Int, val terminal: Boolean
     )
-    private val replayBuffer = java.util.ArrayDeque<Experience>()
-    private val REPLAY_CAPACITY = 5000
+    private val replayBuffer = ArrayList<Experience>(2000)
+    private var replaySkipCounter = 0
+    private val REPLAY_CAPACITY = 2000
 
     private fun qUpdate(
         state: Int,
@@ -339,8 +340,8 @@ class SnakeView @JvmOverloads constructor(
 
         // 存入经验回放buffer
         synchronized(replayBuffer) {
-            replayBuffer.addLast(Experience(state, action, reward, nextState, nextMask, terminal))
-            while (replayBuffer.size > REPLAY_CAPACITY) replayBuffer.removeFirst()
+            replayBuffer.add(Experience(state, action, reward, nextState, nextMask, terminal))
+            if (replayBuffer.size > REPLAY_CAPACITY) replayBuffer.removeAt(0)
         }
 
         val idx = qIndex(state, action)
@@ -364,11 +365,13 @@ class SnakeView @JvmOverloads constructor(
             nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
         }
 
-        // 经验回放：随机抽2条额外更新
-        repeat(1) {
+        // 经验回放：每3次才采样1次，减少CPU
+        replaySkipCounter++
+        if (replaySkipCounter >= 3) {
+            replaySkipCounter = 0
             synchronized(replayBuffer) {
                 if (replayBuffer.isNotEmpty()) {
-                    val e = replayBuffer.elementAt(Random.nextInt(replayBuffer.size))
+                    val e = replayBuffer[Random.nextInt(replayBuffer.size)]
                     val eidx = qIndex(e.state, e.action)
                     synchronized(qLock(eidx)) {
                         evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
@@ -532,7 +535,7 @@ class SnakeView @JvmOverloads constructor(
             qWeight = 1.0f - nnRatio
 
             // 每5代自动保存一次进度
-            if (generation % 5 == 0) {
+            if (generation % 1 == 0) {
                 Thread {
                     saveTrainingState()
                 }.apply {
@@ -651,7 +654,7 @@ class SnakeView @JvmOverloads constructor(
     private val trainThreads: MutableList<Thread> =
         mutableListOf()
 
-    private val TRAIN_THREADS = 3
+    private val TRAIN_THREADS = 4
 
     private val aiPool: ExecutorService = run {
         val cores =
@@ -770,7 +773,7 @@ class SnakeView @JvmOverloads constructor(
             lastFrame = ns
 
             if (reinforceTraining) {
-                if ((++renderSkipCounter % 2) == 0) {
+                if ((++renderSkipCounter % 5) == 0) {
                     invalidate()
                 }
 
