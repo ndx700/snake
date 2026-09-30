@@ -167,7 +167,9 @@ class SnakeView @JvmOverloads constructor(
     private var bestScoreThisGen = 0f
     @Volatile
     private var bestScoreAllTime = 0f
-    @Volatile private val visitedStates = mutableSetOf<Int>()
+    private val visitedStates = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
+    )
     // =============================
 
     /*
