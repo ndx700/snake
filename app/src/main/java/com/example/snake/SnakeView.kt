@@ -5536,7 +5536,7 @@ class SnakeView @JvmOverloads constructor(
                 680f
             )
 
-        val h = 680f
+        val h = 720f
 
         val left =
             (width - w) / 2f
@@ -5622,6 +5622,21 @@ class SnakeView @JvmOverloads constructor(
             top + 60f,
             text
         )
+
+        // ===== 学习状态行（平均分+epsilon+Q覆盖） =====
+        if (reinforceTraining) {
+            val avgScore = if (recentScores.isNotEmpty()) recentScores.average().toInt() else 0
+            val coveredStates = visitedStateSet.size
+            text.textSize = 13f
+            text.isFakeBoldText = true
+            text.color = Color.rgb(120, 255, 200)
+            c.drawText("均分:$avgScore", left + 16f, top + 76f, text)
+            text.isFakeBoldText = false
+            text.color = Color.rgb(180, 180, 255)
+            c.drawText(" ε:${"%.2f".format(v2Epsilon)}", left + 110f, top + 76f, text)
+            text.color = Color.rgb(255, 200, 100)
+            c.drawText(" Q覆盖:$coveredStates", left + 220f, top + 76f, text)
+        }
 
         // ===== 三个统计卡片 =====
         val cardY = top + 80f
@@ -5840,8 +5855,25 @@ class SnakeView @JvmOverloads constructor(
         text.textAlign = Paint.Align.LEFT
 
         val threadInfo = if (reinforceTraining) "${trainThreads.size}线程" else "单局"
-        c.drawText("$threadInfo  蛇长${snake.size}  ε${"%.2f".format(v2Epsilon)}", left + 16f, infoY, text)
+        c.drawText("$threadInfo  蛇长${snake.size}  步数:$v2LearningSteps", left + 16f, infoY, text)
         c.drawText("攻击x${"%.2f".format(aggression)}  安全x${"%.2f".format(safetyMargin)}", left + 16f, infoY + 16f, text)
+
+        // AI学习状态提示
+        if (reinforceTraining) {
+            val learnStatus = when {
+                generation < 3 -> "🧬 初始化种群，随机试错中..."
+                v2Epsilon > 0.15f -> "🔍 探索阶段：尝试新策略"
+                v2Epsilon < 0.05f && nnWeight > 0.5f -> "🧠 收敛阶段：神经网络主导"
+                bestScoreThisGen > bestScoreAllTime * 0.95f && bestScoreAllTime > 0 -> "🚀 突破中！分数上升"
+                bestScoreThisGen < bestScoreAllTime * 0.3f && bestScoreAllTime > 1000 -> "⚡ 瓶颈期，等待变异突破"
+                else -> "📊 正常进化中..."
+            }
+            text.textSize = 12f
+            text.isFakeBoldText = true
+            text.color = Color.rgb(100, 220, 255)
+            c.drawText(learnStatus, left + 16f, infoY + 32f, text)
+            text.isFakeBoldText = false
+        }
 
         // ===== 进化按钮 =====
         val btnW = 140f
