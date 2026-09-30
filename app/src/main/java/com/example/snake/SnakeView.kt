@@ -89,7 +89,6 @@ class SnakeView @JvmOverloads constructor(
     private var lastDeathInfo = ""
     private var ai = Snapshot()
 
-    // 权重
     private var wRegion = 11f
     private var wMobility = 35f
     private var wTailGood = 180f
@@ -185,7 +184,7 @@ class SnakeView @JvmOverloads constructor(
     private var renderSkipCounter = 0
 
     // ============================================================
-    // AI 并行线程池（骁龙 8 Gen 2：4 个性能核）
+    // AI 并行线程池（骁龙 8 Gen 2）
     // ============================================================
     private val aiPool: ExecutorService = Executors.newFixedThreadPool(4) { r ->
         Thread(r, "snake-ai").apply { isDaemon = true }
@@ -524,7 +523,7 @@ class SnakeView @JvmOverloads constructor(
                 lastAction = dirs.indexOfFirst { it == chosenForce.d }.coerceAtLeast(0)
                 val usingSafe = bestSafe != null
                 ai = Snapshot(
-                    strategy = if (usingSafe) "🍎 饥饿强制(安全)" else "🍎 饥饿强制(兜底)",
+                    strategy = if (usingSafe) "饥饿强制(安全)" else "饥饿强制(兜底)",
                     reason = if (usingSafe) "饥饿 $hunger ≥ $forceEatThreshold，安全方向内追食物"
                              else "饥饿 $hunger ≥ $forceEatThreshold，无安全方向，冲最近的食物",
                     danger = if (usingSafe) 2 else 4,
@@ -558,7 +557,7 @@ class SnakeView @JvmOverloads constructor(
                 lastAction = dirs.indexOfFirst { it == bestC.d }.coerceAtLeast(0)
                 val reg = freeRegion(snake)
                 ai = Snapshot(
-                    strategy = "🛡 SAFE_FOLLOW 长蛇模式",
+                    strategy = "SAFE_FOLLOW 长蛇模式",
                     reason = "蛇长 ${snake.size} ≥ $safeFollowLength，优先保命",
                     danger = danger, region = reg,
                     spaceRatio = reg.toFloat() / max(1, snake.size),
@@ -1326,7 +1325,7 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = true
         text.textSize = 26f
         text.color = Color.WHITE
-        c.drawText("🧠 ${ai.strategy}", left + 16f, top + 36f, text)
+        c.drawText("${ai.strategy}", left + 16f, top + 36f, text)
 
         text.isFakeBoldText = false
         text.textSize = 14f
@@ -1356,8 +1355,8 @@ class SnakeView @JvmOverloads constructor(
             left + 118f, top + 86f, text
         )
         c.drawText(
-            "尾巴 ${if (ai.tailReachable) "✓" else "✗"}   " +
-                "食物 ${if (ai.foodReachable) "✓" else "✗"}   " +
+            "尾巴 ${if (ai.tailReachable) "Y" else "N"}   " +
+                "食物 ${if (ai.foodReachable) "Y" else "N"}   " +
                 "距离 ${if (ai.foodDistance < 0) "∞" else ai.foodDistance}",
             left + 118f, top + 110f, text
         )
@@ -1381,7 +1380,7 @@ class SnakeView @JvmOverloads constructor(
         c.drawText("【上次学习】", left + 16f, learnY, text)
         text.isFakeBoldText = false
         text.color = Color.WHITE
-        c.drawText("$deathCause → $lastLearnAction", left + 118f, learnY, text)
+        c.drawText("$deathCause -> $lastLearnAction", left + 118f, learnY, text)
 
         val barStartX = left + 118f
         val barEndX = left + w - 16f
@@ -1395,9 +1394,9 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = false
         barY += 10f
 
-        val dirNames = listOf("↑", "↓", "←", "→")
+        val dirNames = listOf("UP", "DN", "LF", "RT")
         ai.candidates.forEachIndexed { idx, cand ->
-            text.textSize = 21f
+            text.textSize = 18f
             text.color = if (!cand.legal) Color.GRAY
                         else if (cand.d == ai.chosen) Color.CYAN
                         else Color.WHITE
@@ -1432,7 +1431,7 @@ class SnakeView @JvmOverloads constructor(
                 text.textSize = 13f
                 text.color = Color.WHITE
                 c.drawText(
-                    "空间${cand.region} 尾${if (cand.tailOk) "✓" else "✗"} " +
+                    "空间${cand.region} 尾${if (cand.tailOk) "Y" else "N"} " +
                         "食${if (cand.foodDist < 0) "∞" else cand.foodDist} " +
                         "分${"%.0f".format(cand.score)}",
                     barStartX + 8f, barY + 18f, text
@@ -1514,7 +1513,7 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = true
         text.textSize = 14f
         text.color = Color.rgb(200, 180, 255)
-        c.drawText("【Q表热度 10×10=100状态】绿=高价值 红=负 灰=未访问", left + 16f, heatY, text)
+        c.drawText("【Q表热度 10x10=100状态】", left + 16f, heatY, text)
         text.isFakeBoldText = false
         drawQHeatmap(c, left + 16f, heatY + 8f, w - 32f, 66f)
 
@@ -1537,7 +1536,7 @@ class SnakeView @JvmOverloads constructor(
         )
         c.drawText(
             "蛇长 ${snake.size}  分数 $score  饥饿 $hunger  最高 $highScore  金币 $money  " +
-                "攻击×${"%.2f".format(aggression)}  安全×${"%.2f".format(safetyMargin)}",
+                "攻击x${"%.2f".format(aggression)}  安全x${"%.2f".format(safetyMargin)}",
             left + 16f, infoY + 20f, text
         )
 
@@ -1597,7 +1596,7 @@ class SnakeView @JvmOverloads constructor(
     }
 
     // ============================================================
-    // BGM 播放器：8-bit 风格
+    // BGM 播放器
     // ============================================================
     private class BgmPlayer {
         private var audioTrack: AudioTrack? = null
