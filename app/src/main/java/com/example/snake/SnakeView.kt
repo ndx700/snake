@@ -29,7 +29,6 @@ class SnakeView @JvmOverloads constructor(
 
     private data class P(val x: Int, val y: Int)
 
-    // 每个方向的得分明细，HUD 会显示这些
     private data class Candidate(
         val d: P,
         val score: Float,
@@ -66,7 +65,9 @@ class SnakeView @JvmOverloads constructor(
         var regionWeight: Float = 11f,
         var strategyId: Int = -1,
         var qValue: Float = 0f,
-        var nVisits: Int = 0
+        var nVisits: Int = 0,
+        var forceEatActive: Boolean = false,
+        var forceEatSafe: Boolean = false
     )
 
     private data class Sim(val body: ArrayDeque<P>, val ate: Boolean)
@@ -75,7 +76,6 @@ class SnakeView @JvmOverloads constructor(
 
     private val snake = ArrayDeque<P>()
     private val queue = ArrayDeque<P>()
-
     private val dirs = listOf(P(0, -1), P(0, 1), P(-1, 0), P(1, 0))
 
     private var dir = P(1, 0)
@@ -151,6 +151,7 @@ class SnakeView @JvmOverloads constructor(
     private val snakePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val headPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val foodPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     private var flash = 0f
 
@@ -159,10 +160,24 @@ class SnakeView @JvmOverloads constructor(
     private var beamNodes = 0
 
     private val autoBeamHunger = 120
-    private val hungerForceEat = 60
     private val hungerKillLimit = 500
     private var autoRestartDelay = 250L
     private var restartCountdown = 0L
+
+    /*
+     * ============================================================
+     * 强制追食物阈值（随蛇长浮动）
+     * 蛇越长，越晚才强制追食物，
+     * 避免长蛇直线冲食物把自己绕死。
+     * ============================================================
+     */
+    private fun hungerForceEat(): Int = when {
+        snake.size < 20 -> 50
+        snake.size < 35 -> 70
+        snake.size < 55 -> 100
+        snake.size < 80 -> 140
+        else -> 200
+    }
 
     private val frame = object : Choreographer.FrameCallback {
         override fun doFrame(ns: Long) {
@@ -207,9 +222,7 @@ class SnakeView @JvmOverloads constructor(
     }
 
     fun getAIMode(): Int = aiMode
-
     fun setAIMode(m: Int) { aiMode = m; reset() }
-
     fun setForcedStrategy(s: Int) { forcedStrategy = s; invalidate() }
 
     fun updateCurrentSkin(id: String? = null) {
@@ -371,37 +384,73 @@ class SnakeView @JvmOverloads constructor(
 
         val regionWeight = if (hunger >= 30) 4f else 11f
 
-        // 饥饿硬拦截
-        if (hunger >= hungerForceEat) {
-            var bestD = legal.first()
-            var bestDist = Int.MAX_VALUE
+        // ============================================================
+        // 饥饿强制模式（安全版）
+        // 先筛"尾巴可达 + 空间足够"的安全方向，
+        // 在其中选离食物最近的。
+        // ============================================================
+        val forceEatThreshold = hungerForceEat()
+        val forceEat = hunger >= forceEatThreshold
+
+        if (forceEat) {
+            var bestSafe: Candidate? = null
+            var bestSafeDist = Int.MAX_VALUE
+            var bestAny: Candidate? = null
+            var bestAnyDist = Int.MAX_VALUE
+
             for (c in legal) {
                 val sim = simulate(snake.first(), c.d)
                 val fd = distance(sim.body.first(), food, sim.body, true)
-                if (fd in 0 until bestDist) { bestDist = fd; bestD = c }
+
+                if (fd in 0 until bestAnyDist) {
+                    bestAnyDist = fd
+                    bestAny = c
+                }
+
+                val tailOk = tailReachable(sim.body)
+                val region = freeRegion(sim.body)
+                val need = (snake.size * 0.8f).toInt()
+                val safe = tailOk && region >= need
+
+                if (safe && fd in 0 until bestSafeDist) {
+                    bestSafeDist = fd
+                    bestSafe = c
+                }
             }
-            lastState = state
-            lastAction = dirs.indexOfFirst { it == bestD.d }.coerceAtLeast(0)
-            ai = Snapshot(
-                strategy = "🍎 饥饿强制",
-                reason = "饥饿 $hunger ≥ $hungerForceEat，直追食物（距离 $bestDist）",
-                danger = 1,
-                region = freeRegion(snake),
-                tailReachable = tailReachable(snake),
-                foodReachable = bestDist != Int.MAX_VALUE,
-                foodDistance = bestDist,
-                hunger = hunger,
-                chosen = bestD.d,
-                candidates = candidates,
-                depth = 1,
-                nodes = legal.size,
-                hungerFactor = hungerFactor,
-                regionWeight = regionWeight,
-                strategyId = -1,
-                qValue = q[state][lastAction],
-                nVisits = n[state][lastAction]
-            )
-            return bestD.d
+
+            val chosenForce = bestSafe ?: bestAny
+            if (chosenForce != null) {
+                lastState = state
+                lastAction = dirs.indexOfFirst { it == chosenForce.d }.coerceAtLeast(0)
+                val usingSafe = bestSafe != null
+
+                ai = Snapshot(
+                    strategy = if (usingSafe) "🍎 饥饿强制(安全)" else "🍎 饥饿强制(兜底)",
+                    reason = if (usingSafe)
+                        "饥饿 $hunger ≥ $forceEatThreshold，安全方向内追食物"
+                    else
+                        "饥饿 $hunger ≥ $forceEatThreshold，无安全方向，冲最近的食物",
+                    danger = if (usingSafe) 2 else 4,
+                    region = freeRegion(snake),
+                    tailReachable = tailReachable(snake),
+                    foodReachable = (if (usingSafe) bestSafeDist else bestAnyDist) != Int.MAX_VALUE,
+                    foodDistance = if (usingSafe) bestSafeDist else bestAnyDist,
+                    hunger = hunger,
+                    chosen = chosenForce.d,
+                    candidates = candidates,
+                    depth = 1,
+                    nodes = legal.size,
+                    hungerFactor = hungerFactor,
+                    regionWeight = regionWeight,
+                    strategyId = state,
+                    qValue = q[state][dirs.indexOfFirst { it == chosenForce.d }.coerceAtLeast(0)],
+                    nVisits = n[state][dirs.indexOfFirst { it == chosenForce.d }.coerceAtLeast(0)],
+                    forceEatActive = true,
+                    forceEatSafe = usingSafe
+                )
+
+                return chosenForce.d
+            }
         }
 
         val autoBeam = hunger >= autoBeamHunger
@@ -452,7 +501,9 @@ class SnakeView @JvmOverloads constructor(
             regionWeight = regionWeight,
             strategyId = stratId,
             qValue = q[state][action],
-            nVisits = n[state][action]
+            nVisits = n[state][action],
+            forceEatActive = false,
+            forceEatSafe = false
         )
 
         return final.d
@@ -966,13 +1017,13 @@ class SnakeView @JvmOverloads constructor(
     }
 
     // ============================================================
-    // 详细思考面板
+    // 详细思考面板 + 可视化
     // ============================================================
     private fun drawDebug(c: Canvas) {
         if (aiMode == 0 && !gameOver) return
 
         val w = min(width * 0.97f, 720f)
-        val h = if (gameOver) 430f else 430f
+        val h = if (gameOver) 480f else 480f
         val left = (width - w) / 2f
         val top = if (gameOver) max(12f, height - h - 12f) else 12f
 
@@ -980,7 +1031,7 @@ class SnakeView @JvmOverloads constructor(
         panel.color = Color.argb(225, 0, 0, 0)
         c.drawRoundRect(left, top, left + w, top + h, 22f, 22f, panel)
 
-        // 边框（颜色反映危险度）
+        // 边框颜色
         border.color = when (ai.danger) {
             1 -> Color.GREEN
             2 -> Color.rgb(150, 255, 80)
@@ -994,30 +1045,31 @@ class SnakeView @JvmOverloads constructor(
 
         text.textAlign = Paint.Align.LEFT
 
-        // 第 1 行：策略
+        // ─── 1. 策略 ───
         text.isFakeBoldText = true
         text.textSize = 20f
         text.color = Color.WHITE
-        c.drawText("🧠 策略: ${ai.strategy}", left + 16f, top + 30f, text)
+        c.drawText("🧠 ${ai.strategy}", left + 16f, top + 30f, text)
 
-        // 第 2 行：原因
+        // ─── 2. 原因 ───
         text.isFakeBoldText = false
-        text.textSize = 14f
+        text.textSize = 13f
         text.color = Color.YELLOW
-        c.drawText("原因: ${ai.reason}", left + 16f, top + 54f, text)
+        c.drawText(ai.reason, left + 16f, top + 52f, text)
 
-        // 第 3 行：权重信息（关键！）
+        // ─── 3. 权重 ───
         text.color = Color.rgb(120, 220, 255)
-        text.textSize = 14f
+        text.textSize = 13f
         c.drawText(
-            "【当前权重】区域×${"%.1f".format(ai.regionWeight)}  " +
+            "区域×${"%.1f".format(ai.regionWeight)}  " +
                 "饥饿因子×${"%.2f".format(ai.hungerFactor)}  " +
                 "攻击×${"%.2f".format(aggression)}  " +
-                "安全×${"%.2f".format(safetyMargin)}",
-            left + 16f, top + 78f, text
+                "安全×${"%.2f".format(safetyMargin)}  " +
+                "深度 ${ai.depth}",
+            left + 16f, top + 74f, text
         )
 
-        // 第 4 行：状态信息
+        // ─── 4. 状态 ───
         text.color = Color.WHITE
         val tailTxt = if (ai.tailReachable) "✓" else "✗"
         val foodTxt = if (ai.foodReachable) "✓" else "✗"
@@ -1026,120 +1078,191 @@ class SnakeView @JvmOverloads constructor(
             "危险 ${"●".repeat(ai.danger)}${"○".repeat(5 - ai.danger)}  " +
                 "空间 ${ai.region}  比例 ${"%.1f".format(ai.spaceRatio)}  " +
                 "尾巴 $tailTxt  食物 $foodTxt  距离 $fdTxt",
-            left + 16f, top + 102f, text
+            left + 16f, top + 96f, text
         )
 
-        // 第 5 行：Q表当前状态
+        // ─── 5. Q 表 ───
         text.color = Color.rgb(200, 180, 255)
         c.drawText(
-            "Q表 状态 ${ai.strategyId}  " +
-                "Q值 ${"%+.3f".format(ai.qValue)}  " +
-                "访问 ${ai.nVisits} 次  深度 ${ai.depth}  节点 ${ai.nodes}",
-            left + 16f, top + 126f, text
+            "Q表 状态 ${ai.strategyId}  Q值 ${"%+.3f".format(ai.qValue)}  " +
+                "访问 ${ai.nVisits} 次  节点 ${ai.nodes}",
+            left + 16f, top + 118f, text
         )
 
         // ============================================================
-        // 【每方向得分明细】表头
+        // ─── 6. 【可视化】四方向安全条 ───
         // ============================================================
         text.color = Color.rgb(255, 200, 100)
         text.isFakeBoldText = true
         text.textSize = 13f
-        c.drawText("【四方向评分明细】", left + 16f, top + 152f, text)
+        c.drawText("【四方向安全可视化】", left + 16f, top + 144f, text)
 
-        // 表头
         text.isFakeBoldText = false
-        text.textSize = 11f
-        text.color = Color.LTGRAY
-        c.drawText("方向  区域  机动   尾巴   食物   边界    空间 =  总分", left + 16f, top + 172f, text)
 
-        // 每个方向一行
-        var y = top + 190f
-        ai.candidates.forEach {
-            val arrow = when (it.d) {
-                P(0, -1) -> " ↑  "
-                P(0, 1) -> " ↓  "
-                P(-1, 0) -> " ←  "
-                else -> " →  "
-            }
-            text.color = if (!it.legal) Color.GRAY else if (it.d == ai.chosen) Color.CYAN else Color.WHITE
+        val barStartX = left + 150f
+        val barEndX = left + w - 16f
+        val barW = barEndX - barStartX
+        var barY = top + 160f
 
-            if (!it.legal) {
-                c.drawText("$arrow 非法方向（撞墙/身体）", left + 16f, y, text)
+        val dirNames = listOf("↑", "↓", "←", "→")
+        ai.candidates.forEachIndexed { idx, c ->
+            // 方向箭头
+            text.textSize = 16f
+            text.color = if (!c.legal) Color.GRAY
+                        else if (c.d == ai.chosen) Color.CYAN
+                        else Color.WHITE
+            c.drawText(dirNames[idx], left + 16f, barY + 14f, text)
+
+            if (!c.legal) {
+                text.textSize = 12f
+                text.color = Color.GRAY
+                c.drawText("非法（撞墙/身体）", barStartX, barY + 14f, text)
             } else {
-                c.drawText(
-                    "$arrow" +
-                        "%6.0f".format(it.regionScore) +
-                        "%6.0f".format(it.mobilityScore) +
-                        "%7.0f".format(it.tailScore) +
-                        "%7.0f".format(it.foodScore) +
-                        "%7.0f".format(it.edgeScore) +
-                        "%7.0f".format(it.spaceScore) +
-                        "=" +
-                        "%7.0f".format(it.score),
-                    left + 16f, y, text
+                // 计算安全分数 0~1
+                val regionRatio =
+                    if (snake.size > 0)
+                        c.region.toFloat() / snake.size
+                    else 0f
+
+                val safeScore = when {
+                    c.tailOk && regionRatio >= 1.5f -> 1.0f
+                    c.tailOk && regionRatio >= 1.0f -> 0.75f
+                    regionRatio >= 1.0f -> 0.5f
+                    regionRatio >= 0.6f -> 0.3f
+                    else -> 0.15f
+                }
+
+                // 条背景
+                barPaint.color = Color.rgb(40, 40, 40)
+                c.drawRoundRect(
+                    barStartX, barY, barEndX, barY + 18f, 4f, 4f, barPaint
                 )
+
+                // 条填充（颜色 = 安全等级）
+                val barColor = when {
+                    safeScore >= 0.9f -> Color.rgb(46, 204, 113)    // 绿
+                    safeScore >= 0.7f -> Color.rgb(241, 196, 15)    // 黄
+                    safeScore >= 0.5f -> Color.rgb(230, 126, 34)    // 橙
+                    else -> Color.rgb(231, 76, 60)                  // 红
+                }
+                barPaint.color = barColor
+                c.drawRoundRect(
+                    barStartX, barY,
+                    barStartX + barW * safeScore, barY + 18f,
+                    4f, 4f, barPaint
+                )
+
+                // 条上的文字
+                text.textSize = 11f
+                text.color = Color.WHITE
+                val label =
+                    "空间${c.region} 尾巴${if (c.tailOk) "✓" else "✗"} " +
+                    "食物${if (c.foodDist < 0) "∞" else c.foodDist} " +
+                    "得分${"%.0f".format(c.score)}"
+                c.drawText(label, barStartX + 6f, barY + 14f, text)
             }
-            y += 18f
+
+            barY += 22f
         }
 
-        // 分隔
-        text.color = Color.DKGRAY
-        c.drawText("─────────────────────────────────", left + 16f, y + 4f, text)
+        // ============================================================
+        // ─── 7. 【可视化】饥饿进度条 ───
+        // ============================================================
+        val hungerBarY = barY + 8f
+        text.textSize = 13f
+        text.color = Color.rgb(255, 200, 100)
+        text.isFakeBoldText = true
+        c.drawText("【饥饿进度】", left + 16f, hungerBarY + 14f, text)
+        text.isFakeBoldText = false
+
+        val hForce = hungerForceEat()
+        val hBarStart = barStartX
+        val hBarEnd = barEndX
+        val hBarW = hBarEnd - hBarStart
+
+        // 进度比例（相对 hungerKillLimit）
+        val hRatio = (hunger.toFloat() / hungerKillLimit).coerceIn(0f, 1f)
+
+        // 条底
+        barPaint.color = Color.rgb(40, 40, 40)
+        c.drawRoundRect(
+            hBarStart, hungerBarY, hBarEnd, hungerBarY + 18f, 4f, 4f, barPaint
+        )
+
+        // 条填充
+        val hColor = when {
+            hunger >= hungerKillLimit -> Color.RED
+            hunger >= autoBeamHunger -> Color.rgb(255, 100, 50)
+            hunger >= hForce -> Color.rgb(241, 196, 15)
+            hunger >= 30 -> Color.rgb(230, 200, 100)
+            else -> Color.rgb(100, 200, 100)
+        }
+        barPaint.color = hColor
+        c.drawRoundRect(
+            hBarStart, hungerBarY,
+            hBarStart + hBarW * hRatio, hungerBarY + 18f,
+            4f, 4f, barPaint
+        )
+
+        // 阈值标记
+        val forcePos = hBarStart + hBarW * (hForce.toFloat() / hungerKillLimit)
+        val beamPos = hBarStart + hBarW * (autoBeamHunger.toFloat() / hungerKillLimit)
+        barPaint.color = Color.WHITE
+        c.drawLine(forcePos, hungerBarY, forcePos, hungerBarY + 18f, barPaint)
+        c.drawLine(beamPos, hungerBarY, beamPos, hungerBarY + 18f, barPaint)
+
+        // 文字
+        text.textSize = 11f
+        text.color = Color.WHITE
+        c.drawText(
+            "$hunger / $hungerKillLimit   " +
+                "强制${hForce}  切BEAM${autoBeamHunger}",
+            hBarStart + 6f, hungerBarY + 14f, text
+        )
+
+        val hungerBarEndY = hungerBarY + 26f
 
         // ============================================================
-        // 学习效果
+        // ─── 8. 学习效果 ───
         // ============================================================
         text.color = Color.rgb(120, 255, 180)
         text.isFakeBoldText = true
         text.textSize = 13f
-        c.drawText("【学习效果】", left + 16f, y + 22f, text)
-
+        c.drawText("【学习效果】", left + 16f, hungerBarEndY + 14f, text)
         text.isFakeBoldText = false
-        text.textSize = 13f
-        text.color = Color.WHITE
 
         val avg = if (recentScores.isEmpty()) 0f else recentScores.average().toFloat()
 
-        // 统计 Q 表非零状态数
-        var nonZeroStates = 0
+        var nonZero = 0
         var sumQ = 0f
         var cntQ = 0
-        for (s in 0 until 20) {
-            for (a in 0 until 5) {
-                if (n[s][a] > 0) {
-                    nonZeroStates++
-                    sumQ += q[s][a]
-                    cntQ++
-                }
+        for (s in 0 until 20) for (a in 0 until 5) {
+            if (n[s][a] > 0) {
+                nonZero++
+                sumQ += q[s][a]
+                cntQ++
             }
         }
         val avgQ = if (cntQ > 0) sumQ / cntQ else 0f
 
-        c.drawText(
-            "学习局数 $totalGames   近50局均分 ${"%.1f".format(avg)}   近50局最佳 $bestRecentScore",
-            left + 16f, y + 44f, text
-        )
-
-        c.drawText(
-            "Q表非零 ${nonZeroStates}/100   平均Q ${"%+.3f".format(avgQ)}   " +
-                "W$deathWall S$deathSelf T$deathTrap",
-            left + 16f, y + 64f, text
-        )
-
-        // 当前状态（蛇长和分数）
-        text.color = Color.rgb(180, 220, 255)
         text.textSize = 12f
+        text.color = Color.WHITE
         c.drawText(
-            "蛇长 ${snake.size}   分数 $score   饥饿 $hunger   最高分 $highScore   金币 $money",
-            left + 16f, y + 84f, text
+            "局数 $totalGames  近50均分 ${"%.1f".format(avg)}  近50最佳 $bestRecentScore  " +
+                "Q非零 $nonZero/100  平均Q ${"%+.3f".format(avgQ)}",
+            left + 16f, hungerBarEndY + 34f, text
+        )
+        c.drawText(
+            "蛇长 ${snake.size}  分数 $score  饥饿 $hunger  最高 $highScore  " +
+                "W$deathWall S$deathSelf T$deathTrap",
+            left + 16f, hungerBarEndY + 52f, text
         )
 
-        // 死亡原因（GAME OVER 时）
         if (gameOver) {
             text.color = Color.RED
             text.isFakeBoldText = true
             text.textSize = 15f
-            c.drawText("死亡原因：$deathCause", left + 16f, y + 106f, text)
+            c.drawText("死亡原因：$deathCause", left + 16f, hungerBarEndY + 74f, text)
             text.isFakeBoldText = false
         }
     }
