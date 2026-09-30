@@ -177,23 +177,17 @@ class SnakeView @JvmOverloads constructor(
     private var beamNodes = 0
     private var restartCountdown = 0L
 
-    // ============================================================
-    // 训练模式
-    // ============================================================
     private var trainingMode = false
     private var renderSkipCounter = 0
 
-    // ============================================================
-    // AI 并行线程池（骁龙 8 Gen 2）
-    // ============================================================
     private val aiPool: ExecutorService = Executors.newFixedThreadPool(4) { r ->
         Thread(r, "snake-ai").apply { isDaemon = true }
     }
 
     private val tlVisited: ThreadLocal<BooleanArray> =
-        ThreadLocal.withInitial { BooleanArray(cols * rows) }
+        ThreadLocal.withInitial { BooleanArray(cols * rows + 1) }
     private val tlQueue: ThreadLocal<IntArray> =
-        ThreadLocal.withInitial { IntArray(cols * rows) }
+        ThreadLocal.withInitial { IntArray(cols * rows + 2) }
 
     private var aiStepStartNs = 0L
     private var aiStepBudgetNs = 15_000_000L
@@ -524,8 +518,8 @@ class SnakeView @JvmOverloads constructor(
                 val usingSafe = bestSafe != null
                 ai = Snapshot(
                     strategy = if (usingSafe) "饥饿强制(安全)" else "饥饿强制(兜底)",
-                    reason = if (usingSafe) "饥饿 $hunger ≥ $forceEatThreshold，安全方向内追食物"
-                             else "饥饿 $hunger ≥ $forceEatThreshold，无安全方向，冲最近的食物",
+                    reason = if (usingSafe) "饥饿 $hunger >= $forceEatThreshold，安全方向内追食物"
+                             else "饥饿 $hunger >= $forceEatThreshold，无安全方向，冲最近的食物",
                     danger = if (usingSafe) 2 else 4,
                     region = freeRegion(snake),
                     tailReachable = tailReachable(snake),
@@ -558,7 +552,7 @@ class SnakeView @JvmOverloads constructor(
                 val reg = freeRegion(snake)
                 ai = Snapshot(
                     strategy = "SAFE_FOLLOW 长蛇模式",
-                    reason = "蛇长 ${snake.size} ≥ $safeFollowLength，优先保命",
+                    reason = "蛇长 ${snake.size} >= $safeFollowLength，优先保命",
                     danger = danger, region = reg,
                     spaceRatio = reg.toFloat() / max(1, snake.size),
                     tailReachable = tailReachable(snake), foodReachable = true, foodDistance = -1,
@@ -760,10 +754,10 @@ class SnakeView @JvmOverloads constructor(
             }
         }
         lastLearnAction = when (cause) {
-            "WALL" -> "边界 ${"%.0f→%.0f".format(beforeEdge, wEdge)}"
-            "SELF" -> "尾巴+ ${"%.0f→%.0f".format(beforeTail, wTailGood)}"
-            "TRAP" -> "空间 ${"%.0f→%.0f".format(beforeSpace, wSpace)}"
-            "HUNGER" -> "食物近 ${"%.0f→%.0f".format(beforeFood, wFoodNear)}"
+            "WALL" -> "边界 ${"%.0f->%.0f".format(beforeEdge, wEdge)}"
+            "SELF" -> "尾巴+ ${"%.0f->%.0f".format(beforeTail, wTailGood)}"
+            "TRAP" -> "空间 ${"%.0f->%.0f".format(beforeSpace, wSpace)}"
+            "HUNGER" -> "食物近 ${"%.0f->%.0f".format(beforeFood, wFoodNear)}"
             else -> "无变化"
         }
         wRegion = wRegion * 0.999f + wRegion0 * 0.001f
@@ -908,11 +902,12 @@ class SnakeView @JvmOverloads constructor(
 
     private fun inside(p: P): Boolean = p.x in 0 until cols && p.y in 0 until rows
 
+    // ★ 关键修复 1：visited[startIndex] = true 防止重复入队
     private fun freeRegion(body: ArrayDeque<P>): Int {
         if (body.isEmpty()) return 0
         val total = cols * rows
         val visited = tlVisited.get()
-        val queue = tlQueue.get()
+        val q = tlQueue.get()
         java.util.Arrays.fill(visited, 0, total, false)
         for (p in body) {
             if (p.x !in 0 until cols || p.y !in 0 until rows) continue
@@ -925,28 +920,30 @@ class SnakeView @JvmOverloads constructor(
         if (startIndex !in 0 until total) return 0
         visited[startIndex] = false
         var head = 0; var tail = 0
-        queue[tail++] = startIndex
+        q[tail++] = startIndex
+        visited[startIndex] = true
         var count = 0
         while (head < tail) {
-            val curr = queue[head++]
+            val curr = q[head++]
             if (curr !in 0 until total) continue
             val cx = curr % cols; val cy = curr / cols
             count++
-            if (cx > 0) { val ni = curr - 1; if (!visited[ni]) { visited[ni] = true; queue[tail++] = ni } }
-            if (cx < cols - 1) { val ni = curr + 1; if (!visited[ni]) { visited[ni] = true; queue[tail++] = ni } }
-            if (cy > 0) { val ni = curr - cols; if (!visited[ni]) { visited[ni] = true; queue[tail++] = ni } }
-            if (cy < rows - 1) { val ni = curr + cols; if (!visited[ni]) { visited[ni] = true; queue[tail++] = ni } }
+            if (cx > 0) { val ni = curr - 1; if (!visited[ni]) { visited[ni] = true; q[tail++] = ni } }
+            if (cx < cols - 1) { val ni = curr + 1; if (!visited[ni]) { visited[ni] = true; q[tail++] = ni } }
+            if (cy > 0) { val ni = curr - cols; if (!visited[ni]) { visited[ni] = true; q[tail++] = ni } }
+            if (cy < rows - 1) { val ni = curr + cols; if (!visited[ni]) { visited[ni] = true; q[tail++] = ni } }
         }
         return count
     }
 
+    // ★ 关键修复 2：visited[startIndex] = true 防止重复入队
     private fun distance(start: P, target: P, body: Collection<P>, allowTail: Boolean): Int {
         if (start.x !in 0 until cols || start.y !in 0 until rows ||
             target.x !in 0 until cols || target.y !in 0 until rows) return -1
         if (start == target) return 0
         val total = cols * rows
         val visited = tlVisited.get()
-        val queue = tlQueue.get()
+        val q = tlQueue.get()
         java.util.Arrays.fill(visited, 0, total, false)
         for (p in body) {
             if (p.x !in 0 until cols || p.y !in 0 until rows) continue
@@ -964,7 +961,8 @@ class SnakeView @JvmOverloads constructor(
         if (startIndex !in 0 until total) return -1
         visited[startIndex] = false
         var head = 0; var tail = 0
-        queue[tail++] = startIndex
+        q[tail++] = startIndex
+        visited[startIndex] = true
         var dist = 0
         while (head < tail) {
             val layerSize = tail - head
@@ -972,14 +970,14 @@ class SnakeView @JvmOverloads constructor(
             while (i < layerSize) {
                 i++
                 if (head >= tail) break
-                val curr = queue[head++]
+                val curr = q[head++]
                 if (curr !in 0 until total) continue
                 val cx = curr % cols; val cy = curr / cols
                 if (cx == target.x && cy == target.y) return dist
-                if (cx > 0) { val ni = curr - 1; if (!visited[ni]) { visited[ni] = true; queue[tail++] = ni } }
-                if (cx < cols - 1) { val ni = curr + 1; if (!visited[ni]) { visited[ni] = true; queue[tail++] = ni } }
-                if (cy > 0) { val ni = curr - cols; if (!visited[ni]) { visited[ni] = true; queue[tail++] = ni } }
-                if (cy < rows - 1) { val ni = curr + cols; if (!visited[ni]) { visited[ni] = true; queue[tail++] = ni } }
+                if (cx > 0) { val ni = curr - 1; if (!visited[ni]) { visited[ni] = true; q[tail++] = ni } }
+                if (cx < cols - 1) { val ni = curr + 1; if (!visited[ni]) { visited[ni] = true; q[tail++] = ni } }
+                if (cy > 0) { val ni = curr - cols; if (!visited[ni]) { visited[ni] = true; q[tail++] = ni } }
+                if (cy < rows - 1) { val ni = curr + cols; if (!visited[ni]) { visited[ni] = true; q[tail++] = ni } }
             }
             dist++
         }
@@ -1357,7 +1355,7 @@ class SnakeView @JvmOverloads constructor(
         c.drawText(
             "尾巴 ${if (ai.tailReachable) "Y" else "N"}   " +
                 "食物 ${if (ai.foodReachable) "Y" else "N"}   " +
-                "距离 ${if (ai.foodDistance < 0) "∞" else ai.foodDistance}",
+                "距离 ${if (ai.foodDistance < 0) "MAX" else ai.foodDistance}",
             left + 118f, top + 110f, text
         )
         val speedText = "速度 ${(1000f / gameSpeed).toInt()}步/秒   深度 ${ai.depth}" +
@@ -1432,7 +1430,7 @@ class SnakeView @JvmOverloads constructor(
                 text.color = Color.WHITE
                 c.drawText(
                     "空间${cand.region} 尾${if (cand.tailOk) "Y" else "N"} " +
-                        "食${if (cand.foodDist < 0) "∞" else cand.foodDist} " +
+                        "食${if (cand.foodDist < 0) "MAX" else cand.foodDist} " +
                         "分${"%.0f".format(cand.score)}",
                     barStartX + 8f, barY + 18f, text
                 )
@@ -1595,9 +1593,6 @@ class SnakeView @JvmOverloads constructor(
         try { aiPool.shutdownNow() } catch (_: Throwable) {}
     }
 
-    // ============================================================
-    // BGM 播放器
-    // ============================================================
     private class BgmPlayer {
         private var audioTrack: AudioTrack? = null
         @Volatile private var playing = false
