@@ -572,7 +572,7 @@ class SnakeView @JvmOverloads constructor(
         Executors.newFixedThreadPool(cores) { r ->
             Thread(r, "snake-ai").apply {
                 isDaemon = true
-                priority = Thread.MAX_PRIORITY
+                priority = Thread.NORM_PRIORITY - 1
             }
         }
     }
@@ -982,7 +982,7 @@ class SnakeView @JvmOverloads constructor(
             )
 
             t.isDaemon = true
-            t.priority = Thread.MAX_PRIORITY
+            t.priority = Thread.NORM_PRIORITY - 1
             t.start()
 
             trainThreads.add(t)
