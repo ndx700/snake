@@ -71,9 +71,11 @@ class MainActivity : AppCompatActivity() {
     private var scoreView: TextView? = null
     private var moneyView: TextView? = null
     private var aiBtn: Button? = null
+    private var trainingBtn: Button? = null
 
     private lateinit var prefs: android.content.SharedPreferences
     private var aiOn = true
+    private var trainingMode = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installCrashHandler(applicationContext)
@@ -86,42 +88,72 @@ class MainActivity : AppCompatActivity() {
 
             prefs = getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
             aiOn = prefs.getBoolean("ai_on", true)
+            trainingMode = prefs.getBoolean("training_mode", false)
 
             gameView = SnakeView(this)
-            gameView?.setAIMode(if (aiOn) 1 else 0)
+            gameView?.setTrainingMode(trainingMode)
+            gameView?.setAIMode(if (aiOn || trainingMode) 1 else 0)
 
-            // ========================================
-            // 唯一一行：分数 / 金币 / AI / 商店
-            // ========================================
             val row1 = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setPadding(12, 12, 12, 12)
+                setPadding(10, 12, 10, 12)
                 gravity = Gravity.CENTER_VERTICAL
             }
 
             scoreView = TextView(this).apply {
                 text = "分数: 0"
-                textSize = 15f
+                textSize = 14f
                 setTextColor(Color.WHITE)
             }
+
             moneyView = TextView(this).apply {
                 text = "金币: ${prefs.getInt("money", 0)}"
-                textSize = 15f
+                textSize = 14f
                 setTextColor(Color.rgb(241, 196, 15))
-                setPadding(14, 0, 0, 0)
+                setPadding(10, 0, 0, 0)
             }
 
             val spacer = FrameLayout(this).apply {
                 layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
             }
 
-            // AI ON / OFF 按钮（商店左边）
-            aiBtn = Button(this).apply {
-                textSize = 12f
+            trainingBtn = Button(this).apply {
+                textSize = 11f
                 setTextColor(Color.WHITE)
-                setPadding(10, 0, 10, 0)
+                setPadding(8, 0, 8, 0)
+                updateTrainingButton()
+                setOnClickListener {
+                    trainingMode = !trainingMode
+                    prefs.edit().putBoolean("training_mode", trainingMode).apply()
+
+                    if (trainingMode) {
+                        aiOn = true
+                        prefs.edit().putBoolean("ai_on", true).apply()
+                        gameView?.setAIMode(1)
+                        updateAiButton()
+                    }
+
+                    gameView?.setTrainingMode(trainingMode)
+                    updateTrainingButton()
+
+                    Toast.makeText(
+                        this,
+                        if (trainingMode) "🚀 训练模式：AI 加速中" else "已退出训练",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+
+            aiBtn = Button(this).apply {
+                textSize = 11f
+                setTextColor(Color.WHITE)
+                setPadding(8, 0, 8, 0)
                 updateAiButton()
                 setOnClickListener {
+                    if (trainingMode) {
+                        Toast.makeText(this@MainActivity, "训练模式下 AI 强制开启", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
                     aiOn = !aiOn
                     prefs.edit().putBoolean("ai_on", aiOn).apply()
                     gameView?.setAIMode(if (aiOn) 1 else 0)
@@ -133,19 +165,21 @@ class MainActivity : AppCompatActivity() {
                 text = "🛒"
                 textSize = 14f
                 setTextColor(Color.WHITE)
-                setPadding(12, 0, 12, 0)
+                setPadding(10, 0, 10, 0)
                 setBackgroundColor(Color.rgb(46, 204, 113))
                 setOnClickListener { showShopCategoryDialog() }
             }
 
+            val gap1 = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(6, 1) }
+            val gap2 = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(6, 1) }
+
             row1.addView(scoreView)
             row1.addView(moneyView)
             row1.addView(spacer)
+            row1.addView(trainingBtn)
+            row1.addView(gap1)
             row1.addView(aiBtn)
-            // 间距
-            row1.addView(FrameLayout(this).apply {
-                layoutParams = LinearLayout.LayoutParams(12, 1)
-            })
+            row1.addView(gap2)
             row1.addView(shop)
 
             val top = LinearLayout(this).apply {
@@ -209,6 +243,16 @@ class MainActivity : AppCompatActivity() {
         } else {
             aiBtn?.text = "AI OFF"
             aiBtn?.setBackgroundColor(Color.rgb(80, 80, 80))
+        }
+    }
+
+    private fun updateTrainingButton() {
+        if (trainingMode) {
+            trainingBtn?.text = "训练中"
+            trainingBtn?.setBackgroundColor(Color.rgb(231, 76, 60))
+        } else {
+            trainingBtn?.text = "训练AI"
+            trainingBtn?.setBackgroundColor(Color.rgb(52, 73, 94))
         }
     }
 
