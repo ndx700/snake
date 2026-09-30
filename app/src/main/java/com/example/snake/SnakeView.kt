@@ -321,9 +321,9 @@ class SnakeView @JvmOverloads constructor(
         val state: Int, val action: Int, val reward: Float,
         val nextState: Int, val nextMask: Int, val terminal: Boolean
     )
-    private val replayBuffer = ArrayList<Experience>(2000)
+    private val replayBuffer = ArrayList<Experience>(5000)
     private var replaySkipCounter = 0
-    private val REPLAY_CAPACITY = 2000
+    private val REPLAY_CAPACITY = 5000
 
     private fun qUpdate(
         state: Int,
@@ -365,10 +365,8 @@ class SnakeView @JvmOverloads constructor(
             nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
         }
 
-        // 经验回放：每3次才采样1次，减少CPU
-        replaySkipCounter++
-        if (replaySkipCounter >= 3) {
-            replaySkipCounter = 0
+        // 经验回放：每次都采样
+        {
             synchronized(replayBuffer) {
                 if (replayBuffer.isNotEmpty()) {
                     val e = replayBuffer[Random.nextInt(replayBuffer.size)]
@@ -654,7 +652,7 @@ class SnakeView @JvmOverloads constructor(
     private val trainThreads: MutableList<Thread> =
         mutableListOf()
 
-    private val TRAIN_THREADS = 4
+    private val TRAIN_THREADS = 6
 
     private val aiPool: ExecutorService = run {
         val cores =
@@ -773,7 +771,7 @@ class SnakeView @JvmOverloads constructor(
             lastFrame = ns
 
             if (reinforceTraining) {
-                if ((++renderSkipCounter % 5) == 0) {
+                if ((++renderSkipCounter % 2) == 0) {
                     invalidate()
                 }
 
@@ -816,7 +814,7 @@ class SnakeView @JvmOverloads constructor(
 
             val shouldRender =
                 if (trainingMode) {
-                    (++renderSkipCounter % 5) == 0
+                    (++renderSkipCounter % 2) == 0
                 } else {
                     true
                 }
