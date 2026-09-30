@@ -260,7 +260,9 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private val qV2 = FloatArray(V2_Q_SIZE)
+    private val qTarget = FloatArray(V2_Q_SIZE)
     private val nV2 = IntArray(V2_Q_SIZE)
+    private var targetUpdateCounter = 0
 
     private val qLocks = Array(V2_LOCKS) { Any() }
 
@@ -303,23 +305,29 @@ class SnakeView @JvmOverloads constructor(
     private fun qMax(state: Int, legalMask: Int = 15): Float {
         if (state !in 0 until V2_STATE_COUNT) return 0f
 
-        var best = -Float.MAX_VALUE
-
+        // Double DQN: 用qV2选最优动作，用qTarget评估
+        var bestAction = 0
+        var bestQ = -Float.MAX_VALUE
         synchronized(qLock(state)) {
             for (a in 0 until 4) {
                 if ((legalMask and (1 shl a)) == 0) continue
                 val v = qV2[qIndex(state, a)]
-                if (v > best) best = v
+                if (v > bestQ) {
+                    bestQ = v
+                    bestAction = a
+                }
             }
         }
-
-        return if (best == -Float.MAX_VALUE) 0f else best
+        if (bestQ == -Float.MAX_VALUE) return 0f
+        // 用target网络评估这个动作
+        return qTarget[qIndex(state, bestAction)]
     }
 
     // 经验回放buffer（用ArrayList支持O(1)随机访问）
     private data class Experience(
         val state: Int, val action: Int, val reward: Float,
-        val nextState: Int, val nextMask: Int, val terminal: Boolean
+        val nextState: Int, val nextMask: Int, val terminal: Boolean,
+        val tdError: Float = 0f
     )
     private val replayBuffer = ArrayList<Experience>(5000)
     private var replaySkipCounter = 0
@@ -338,9 +346,11 @@ class SnakeView @JvmOverloads constructor(
 
         visitedStates.add(state)
 
+        // 计算TD误差用于优先经验回放
+        val tdErr = if (terminal) reward else (reward + GAMMA * qMax(nextState, nextMask) - qV2[idx])
         // 存入经验回放buffer
         synchronized(replayBuffer) {
-            replayBuffer.add(Experience(state, action, reward, nextState, nextMask, terminal))
+            replayBuffer.add(Experience(state, action, reward, nextState, nextMask, terminal, tdErr))
             if (replayBuffer.size > REPLAY_CAPACITY) replayBuffer.removeAt(0)
         }
 
@@ -361,15 +371,21 @@ class SnakeView @JvmOverloads constructor(
             val old = qV2[idx]
             val updated = old + alpha * (target - old)
 
-            qV2[idx] = updated.coerceIn(-50f, 50f)
+            qV2[idx] = updated.coerceIn(-10f, 10f)
             nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
         }
 
-        // 经验回放：每次都采样
+        // 经验回放：优先采样TD误差大的经验
         {
             synchronized(replayBuffer) {
                 if (replayBuffer.isNotEmpty()) {
-                    val e = replayBuffer[Random.nextInt(replayBuffer.size)]
+                    // 随机抽5条，选TD误差最大的1条学
+                    var bestE = replayBuffer[Random.nextInt(replayBuffer.size)]
+                    repeat(4) {
+                        val candidate = replayBuffer[Random.nextInt(replayBuffer.size)]
+                        if (abs(candidate.tdError) > abs(bestE.tdError)) bestE = candidate
+                    }
+                    val e = bestE
                     val eidx = qIndex(e.state, e.action)
                     synchronized(qLock(eidx)) {
                         evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
@@ -379,6 +395,13 @@ class SnakeView @JvmOverloads constructor(
         }
 
         v2LearningSteps++
+
+        // 每2000步同步一次target网络
+        targetUpdateCounter++
+        if (targetUpdateCounter >= 2000) {
+            targetUpdateCounter = 0
+            System.arraycopy(qV2, 0, qTarget, 0, qV2.size)
+        }
     }
 
     private fun evoUpdate(state: Int, action: Int, reward: Float, nextState: Int, nextMask: Int, terminal: Boolean) {
@@ -391,7 +414,7 @@ class SnakeView @JvmOverloads constructor(
         val target = if (terminal) reward else reward + GAMMA * nextBest
         val old = qV2[idx]
         val updated = old + alpha * (target - old)
-        qV2[idx] = updated.coerceIn(-50f, 50f)
+        qV2[idx] = updated.coerceIn(-10f, 10f)
         nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
     }
 
