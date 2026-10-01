@@ -220,6 +220,7 @@ class SnakeView @JvmOverloads constructor(
 
     private companion object {
         const val V2_FOOD_DIR = 4
+        const val V2_FOODDIST = 3    // 新增：食物距离桶（近/中/远）
         const val V2_DANGER = 16
         const val V2_MOBILITY = 5
         const val V2_SPACE = 4
@@ -230,6 +231,7 @@ class SnakeView @JvmOverloads constructor(
 
         const val V2_STATE_COUNT =
             V2_FOOD_DIR *
+            V2_FOODDIST *
             V2_DANGER *
             V2_MOBILITY *
             V2_SPACE *
@@ -272,6 +274,7 @@ class SnakeView @JvmOverloads constructor(
         const val N_STEP = 3                     // N-step 回报步数
         const val POLYAK_TAU = 0.02f             // target 网络软更新系数
         const val CURIOSITY_VISIT_BONUS = 0.015f // 低访问状态额外好奇
+        const val TRAIN_SAVE_VERSION = 5         // 存档版本号（NN加宽了）
     }
 
     private val qV2 = FloatArray(V2_Q_SIZE)
@@ -281,6 +284,7 @@ class SnakeView @JvmOverloads constructor(
 
     // === 进化增强 v3 状态 ===
     private var prevFoodDist = -1          // 上一步到食物的曼哈顿距离
+    private var prevRegion = -1            // 上一步的连通空间大小
     private val nstepBuf = ArrayDeque<Experience>(N_STEP + 2)  // N-step 回报缓冲
     private var recentWinStreak = 0         // 近期存活表现，用于自适应学习率
     private var recentDeathCount = 0
@@ -395,10 +399,11 @@ class SnakeView @JvmOverloads constructor(
                 nReturn += e.reward * discount
                 discount *= GAMMA
             }
-            // 用最后一步的 nextState 估计剩余价值
+            // 用最后一步的 nextState 估计剩余价值，乘以 γ^n
             val last = nstepBuf.last()
             val bootstrap = if (last.terminal) 0f else qMax(last.nextState, last.nextMask)
-            val nTarget = nReturn + GAMMA * nstepBuf.size * bootstrap
+            val gammaN = Math.pow(GAMMA.toDouble(), nstepBuf.size.toDouble()).toFloat()
+            val nTarget = nReturn + gammaN * bootstrap
             evoUpdate(first.state, first.action, nTarget, last.nextState, last.nextMask, last.terminal)
             nstepBuf.removeFirst()
         }
@@ -501,28 +506,28 @@ class SnakeView @JvmOverloads constructor(
      * =========================
      */
     private inner class TinyBrain {
-        // 12输入 -> 32隐藏 -> 16隐藏 -> 4输出
-        var w1 = FloatArray(12 * 32) { Random.nextFloat() * 2f - 1f }
-        var w2 = FloatArray(32 * 16) { Random.nextFloat() * 2f - 1f }
-        var w3 = FloatArray(16 * 4) { Random.nextFloat() * 2f - 1f }
+        // 12输入 -> 48隐藏 -> 24隐藏 -> 4输出
+        var w1 = FloatArray(12 * 48) { Random.nextFloat() * 2f - 1f }
+        var w2 = FloatArray(48 * 24) { Random.nextFloat() * 2f - 1f }
+        var w3 = FloatArray(24 * 4) { Random.nextFloat() * 2f - 1f }
 
         fun think(inputs: FloatArray): FloatArray {
-            val h1 = FloatArray(32)
-            for (i in 0 until 32) {
+            val h1 = FloatArray(48)
+            for (i in 0 until 48) {
                 var sum = 0f
-                for (j in 0 until 12) sum += inputs[j] * w1[j * 32 + i]
+                for (j in 0 until 12) sum += inputs[j] * w1[j * 48 + i]
                 h1[i] = max(0f, sum)
             }
-            val h2 = FloatArray(16)
-            for (i in 0 until 16) {
+            val h2 = FloatArray(24)
+            for (i in 0 until 24) {
                 var sum = 0f
-                for (j in 0 until 32) sum += h1[j] * w2[j * 16 + i]
+                for (j in 0 until 48) sum += h1[j] * w2[j * 24 + i]
                 h2[i] = max(0f, sum)
             }
             val outputs = FloatArray(4)
             for (i in 0 until 4) {
                 var sum = 0f
-                for (j in 0 until 16) sum += h2[j] * w3[j * 4 + i]
+                for (j in 0 until 24) sum += h2[j] * w3[j * 4 + i]
                 outputs[i] = sum
             }
             return outputs
@@ -1620,6 +1625,9 @@ class SnakeView @JvmOverloads constructor(
 
             placeFood()
 
+            // 新食物位置变了，重置距离追踪
+            prevFoodDist = -1
+
             reward +=
                 REWARD_FOOD +
                     combo * 0.06f
@@ -1668,6 +1676,14 @@ class SnakeView @JvmOverloads constructor(
 
             // 长蛇存活奖励：蛇越长越难活，每多走一步给微小奖励
             if (snake.size > 20) reward += REWARD_LONG_SURVIVE * (snake.size / 20f)
+
+            // 空间连通性变化：走这步后空间变大给奖励，变小给惩罚
+            val newRegion = freeRegion(snake)
+            if (prevRegion >= 0) {
+                val regionDelta = newRegion - prevRegion
+                reward += regionDelta * 0.02f
+            }
+            prevRegion = newRegion
         }
 
         val nextState =
@@ -1824,6 +1840,14 @@ class SnakeView @JvmOverloads constructor(
                 target
             )
 
+        // 食物距离桶：近(<5) / 中(5~12) / 远(>12)
+        val foodDistVal = abs(h.x - target.x) + abs(h.y - target.y)
+        val foodDistBucket = when {
+            foodDistVal < 5 -> 0
+            foodDistVal < 12 -> 1
+            else -> 2
+        }
+
         val danger =
             dangerMask(
                 body,
@@ -1881,6 +1905,7 @@ class SnakeView @JvmOverloads constructor(
 
         var s = foodD
 
+        s = s * V2_FOODDIST + foodDistBucket
         s = s * V2_DANGER + danger
         s = s * V2_MOBILITY + mobility
         s = s * V2_SPACE + spaceBucket
@@ -2181,11 +2206,24 @@ class SnakeView @JvmOverloads constructor(
         /*
          * 第一层：真正安全的食物路线。
          * 这是硬安全层，不交给探索破坏。
+         * 长蛇（>50）时更保守：吃完后空间率必须 >1.3 才允许吃。
          */
         val safeFood =
             findSafeFoodStep()
 
-        if (safeFood != null) {
+        // 长蛇保守模式：蛇很长时，安全食物条件更严格
+        val longSnakeMode = snake.size > 50
+        var safeFoodOk = safeFood != null
+        if (longSnakeMode && safeFood != null) {
+            val sim = simulateOn(ArrayDeque(snake), safeFood)
+            val afterRegion = freeRegion(sim.body)
+            val afterRatio = afterRegion.toFloat() / max(1, sim.body.size)
+            if (afterRatio < 1.3f) safeFoodOk = false
+        }
+        // 封闭区硬屏蔽：食物在小封闭区时，第一层也不许去吃
+        if (safeFoodOk && closedFoodZone) safeFoodOk = false
+
+        if (safeFoodOk) {
             val action =
                 dirs.indexOfFirst {
                     it == safeFood
@@ -2484,7 +2522,7 @@ class SnakeView @JvmOverloads constructor(
                         deadEndPenalty +
                         extraDeadPenalty +
                         centerB +
-                        rolloutScore * 0.5f
+                        rolloutScore * 0.15f
             if (mixed > bestValue) {
                 bestValue = mixed
                 best = candidate.copy(qValue = q)
@@ -3505,7 +3543,7 @@ class SnakeView @JvmOverloads constructor(
     private fun saveTrainingState() {
         try {
             val file = context.getFileStreamPath("snake_training.dat")
-            
+
             val genCopy: Int
             val scoreCopy: Float
             val qCopy: FloatArray
@@ -3527,6 +3565,7 @@ class SnakeView @JvmOverloads constructor(
             }
 
             DataOutputStream(BufferedOutputStream(FileOutputStream(file))).use { out ->
+                out.writeInt(TRAIN_SAVE_VERSION)  // 版本号
                 out.writeInt(genCopy)
                 out.writeFloat(scoreCopy)
                 for (brain in popCopy) {
@@ -3546,8 +3585,14 @@ class SnakeView @JvmOverloads constructor(
         try {
             val file = context.getFileStreamPath("snake_training.dat")
             if (!file.exists()) return
-            
+
             DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
+                val ver = input.readInt()
+                if (ver != TRAIN_SAVE_VERSION) {
+                    // 版本不兼容（NN结构变了），删旧档重新开始
+                    file.delete()
+                    return
+                }
                 generation = input.readInt()
                 bestScoreAllTime = input.readFloat()
                 for (i in 0 until POPULATION_SIZE) {
@@ -3660,6 +3705,7 @@ class SnakeView @JvmOverloads constructor(
 
         // === 进化增强 v3：重置追踪状态 + 自适应学习率 ===
         prevFoodDist = -1
+        prevRegion = -1
         nstepBuf.clear()
         recentDeathCount++
         // 连续死得快就加速学习，活得久就降速防止震荡
@@ -3862,36 +3908,40 @@ class SnakeView @JvmOverloads constructor(
         val dirs = listOf(P(0,-1), P(0,1), P(-1,0), P(1,0))
         var prevDist = abs(body.first().x - food.x) + abs(body.first().y - food.y)
         for (step in 0 until maxSteps) {
-            // 找这个方向上最安全的下一步：综合空间 + 靠近食物
+            // 优先用 BFS 最短路径朝食物走
+            val path = shortestPath(body.first(), food, body, true)
             var bestNext: P? = null
-            var bestScore = -1e9f
-            for (d in dirs) {
-                val nh = P(body.first().x + d.x, body.first().y + d.y)
-                if (!inside(nh)) continue
-                val isTail = nh == body.last()
-                if (body.contains(nh) && !isTail) continue
-                // 数周围空间
-                var space = 0
-                for (sd in dirs) {
-                    val sx = nh.x + sd.x
-                    val sy = nh.y + sd.y
-                    if (sx in 0 until cols && sy in 0 until rows) {
-                        if (!body.any { it.x == sx && it.y == sy }) space++
+            if (path != null && path.isNotEmpty()) {
+                bestNext = path.first()
+            }
+            // 没找到路径就 fallback 到贪心选最安全方向
+            if (bestNext == null) {
+                var bestScore = -1e9f
+                for (d in dirs) {
+                    val nh = P(body.first().x + d.x, body.first().y + d.y)
+                    if (!inside(nh)) continue
+                    val isTail = nh == body.last()
+                    if (body.contains(nh) && !isTail) continue
+                    var space = 0
+                    for (sd in dirs) {
+                        val sx = nh.x + sd.x
+                        val sy = nh.y + sd.y
+                        if (sx in 0 until cols && sy in 0 until rows) {
+                            if (!body.any { it.x == sx && it.y == sy }) space++
+                        }
                     }
+                    val dist = abs(nh.x - food.x) + abs(nh.y - food.y)
+                    val s = space * 10f - dist * 1.5f
+                    if (s > bestScore) { bestScore = s; bestNext = d }
                 }
-                // 食物距离分
-                val dist = abs(nh.x - food.x) + abs(nh.y - food.y)
-                val s = space * 10f - dist * 1.5f
-                if (s > bestScore) { bestScore = s; bestNext = d }
             }
             if (bestNext == null) return -50f + step * -10f
             val sim = simulateOn(body, bestNext)
             body = sim.body
             score += 5f
-            if (sim.ate) score += 20f
-            // 距离变化奖励
+            if (sim.ate) score += 25f
             val newDist = abs(body.first().x - food.x) + abs(body.first().y - food.y)
-            score += (prevDist - newDist) * 0.8f
+            score += (prevDist - newDist) * 1.0f
             prevDist = newDist
             dir = bestNext
         }
@@ -8015,6 +8065,23 @@ class SnakeView @JvmOverloads constructor(
                 -spacePenalty *
                     wSpace
 
+            // === V3 同步：双步死胡同 + 中心引导 ===
+            var gDeadStep = 0f
+            val expHead = P(sim.body.first().x, sim.body.first().y)
+            var safeNext = 0
+            for (nd in dirs) {
+                val np = P(expHead.x + nd.x, expHead.y + nd.y)
+                if (np.x in 0 until cols && np.y in 0 until rows) {
+                    val isTail = np == sim.body.last()
+                    if (!sim.body.contains(np) || isTail) safeNext++
+                }
+            }
+            if (safeNext <= 1) gDeadStep = -180f
+
+            val gCenterDist = abs(expHead.x - cols/2f) + abs(expHead.y - rows/2f)
+            val gCenterB = (10f - gCenterDist).coerceAtLeast(0f) *
+                          (if (region < gSnake.size * 1.5f) 2.4f else 0.4f)
+
             val totalScore =
                 regionScore +
                     mobilityScore +
@@ -8022,7 +8089,9 @@ class SnakeView @JvmOverloads constructor(
                     foodScore +
                     edgeScore +
                     spaceScore +
-                    eatPenalty
+                    eatPenalty +
+                    gDeadStep +
+                    gCenterB
 
             return Candidate(
                 d,
