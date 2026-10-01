@@ -6297,19 +6297,19 @@ class SnakeView @JvmOverloads constructor(
             c.drawText(
                 "本代最佳 ${"%.0f".format(bestScoreThisGen)}   历史最佳 ${"%.0f".format(bestScoreAllTime)}",
                 left + 16f,
-                infoY + 20f,
+                infoY + 18f,
                 text
             )
             c.drawText(
                 "Q表权重 ${"%.2f".format(qWeight)}   神经网络权重 ${"%.2f".format(nnWeight)}",
                 left + 16f,
-                infoY + 40f,
+                infoY + 36f,
                 text
             )
             c.drawText(
                 "回放${replayBuffer.size}/${REPLAY_CAPACITY}   ε${"%.2f".format(v2Epsilon)}   步${v2LearningSteps}",
                 left + 16f,
-                infoY + 58f,
+                infoY + 54f,
                 text
             )
             val learnStatus = when {
@@ -6323,18 +6323,18 @@ class SnakeView @JvmOverloads constructor(
             text.textSize = 13f
             text.isFakeBoldText = true
             text.color = Color.rgb(100, 220, 255)
-            c.drawText(learnStatus, left + 16f, infoY + 60f, text)
+            c.drawText(learnStatus, left + 16f, infoY + 74f, text)
 
             // 死局预判指示器
             if (deadEndPredicted) {
                 text.color = Color.rgb(255, 80, 80)
-                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 78f, text)
+                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
             } else {
                 text.color = Color.rgb(80, 200, 120)
-                c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 78f, text)
+                c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
             }
             text.color = if (rolloutActive) Color.rgb(180, 180, 255) else Color.rgb(100, 100, 120)
-            c.drawText(if (rolloutActive) "🔮 前瞻模拟${rolloutSteps}步（蛇长${snake.size}）" else "🔮 前瞻模拟：蛇短不启用", left + 16f, infoY + 96f, text)
+            c.drawText(if (rolloutActive) "🔮 前瞻模拟${rolloutSteps}步（蛇长${snake.size}）" else "🔮 前瞻模拟：蛇短不启用", left + 16f, infoY + 112f, text)
             text.isFakeBoldText = false
             text.color = Color.WHITE
             text.textSize = 14f
@@ -6357,7 +6357,7 @@ class SnakeView @JvmOverloads constructor(
                     v2LearningSteps
                 }",
                 left + 16f,
-                infoY + 20f,
+                infoY + 18f,
                 text
             )
 
@@ -6376,7 +6376,7 @@ class SnakeView @JvmOverloads constructor(
                     )
                 }",
                 left + 16f,
-                infoY + 40f,
+                infoY + 36f,
                 text
             )
         }
