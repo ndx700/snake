@@ -512,6 +512,12 @@ class SnakeView @JvmOverloads constructor(
             for (i in child.w1.indices) child.w1[i] += (Random.nextFloat() - 0.5f) * mut
             for (i in child.w2.indices) child.w2[i] += (Random.nextFloat() - 0.5f) * mut
         }
+
+        fun deepCopy(): DuelingBrain {
+            val copy = DuelingBrain()
+            copy.copyFrom(this)
+            return copy
+        }
     }
 
     // ==========================================
@@ -764,7 +770,11 @@ class SnakeView @JvmOverloads constructor(
 
         @Synchronized
         fun updatePriority(exp: Experience, newTdError: Float) {
-            exp.tdError = newTdError.coerceIn(0.001f, 100f)
+            exp.tdError = if (newTdError.isNaN() || newTdError.isInfinite()) {
+                0.001f
+            } else {
+                newTdError.coerceIn(0.001f, 100f)
+            }
         }
 
         @Synchronized
@@ -790,7 +800,11 @@ class SnakeView @JvmOverloads constructor(
                     1 -> 0.4
                     else -> 0.15
                 }
-                val priority = max(0.001, e.tdError.toDouble().coerceIn(0.001, 100.0))
+                val priority = if (e.tdError.isNaN() || e.tdError.isInfinite()) {
+                    0.001
+                } else {
+                    max(0.001, e.tdError.toDouble().coerceIn(0.001, 100.0))
+                }
                 sumPriority += priority * genWeight
             }
             if (sumPriority <= 0.0) return emptyList()
@@ -807,7 +821,11 @@ class SnakeView @JvmOverloads constructor(
                         1 -> 0.4
                         else -> 0.15
                     }
-                    val priority = max(0.001, e.tdError.toDouble().coerceIn(0.001, 100.0))
+                    val priority = if (e.tdError.isNaN() || e.tdError.isInfinite()) {
+                        0.001
+                    } else {
+                        max(0.001, e.tdError.toDouble().coerceIn(0.001, 100.0))
+                    }
                     val p = priority * genWeight
                     r -= p
                     if (r <= 0.0) {
@@ -846,24 +864,24 @@ class SnakeView @JvmOverloads constructor(
         val nextBest = if (terminal || nextMask == 0) 0f else doubleQTarget(nextState, nextMask)
         val oldValue = synchronized(qStateLock(state)) { qV2[idx] }
         val target = if (terminal) reward else reward + GAMMA * nextBest
-        val tdErr = abs(target - oldValue)
+        val rawTdErr = abs(target - oldValue)
+        val safeTdErr = if (rawTdErr.isNaN() || rawTdErr.isInfinite()) 1.0f else rawTdErr.coerceIn(0.001f, 100.0f)
 
         val curGen = generation
-        replayBuffer.add(
-            Experience(
-                agentId = agentId,
-                vector = vector.copyOf(),
-                state = state,
-                action = action,
-                reward = reward,
-                nextVector = nextVector?.copyOf(),
-                nextState = nextState,
-                nextMask = nextMask,
-                terminal = terminal,
-                tdError = tdErr,
-                generation = curGen
-            )
+        val exp = Experience(
+            agentId = agentId,
+            vector = vector.copyOf(),
+            state = state,
+            action = action,
+            reward = reward,
+            nextVector = nextVector?.copyOf(),
+            nextState = nextState,
+            nextMask = nextMask,
+            terminal = terminal,
+            tdError = safeTdErr,
+            generation = curGen
         )
+        replayBuffer.add(exp)
 
         synchronized(qStateLock(state)) {
             val visits = nV2[idx]
@@ -943,121 +961,151 @@ class SnakeView @JvmOverloads constructor(
     }
 
     // 修复一：确保在 population 重组被覆盖前抓取 champion 快照，并在 masterBrainLock 保护下写入
-    private fun evolveNextGeneration(evalGame: TrainGame? = null) {
-        evolving = true
-        generation++
-        try {
-            val fitnessCopy = FloatArray(POPULATION_SIZE)
-            val avgScoresCopy = FloatArray(POPULATION_SIZE)
-            synchronized(sharedLock) {
+    private fun evolveNextGeneration(evalGame: TrainGame? = null, runId: Long) {
+        synchronized(evolveLock) {
+            if (!isTrainingRunActive(runId)) {
+                synchronized(sharedLock) { evolving = false }
+                return
+            }
+
+            try {
+                // STEP 4: 冻结当前代，提取完整的 Agent 快照 (Brain & Genome)
+                val parentBrains = ArrayList<DuelingBrain>(POPULATION_SIZE)
+                val parentGenomes = ArrayList<V4StrategyGenome>(POPULATION_SIZE)
+                val fitnessCopy = FloatArray(POPULATION_SIZE)
+                val avgScoresCopy = FloatArray(POPULATION_SIZE)
+
                 for (i in 0 until POPULATION_SIZE) {
-                    fitnessCopy[i] = agentStats[i].computeFitness()
-                    avgScoresCopy[i] = if (agentStats[i].gamesPlayed > 0) {
-                        agentStats[i].totalScore / agentStats[i].gamesPlayed
-                    } else 0f
-                    currentScores[i] = avgScoresCopy[i]
-                    currentFitnesses[i] = fitnessCopy[i]
-                }
-            }
-
-            val sortedIndices = (0 until POPULATION_SIZE)
-                .filter { !fitnessCopy[it].isNaN() }
-                .sortedByDescending { fitnessCopy[it] }
-
-            val bestIndices = if (sortedIndices.isNotEmpty()) {
-                sortedIndices.take(minOf(10, sortedIndices.size))
-            } else {
-                (0 until minOf(10, POPULATION_SIZE)).toList()
-            }
-
-            val bestIdx = bestIndices[0]
-            val bestScore = avgScoresCopy[bestIdx]
-            bestScoreThisGen = bestScore
-            if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
-
-            // 关键修复一：在修改 population 之前，先单独复制真正上一代冠军
-            val championBrain = DuelingBrain().also {
-                synchronized(brainLocks[bestIdx]) {
-                    it.copyFrom(population[bestIdx])
-                }
-            }
-            val championGenome = populationGenomes[bestIdx].deepCopy()
-
-            val bestBrains = bestIndices.map { idx ->
-                DuelingBrain().also { copy ->
-                    synchronized(brainLocks[idx]) { copy.copyFrom(population[idx]) }
-                }
-            }
-            val bestGenomes = bestIndices.map { populationGenomes[it].deepCopy() }
-
-            // 产生下一代种群
-            for (i in 0 until POPULATION_SIZE) {
-                try {
+                    val brainCopy = DuelingBrain()
+                    var genomeCopy: V4StrategyGenome
                     synchronized(brainLocks[i]) {
-                        when {
-                            i < bestBrains.size -> {
-                                population[i].copyFrom(bestBrains[i])
-                                populationGenomes[i].copyFrom(bestGenomes[i])
+                        brainCopy.copyFrom(population[i])
+                        genomeCopy = populationGenomes[i].deepCopy()
+                    }
+                    parentBrains.add(brainCopy)
+                    parentGenomes.add(genomeCopy)
+                }
+
+                synchronized(sharedLock) {
+                    for (i in 0 until POPULATION_SIZE) {
+                        fitnessCopy[i] = agentStats[i].computeFitness()
+                        avgScoresCopy[i] = if (agentStats[i].gamesPlayed > 0) {
+                            agentStats[i].totalScore / agentStats[i].gamesPlayed
+                        } else 0f
+                        currentScores[i] = avgScoresCopy[i]
+                        currentFitnesses[i] = fitnessCopy[i]
+                    }
+                }
+
+                // STEP 5 & 6: 确定 Champion
+                val sortedIndices = (0 until POPULATION_SIZE)
+                    .filter { !fitnessCopy[it].isNaN() }
+                    .sortedByDescending { fitnessCopy[it] }
+
+                val bestIndices = if (sortedIndices.isNotEmpty()) {
+                    sortedIndices.take(minOf(10, sortedIndices.size))
+                } else {
+                    (0 until minOf(10, POPULATION_SIZE)).toList()
+                }
+
+                val bestIdx = bestIndices[0]
+                val bestScore = avgScoresCopy[bestIdx]
+                bestScoreThisGen = bestScore
+                if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
+
+                // STEP 7: 立即深拷贝真正的 Champion 快照（此时完全来自 parentBrains/parentGenomes，尚未被覆写）
+                val championBrain = parentBrains[bestIdx].deepCopy()
+                val championGenome = parentGenomes[bestIdx].deepCopy()
+
+                // STEP 8: 使用 Champion snapshot 进行独立 Evaluation（不污染 Replay，不更新 Q，不占槽位）
+                if (generation % 5 == 0 && evalGame != null && isTrainingRunActive(runId)) {
+                    try {
+                        evalGame.playEvaluationGame(championBrain, championGenome)
+                    } catch (_: Throwable) {}
+                }
+
+                // STEP 9: 根据“当前代冻结快照”完全生成下一代
+                val nextBrains = ArrayList<DuelingBrain>(POPULATION_SIZE)
+                val nextGenomes = ArrayList<V4StrategyGenome>(POPULATION_SIZE)
+
+                val eliteCount = minOf(10, bestIndices.size)
+                val eliteBrains = bestIndices.take(eliteCount).map { parentBrains[it].deepCopy() }
+                val eliteGenomes = bestIndices.take(eliteCount).map { parentGenomes[it].deepCopy() }
+
+                for (i in 0 until POPULATION_SIZE) {
+                    when {
+                        i < eliteCount -> {
+                            nextBrains.add(eliteBrains[i].deepCopy())
+                            nextGenomes.add(eliteGenomes[i].deepCopy())
+                        }
+                        i < 40 -> {
+                            val p1Idx = Random.nextInt(eliteCount)
+                            var p2Idx = Random.nextInt(eliteCount)
+                            while (p2Idx == p1Idx && eliteCount > 1) {
+                                p2Idx = Random.nextInt(eliteCount)
                             }
-                            i < 40 -> {
-                                val p1Idx = Random.nextInt(bestBrains.size)
-                                var p2Idx = Random.nextInt(bestBrains.size)
-                                while (p2Idx == p1Idx && bestBrains.size > 1) {
-                                    p2Idx = Random.nextInt(bestBrains.size)
-                                }
-                                val p1 = bestBrains[p1Idx]
-                                val p2 = bestBrains[p2Idx]
-                                val child = DuelingBrain()
-                                p1.crossover(p2, child)
-                                population[i] = child
-                                populationGenomes[i] = bestGenomes[p1Idx].crossover(bestGenomes[p2Idx])
-                            }
-                            else -> {
-                                val pIdx = Random.nextInt(bestBrains.size)
-                                val parent = bestBrains[pIdx]
-                                val child = DuelingBrain()
-                                parent.breed(child)
-                                population[i] = child
-                                populationGenomes[i] = bestGenomes[pIdx].deepCopy().also { it.mutate(1.4f) }
-                            }
+                            val childBrain = DuelingBrain()
+                            eliteBrains[p1Idx].crossover(eliteBrains[p2Idx], childBrain)
+                            val childGenome = eliteGenomes[p1Idx].crossover(eliteGenomes[p2Idx])
+                            nextBrains.add(childBrain)
+                            nextGenomes.add(childGenome)
+                        }
+                        else -> {
+                            val pIdx = Random.nextInt(eliteCount)
+                            val childBrain = eliteBrains[pIdx].deepCopy()
+                            childBrain.mutate(if (generation < 10) 0.18f else if (generation < 30) 0.10f else 0.05f)
+                            val childGenome = eliteGenomes[pIdx].deepCopy().also { it.mutate(1.4f) }
+                            nextBrains.add(childBrain)
+                            nextGenomes.add(childGenome)
                         }
                     }
-                } catch (_: Exception) {}
-            }
-
-            // 关键修复一：无嵌套锁保护下，将真正冠军同步给主游戏决策脑
-            synchronized(masterBrainLock) {
-                masterBrain.copyFrom(championBrain)
-                masterGenome.copyFrom(championGenome)
-            }
-
-            synchronized(sharedLock) {
-                for (i in 0 until POPULATION_SIZE) {
-                    agentStats[i].reset()
-                    currentScores[i] = 0f
                 }
-            }
 
-            // Evaluation 验证
-            if (generation % 5 == 0 && evalGame != null) {
-                try {
-                    evalGame.playOneGame(bestIdx, isEvaluation = true)
-                } catch (_: Throwable) {}
-            }
+                // STEP 10 & 11: 一次性原子提交下一代到 population
+                if (!isTrainingRunActive(runId)) {
+                    return
+                }
 
-            val baseRatio = (generation / 30f).coerceIn(0f, 0.7f)
-            val scoreBonus = (bestScoreThisGen / 25000f).coerceIn(0f, 0.15f)
-            nnWeight = (baseRatio + scoreBonus).coerceIn(0.2f, 0.8f)
-            qWeight = 1.0f - nnWeight
+                for (i in 0 until POPULATION_SIZE) {
+                    synchronized(brainLocks[i]) {
+                        population[i].copyFrom(nextBrains[i])
+                        populationGenomes[i].copyFrom(nextGenomes[i])
+                    }
+                }
 
-            Thread { try { saveTrainingState() } catch (_: Exception) {} }.apply {
-                isDaemon = true
-                start()
+                // STEP 12: 更新主游戏 masterBrain / masterGenome（使用真正的 Champion 快照）
+                synchronized(masterBrainLock) {
+                    masterBrain.copyFrom(championBrain)
+                    masterGenome.copyFrom(championGenome)
+                }
+
+                // STEP 13 & 14 & 15: generation++ 并重置任务计数器
+                synchronized(sharedLock) {
+                    generation++
+                    for (i in 0 until POPULATION_SIZE) {
+                        agentStats[i].reset()
+                        currentScores[i] = 0f
+                    }
+                    currentTaskIndex = 0
+                    completedTasks = 0
+                }
+
+                val baseRatio = (generation / 30f).coerceIn(0f, 0.7f)
+                val scoreBonus = (bestScoreThisGen / 25000f).coerceIn(0f, 0.15f)
+                nnWeight = (baseRatio + scoreBonus).coerceIn(0.2f, 0.8f)
+                qWeight = 1.0f - nnWeight
+
+                Thread {
+                    try { saveTrainingState() } catch (_: Exception) {}
+                }.apply {
+                    isDaemon = true
+                    start()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                synchronized(sharedLock) { evolving = false }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        } finally {
-            evolving = false
         }
     }
 
@@ -1401,16 +1449,15 @@ class SnakeView @JvmOverloads constructor(
             trainActive = false
             trainingRunId++
         }
-        val oldThreads = synchronized(trainThreads) { trainThreads.toList() }
+        val oldThreads = synchronized(trainingLifecycleLock) { trainThreads.toList() }
         for (t in oldThreads) { try { t.interrupt() } catch (_: Throwable) {} }
         for (t in oldThreads) {
-            try { t.join(1000) } catch (_: InterruptedException) { break }
+            try { t.join(1000L) } catch (_: InterruptedException) { break }
         }
-        synchronized(trainThreads) {
-            trainThreads.removeAll { !it.isAlive }
+        synchronized(trainingLifecycleLock) {
+            trainThreads.clear()
         }
-        if (trainThreads.none { it.isAlive }) {
-            synchronized(trainThreads) { trainThreads.clear() }
+        if (running && reinforceTraining) {
             startParallelTraining()
         }
     }
@@ -1431,13 +1478,16 @@ class SnakeView @JvmOverloads constructor(
             trainActive = true
             trainThreads.clear()
 
-            currentTaskIndex = 0
-            completedTasks = 0
-            bestScoreThisGen = 0f
-            for (i in 0 until POPULATION_SIZE) {
-                agentStats[i].reset()
-                currentScores[i] = 0f
-                currentFitnesses[i] = 0f
+            synchronized(sharedLock) {
+                currentTaskIndex = 0
+                completedTasks = 0
+                evolving = false
+                bestScoreThisGen = 0f
+                for (i in 0 until POPULATION_SIZE) {
+                    agentStats[i].reset()
+                    currentScores[i] = 0f
+                    currentFitnesses[i] = 0f
+                }
             }
 
             for (i in 0 until TRAIN_THREADS) {
@@ -1454,9 +1504,13 @@ class SnakeView @JvmOverloads constructor(
                                 continue
                             }
                             var task = -1
+                            var taskGen = -1
                             synchronized(sharedLock) {
-                                if (currentTaskIndex < totalTasks) {
-                                    task = currentTaskIndex++
+                                if (isTrainingRunActive(myRunId) && !evolving) {
+                                    if (currentTaskIndex < totalTasks) {
+                                        task = currentTaskIndex++
+                                        taskGen = generation
+                                    }
                                 }
                             }
                             if (task == -1) {
@@ -1465,21 +1519,28 @@ class SnakeView @JvmOverloads constructor(
                             }
                             val agentId = task / GAMES_PER_AGENT
 
+                            var completedNormally = false
                             try {
-                                game.playOneGame(agentId, isEvaluation = false)
+                                game.playOneGame(agentId, isEvaluation = false, taskGen = taskGen)
+                                completedNormally = true
                             } catch (_: InterruptedException) {
                                 Thread.currentThread().interrupt()
                                 break
                             } catch (e: Exception) {
                                 e.printStackTrace()
                             } finally {
+                                var triggerEvolve = false
                                 synchronized(sharedLock) {
-                                    completedTasks++
-                                    if (completedTasks >= totalTasks) {
-                                        evolveNextGeneration(game)
-                                        currentTaskIndex = 0
-                                        completedTasks = 0
+                                    if (isTrainingRunActive(myRunId) && completedNormally && taskGen == generation && !evolving) {
+                                        completedTasks++
+                                        if (completedTasks >= totalTasks) {
+                                            evolving = true
+                                            triggerEvolve = true
+                                        }
                                     }
+                                }
+                                if (triggerEvolve) {
+                                    evolveNextGeneration(game, myRunId)
                                 }
                             }
                         }
@@ -1512,7 +1573,7 @@ class SnakeView @JvmOverloads constructor(
         for (t in threadsToJoin) { try { t.interrupt() } catch (_: Throwable) {} }
         for (t in threadsToJoin) { try { t.join(2000L) } catch (_: Throwable) {} }
 
-        synchronized(trainThreads) {
+        synchronized(trainingLifecycleLock) {
             trainThreads.clear()
         }
 
@@ -2257,6 +2318,8 @@ class SnakeView @JvmOverloads constructor(
             val nCopy: IntArray
             val popCopy: List<DuelingBrain>
             val genomesCopy: List<V4StrategyGenome>
+            val championBrainCopy = DuelingBrain()
+            val championGenomeCopy: V4StrategyGenome
 
             synchronized(sharedLock) {
                 genCopy = generation
@@ -2268,7 +2331,14 @@ class SnakeView @JvmOverloads constructor(
                         synchronized(brainLocks[i]) { copyFrom(population[i]) }
                     }
                 }
-                genomesCopy = populationGenomes.map { it.deepCopy() }
+                genomesCopy = (0 until POPULATION_SIZE).map { i ->
+                    synchronized(brainLocks[i]) { populationGenomes[i].deepCopy() }
+                }
+            }
+
+            synchronized(masterBrainLock) {
+                championBrainCopy.copyFrom(masterBrain)
+                championGenomeCopy = masterGenome.deepCopy()
             }
 
             DataOutputStream(BufferedOutputStream(FileOutputStream(file))).use { out ->
@@ -2302,6 +2372,31 @@ class SnakeView @JvmOverloads constructor(
                 }
                 for (q in qCopy) out.writeFloat(q)
                 for (n in nCopy) out.writeInt(n)
+
+                // 写入 Champion 快照
+                for (v in championBrainCopy.w1) out.writeFloat(v)
+                for (v in championBrainCopy.b1) out.writeFloat(v)
+                for (v in championBrainCopy.w2) out.writeFloat(v)
+                for (v in championBrainCopy.b2) out.writeFloat(v)
+                for (v in championBrainCopy.wV) out.writeFloat(v)
+                out.writeFloat(championBrainCopy.bV)
+                for (v in championBrainCopy.wA) out.writeFloat(v)
+                for (v in championBrainCopy.bA) out.writeFloat(v)
+
+                out.writeFloat(championGenomeCopy.foodPriority)
+                out.writeFloat(championGenomeCopy.spacePriority)
+                out.writeFloat(championGenomeCopy.tailPriority)
+                out.writeFloat(championGenomeCopy.dangerAversion)
+                out.writeFloat(championGenomeCopy.loopAversion)
+                out.writeFloat(championGenomeCopy.hungerUrgency)
+                out.writeFloat(championGenomeCopy.qWeight)
+                out.writeFloat(championGenomeCopy.brainWeight)
+                out.writeFloat(championGenomeCopy.mutationRate)
+                out.writeFloat(championGenomeCopy.mutationSigma)
+                out.writeInt(championGenomeCopy.lookaheadDepth)
+                out.writeFloat(championGenomeCopy.aggression)
+                out.writeFloat(championGenomeCopy.safetyMargin)
+                out.writeFloat(championGenomeCopy.shortcutBonus)
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -2352,13 +2447,49 @@ class SnakeView @JvmOverloads constructor(
                 synchronized(targetLock) {
                     System.arraycopy(qV2, 0, qTarget, 0, qV2.size)
                 }
+
+                // 兼容读取 Champion 快照，若文件末尾无额外快照则优雅回退至 population[0]
                 val championBrainCopy = DuelingBrain()
-                synchronized(brainLocks[0]) {
-                    championBrainCopy.copyFrom(population[0])
-                }
+                val championGenomeCopy = V4StrategyGenome()
+                var hasChampionSnapshot = false
+                try {
+                    if (input.available() > 0) {
+                        for (j in championBrainCopy.w1.indices) championBrainCopy.w1[j] = input.readFloat()
+                        for (j in championBrainCopy.b1.indices) championBrainCopy.b1[j] = input.readFloat()
+                        for (j in championBrainCopy.w2.indices) championBrainCopy.w2[j] = input.readFloat()
+                        for (j in championBrainCopy.b2.indices) championBrainCopy.b2[j] = input.readFloat()
+                        for (j in championBrainCopy.wV.indices) championBrainCopy.wV[j] = input.readFloat()
+                        championBrainCopy.bV = input.readFloat()
+                        for (j in championBrainCopy.wA.indices) championBrainCopy.wA[j] = input.readFloat()
+                        for (j in championBrainCopy.bA.indices) championBrainCopy.bA[j] = input.readFloat()
+
+                        championGenomeCopy.foodPriority = input.readFloat()
+                        championGenomeCopy.spacePriority = input.readFloat()
+                        championGenomeCopy.tailPriority = input.readFloat()
+                        championGenomeCopy.dangerAversion = input.readFloat()
+                        championGenomeCopy.loopAversion = input.readFloat()
+                        championGenomeCopy.hungerUrgency = input.readFloat()
+                        championGenomeCopy.qWeight = input.readFloat()
+                        championGenomeCopy.brainWeight = input.readFloat()
+                        championGenomeCopy.mutationRate = input.readFloat()
+                        championGenomeCopy.mutationSigma = input.readFloat()
+                        championGenomeCopy.lookaheadDepth = input.readInt()
+                        championGenomeCopy.aggression = input.readFloat()
+                        championGenomeCopy.safetyMargin = input.readFloat()
+                        championGenomeCopy.shortcutBonus = input.readFloat()
+                        championGenomeCopy.normalize()
+                        hasChampionSnapshot = true
+                    }
+                } catch (_: Exception) {}
+
                 synchronized(masterBrainLock) {
-                    masterBrain.copyFrom(championBrainCopy)
-                    masterGenome.copyFrom(populationGenomes[0])
+                    if (hasChampionSnapshot) {
+                        masterBrain.copyFrom(championBrainCopy)
+                        masterGenome.copyFrom(championGenomeCopy)
+                    } else {
+                        masterBrain.copyFrom(population[0])
+                        masterGenome.copyFrom(populationGenomes[0])
+                    }
                 }
             }
         } catch (_: Exception) {
@@ -3462,7 +3593,7 @@ class SnakeView @JvmOverloads constructor(
         var gOver = false
         var gLastDeathReason = V4DeathReason.UNKNOWN
 
-        fun playOneGame(agentId: Int, isEvaluation: Boolean = false) {
+        fun playOneGame(agentId: Int, isEvaluation: Boolean = false, taskGen: Int = -1) {
             gSnake.clear()
             gSnake.add(P(7, 7)); gSnake.add(P(6, 7)); gSnake.add(P(5, 7))
             gDir = P(1, 0)
@@ -3480,7 +3611,7 @@ class SnakeView @JvmOverloads constructor(
             gPlaceFood()
 
             var iter = 0
-            while (!gOver && isTrainingRunActive(runId) && !Thread.currentThread().isInterrupted && iter < 30000) {
+            while (!gOver && isTrainingRunActive(runId) && (taskGen == -1 || taskGen == generation) && !Thread.currentThread().isInterrupted && iter < 30000) {
                 gStep(agentId, isEvaluation)
                 iter++
                 if ((iter and 31) == 0) heartbeat()
@@ -3511,6 +3642,85 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
+        // 独立 Champion 评测模式（不占 population 槽位，不更新 Q，不写 Replay）
+        fun playEvaluationGame(evalBrain: DuelingBrain, evalGenome: V4StrategyGenome) {
+            gSnake.clear()
+            gSnake.add(P(7, 7)); gSnake.add(P(6, 7)); gSnake.add(P(5, 7))
+            gDir = P(1, 0)
+            gScore = 0
+            gHunger = 0
+            gCombo = 0
+            gSteps = 0
+            gFoodEaten = 0
+            gOver = false
+            gLastFreeRegion = freeRegion(gSnake).toFloat()
+            gPlaceFood()
+
+            var iter = 0
+            while (!gOver && isTrainingRunActive(runId) && !Thread.currentThread().isInterrupted && iter < 30000) {
+                val head = gSnake.first()
+                val stateVec = buildContinuousState(head, gFood, gSnake, gDir, gHunger)
+                val stateDisc = buildState(gSnake, gDir, gFood, gHunger)
+                val qVals = evalBrain.forward(stateVec)
+                val mask = legalActionMask(gSnake, gDir, gFood)
+                if (mask == 0) {
+                    gOver = true
+                    break
+                }
+
+                var bestA = -1
+                var bestScore = -Float.MAX_VALUE
+                for (a in 0 until 4) {
+                    if ((mask and (1 shl a)) != 0) {
+                        val qVal = qRead(stateDisc, a)
+                        val mix = evalGenome.qWeight * qVal + evalGenome.brainWeight * qVals[a] * 4.5f
+                        if (mix > bestScore) {
+                            bestScore = mix
+                            bestA = a
+                        }
+                    }
+                }
+
+                if (bestA !in 0..3) {
+                    gOver = true
+                    break
+                }
+
+                gDir = dirs[bestA]
+                val nh = P(head.x + gDir.x, head.y + gDir.y)
+
+                if (!inside(nh) || (gSnake.contains(nh) && !(nh == gSnake.last() && nh != gFood))) {
+                    gOver = true
+                    break
+                }
+
+                val ate = nh == gFood
+                gSnake.addFirst(nh)
+                if (ate) {
+                    gScore += 10 + min(gCombo, 30) * 3 + gSnake.size
+                    gFoodEaten++
+                    gCombo++
+                    gHunger = 0
+                    gPlaceFood()
+                } else {
+                    gSnake.removeLast()
+                    gHunger++
+                    gCombo = max(0, gCombo - 1)
+                }
+
+                gSteps++
+                if (gHunger >= hungerKillLimit) {
+                    gOver = true
+                    break
+                }
+                iter++
+            }
+
+            evaluationScore = gScore
+            evaluationFood = gFoodEaten
+            evaluationSurvival = gSteps
+        }
+
         fun gPlaceFood() {
             val free = ArrayList<P>(total)
             for (x in 0 until cols) {
@@ -3528,13 +3738,21 @@ class SnakeView @JvmOverloads constructor(
             val stateDisc = buildState(gSnake, gDir, gFood, gHunger)
 
             val safeAgent = agentId.coerceIn(0, POPULATION_SIZE - 1)
-            val brain = population[safeAgent]
-            val genome = populationGenomes[safeAgent]
-            val qVals = synchronized(brainLocks[safeAgent]) { brain.forward(stateVec) }
+            // 修复四：在同一个锁内获取 Brain 输出和 Genome 副本
+            val decisionSnapshot = synchronized(brainLocks[safeAgent]) {
+                Pair(
+                    population[safeAgent].forward(stateVec),
+                    populationGenomes[safeAgent].deepCopy()
+                )
+            }
+            val qVals = decisionSnapshot.first
+            val genome = decisionSnapshot.second
+
             val mask = legalActionMask(gSnake, gDir, gFood)
             if (mask == 0) {
                 if (!isEvaluation) {
-                    qUpdateV4(stateVec, stateDisc, gDir.ordinal, DEATH_TRAP, null, stateDisc, 0, true, safeAgent)
+                    val fallbackAction = directionIndex(gDir)
+                    qUpdateV4(stateVec, stateDisc, fallbackAction, DEATH_TRAP, null, stateDisc, 0, true, safeAgent)
                 }
                 gLastDeathReason = V4DeathReason.TRAPPED
                 gOver = true
