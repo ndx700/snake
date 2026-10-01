@@ -145,11 +145,11 @@ class MainActivity : AppCompatActivity() {
 
             gameView = SnakeView(this)
 
-            // removed: gameView?.setTrainingMode(trainingMode)
+            // gameView?.setTrainingMode(trainingMode)
 
-            // removed: gameView?.setAIMode(
-                if (aiOn || trainingMode) 1 else 0
-            )
+            // gameView?.setAIMode(
+                // if (aiOn || trainingMode) 1 else 0
+            // )
 
             val row1 = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -257,9 +257,9 @@ class MainActivity : AppCompatActivity() {
                         if (reinforceMode) {
                             reinforceMode = false
 
-                            // removed: gameView?.setReinforceTraining(
-                                false
-                            )
+                            // gameView?.setReinforceTraining(
+                                // false
+                            // )
 
                             updateReinforceButton()
                         }
@@ -283,14 +283,14 @@ class MainActivity : AppCompatActivity() {
                                 )
                                 .apply()
 
-                            // removed: gameView?.setAIMode(1)
+                            // gameView?.setAIMode(1)
 
                             updateAiButton()
                         }
 
-                        // removed: gameView?.setTrainingMode(
-                            trainingMode
-                        )
+                        // gameView?.setTrainingMode(
+                            // trainingMode
+                        // )
 
                         updateTrainingButton()
 
@@ -337,11 +337,11 @@ class MainActivity : AppCompatActivity() {
                                 )
                                 .apply()
 
-                            // removed: gameView?.setAIMode(1)
+                            // gameView?.setAIMode(1)
 
-                            // removed: gameView?.setReinforceTraining(
-                                true
-                            )
+                            // gameView?.setReinforceTraining(
+                                // true
+                            // )
 
                             updateAiButton()
                             updateTrainingButton()
@@ -354,9 +354,9 @@ class MainActivity : AppCompatActivity() {
 
                         } else {
 
-                            // removed: gameView?.setReinforceTraining(
-                                false
-                            )
+                            // gameView?.setReinforceTraining(
+                                // false
+                            // )
 
                             Toast.makeText(
                                 this@MainActivity,
@@ -401,9 +401,9 @@ class MainActivity : AppCompatActivity() {
                             )
                             .apply()
 
-                        // removed: gameView?.setAIMode(
-                            if (aiOn) 1 else 0
-                        )
+                        // gameView?.setAIMode(
+                            // if (aiOn) 1 else 0
+                        // )
 
                         updateAiButton()
 
@@ -454,17 +454,17 @@ class MainActivity : AppCompatActivity() {
                 addView(row2)
             }
 
-            // removed: gameView?.onScoreChanged = { s ->
-                runOnUiThread {
-                    scoreView?.text = "分数: $s"
-                }
-            }
+            // gameView?.onScoreChanged = { s ->
+                // runOnUiThread {
+                    // scoreView?.text = "分数: $s"
+                // }
+            // }
 
-            // removed: gameView?.onMoneyChanged = { m ->
-                runOnUiThread {
-                    moneyView?.text = "金币: $m"
-                }
-            }
+            // gameView?.onMoneyChanged = { m ->
+                // runOnUiThread {
+                    // moneyView?.text = "金币: $m"
+                // }
+            // }
 
             val root = FrameLayout(this).apply {
                 setBackgroundColor(Color.BLACK)
@@ -780,7 +780,7 @@ class MainActivity : AppCompatActivity() {
                         )
                         .apply()
 
-                    // removed: gameView?.updateCurrentSkin()
+                    // gameView?.updateCurrentSkin()
 
                 } else if (
                     current >= s.price
@@ -807,7 +807,7 @@ class MainActivity : AppCompatActivity() {
                     moneyView?.text =
                         "金币: $nm"
 
-                    // removed: gameView?.updateCurrentSkin()
+                    // gameView?.updateCurrentSkin()
 
                 } else {
 
@@ -927,7 +927,7 @@ class MainActivity : AppCompatActivity() {
                         )
                         .apply()
 
-                    // removed: gameView?.updateCurrentBoard()
+                    // gameView?.updateCurrentBoard()
 
                 } else if (
                     current >= b.price
@@ -954,7 +954,7 @@ class MainActivity : AppCompatActivity() {
                     moneyView?.text =
                         "金币: $nm"
 
-                    // removed: gameView?.updateCurrentBoard()
+                    // gameView?.updateCurrentBoard()
 
                 } else {
 
@@ -986,11 +986,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // removed: gameView?.resume()
+        // gameView?.resume()
     }
 
     override fun onPause() {
-        // removed: gameView?.pause()
+        // gameView?.pause()
         super.onPause()
     }
 }
