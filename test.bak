@@ -701,6 +701,8 @@ class SnakeView @JvmOverloads constructor(
         const val DEATH_SELF = -18.0f
         const val DEATH_TRAP = -20.0f
         const val DEATH_HUNGER = -12.0f
+
+        const val SAVE_VERSION = 1
     }
 
     private val qV2 = FloatArray(V2_Q_SIZE)
@@ -884,10 +886,20 @@ class SnakeView @JvmOverloads constructor(
         val idx = qIndex(state, action)
 
         val nextBest = if (terminal || nextMask == 0) 0f else doubleQTarget(nextState, nextMask)
-        val oldValue = synchronized(qStateLock(state)) { qV2[idx] }
-        val target = if (terminal) reward else reward + GAMMA * nextBest
-        val rawTdErr = abs(target - oldValue)
-        val safeTdErr = if (rawTdErr.isNaN() || rawTdErr.isInfinite()) 1.0f else rawTdErr.coerceIn(0.001f, 100.0f)
+
+        val safeTdErr: Float
+        synchronized(qStateLock(state)) {
+            val currentValue = qV2[idx]
+            val target = if (terminal) reward else reward + GAMMA * nextBest
+            val rawTdErr = abs(target - currentValue)
+            safeTdErr = if (rawTdErr.isNaN() || rawTdErr.isInfinite()) 1.0f else rawTdErr.coerceIn(0.001f, 100.0f)
+
+            val visits = nV2[idx]
+            val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
+            val updated = currentValue + alpha * (target - currentValue)
+            qV2[idx] = updated.coerceIn(-25f, 25f)
+            nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
+        }
 
         if (!isTrainingRunActive(runId)) return
 
@@ -908,16 +920,9 @@ class SnakeView @JvmOverloads constructor(
         )
         replayBuffer.add(exp)
 
-        synchronized(qStateLock(state)) {
-            val visits = nV2[idx]
-            val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
-            val updated = oldValue + alpha * (target - oldValue)
-            qV2[idx] = updated.coerceIn(-25f, 25f)
-            nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
-        }
-
         val safeAgent = agentId.coerceIn(0, POPULATION_SIZE - 1)
         synchronized(brainLocks[safeAgent]) {
+            val target = if (terminal) reward else reward + GAMMA * nextBest
             population[safeAgent].train(vector, action, target)
         }
 
@@ -949,8 +954,9 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
+        val currentQ = synchronized(qStateLock(state)) { qV2[idx] }
         synchronized(targetLock) {
-            qTarget[idx] = (1f - TAU) * qTarget[idx] + TAU * qV2[idx]
+            qTarget[idx] = (1f - TAU) * qTarget[idx] + TAU * currentQ
         }
     }
 
@@ -996,7 +1002,6 @@ class SnakeView @JvmOverloads constructor(
             }
 
             try {
-                // STEP 3 & 4: 冻结当前代，创建完整快照
                 val parentBrains = ArrayList<DuelingBrain>(POPULATION_SIZE)
                 val parentGenomes = ArrayList<V4StrategyGenome>(POPULATION_SIZE)
                 val fitnessCopy = FloatArray(POPULATION_SIZE)
@@ -1024,7 +1029,6 @@ class SnakeView @JvmOverloads constructor(
                     }
                 }
 
-                // STEP 5 & 6: 确定 Champion
                 val sortedIndices = (0 until POPULATION_SIZE)
                     .filter { !fitnessCopy[it].isNaN() }
                     .sortedByDescending { fitnessCopy[it] }
@@ -1040,7 +1044,6 @@ class SnakeView @JvmOverloads constructor(
                 bestScoreThisGen = bestScore
                 if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
 
-                // STEP 7: 从冻结快照深拷贝真正的 Champion
                 val championBrain = parentBrains[bestIdx].deepCopy()
                 val championGenome = parentGenomes[bestIdx].deepCopy()
 
@@ -1048,7 +1051,6 @@ class SnakeView @JvmOverloads constructor(
                     return
                 }
 
-                // STEP 8: Champion evaluation (固定 seed，不污染训练)
                 if (generation % 5 == 0 && evalGame != null) {
                     try {
                         evalGame.playEvaluationGame(championBrain, championGenome)
@@ -1059,7 +1061,6 @@ class SnakeView @JvmOverloads constructor(
                     return
                 }
 
-                // STEP 9: 仅基于上一代冻结快照生成下一代
                 val nextBrains = ArrayList<DuelingBrain>(POPULATION_SIZE)
                 val nextGenomes = ArrayList<V4StrategyGenome>(POPULATION_SIZE)
 
@@ -1096,7 +1097,6 @@ class SnakeView @JvmOverloads constructor(
                     }
                 }
 
-                // STEP 10 & 11: 逐个提交并持续检查 runId
                 if (!isTrainingRunActive(runId)) {
                     return
                 }
@@ -1115,13 +1115,11 @@ class SnakeView @JvmOverloads constructor(
                     return
                 }
 
-                // STEP 12: 更新 Master 快照
                 synchronized(masterBrainLock) {
                     masterBrain.copyFrom(championBrain)
                     masterGenome.copyFrom(championGenome)
                 }
 
-                // STEP 13, 14, 15: 更新 generation 并重置任务
                 synchronized(sharedLock) {
                     generation++
                     for (i in 0 until POPULATION_SIZE) {
@@ -2365,8 +2363,8 @@ class SnakeView @JvmOverloads constructor(
             val tempFile = context.getFileStreamPath("snake_training_v4.dat.tmp")
             val genCopy: Int
             val scoreCopy: Float
-            val qCopy: FloatArray
-            val nCopy: IntArray
+            val qCopy = FloatArray(V2_Q_SIZE)
+            val nCopy = IntArray(V2_Q_SIZE)
             val popCopy: List<DuelingBrain>
             val genomesCopy: List<V4StrategyGenome>
             val championBrainCopy = DuelingBrain()
@@ -2375,8 +2373,20 @@ class SnakeView @JvmOverloads constructor(
             synchronized(sharedLock) {
                 genCopy = generation
                 scoreCopy = bestScoreAllTime
-                qCopy = qV2.copyOf()
-                nCopy = nV2.copyOf()
+            }
+
+            for (lockIdx in 0 until V2_LOCKS) {
+                synchronized(qLocks[lockIdx]) {
+                    var s = lockIdx
+                    while (s < V2_STATE_COUNT) {
+                        val offset = s * V2_ACTIONS
+                        for (a in 0 until V2_ACTIONS) {
+                            qCopy[offset + a] = qV2[offset + a]
+                            nCopy[offset + a] = nV2[offset + a]
+                        }
+                        s += V2_LOCKS
+                    }
+                }
             }
 
             val pBrains = ArrayList<DuelingBrain>(POPULATION_SIZE)
@@ -2400,6 +2410,7 @@ class SnakeView @JvmOverloads constructor(
             }
 
             DataOutputStream(BufferedOutputStream(FileOutputStream(tempFile))).use { out ->
+                out.writeInt(SAVE_VERSION)
                 out.writeInt(genCopy)
                 out.writeFloat(scoreCopy)
                 for (brain in popCopy) {
@@ -2458,9 +2469,18 @@ class SnakeView @JvmOverloads constructor(
                 out.flush()
             }
 
-            if (tempFile.exists()) {
-                if (file.exists()) file.delete()
-                tempFile.renameTo(file)
+            if (tempFile.exists() && tempFile.length() > 0) {
+                val renamed = tempFile.renameTo(file)
+                if (!renamed) {
+                    try {
+                        FileInputStream(tempFile).use { src ->
+                            FileOutputStream(file).use { dst ->
+                                src.channel.transferTo(0, src.channel.size(), dst.channel)
+                            }
+                        }
+                        tempFile.delete()
+                    } catch (_: Exception) {}
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -2473,6 +2493,11 @@ class SnakeView @JvmOverloads constructor(
             if (!file.exists()) return
 
             DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
+                val version = input.readInt()
+                if (version != SAVE_VERSION) {
+                    throw IllegalStateException("存档版本不兼容: version=$version, expected=$SAVE_VERSION")
+                }
+
                 generation = input.readInt()
                 bestScoreAllTime = input.readFloat()
                 for (i in 0 until POPULATION_SIZE) {
@@ -2484,7 +2509,8 @@ class SnakeView @JvmOverloads constructor(
                     for (j in brain.wV.indices) brain.wV[j] = input.readFloat()
                     brain.bV = input.readFloat()
                     for (j in brain.wA.indices) brain.wA[j] = input.readFloat()
-                    for (j in brain.wA.indices) brain.bA[j] = input.readFloat()
+                    for (j in brain.bA.indices) brain.bA[j] = input.readFloat()
+
                     synchronized(brainLocks[i]) {
                         population[i].copyFrom(brain)
                     }
@@ -2528,7 +2554,7 @@ class SnakeView @JvmOverloads constructor(
                         for (j in championBrainCopy.wV.indices) championBrainCopy.wV[j] = input.readFloat()
                         championBrainCopy.bV = input.readFloat()
                         for (j in championBrainCopy.wA.indices) championBrainCopy.wA[j] = input.readFloat()
-                        for (j in championBrainCopy.wA.indices) championBrainCopy.bA[j] = input.readFloat()
+                        for (j in championBrainCopy.bA.indices) championBrainCopy.bA[j] = input.readFloat()
 
                         championGenomeCopy.foodPriority = input.readFloat()
                         championGenomeCopy.spacePriority = input.readFloat()
@@ -2566,10 +2592,12 @@ class SnakeView @JvmOverloads constructor(
         } catch (_: Exception) {
             generation = 0
             bestScoreAllTime = 0f
+            val freshBrain = DuelingBrain()
+            val freshGenome = V4StrategyGenome()
             for (i in 0 until POPULATION_SIZE) {
                 synchronized(brainLocks[i]) {
-                    population[i] = DuelingBrain()
-                    populationGenomes[i] = V4StrategyGenome()
+                    population[i].copyFrom(freshBrain)
+                    populationGenomes[i].copyFrom(freshGenome)
                 }
             }
             java.util.Arrays.fill(qV2, 0f)
@@ -3730,8 +3758,7 @@ class SnakeView @JvmOverloads constructor(
             gFoodEaten = 0
             gOver = false
             gLastFreeRegion = freeRegion(gSnake).toFloat()
-            
-            // 评测食物生成
+
             val freeInit = ArrayList<P>(total)
             for (x in 0 until cols) {
                 for (y in 0 until rows) {
@@ -3779,7 +3806,7 @@ class SnakeView @JvmOverloads constructor(
                     break
                 }
 
-                val ate = nh == gFood
+                val ate = nh == food
                 gSnake.addFirst(nh)
                 if (ate) {
                     gScore += 10 + min(gCombo, 30) * 3 + gSnake.size
