@@ -498,7 +498,7 @@ class AiCore(ctx: Context) {
         const val B_BASE = 0; const val B_SAFEFOOD = 1; const val B_TAIL = 2
         const val B_SPACE = 3; const val B_QLEARN = 4; const val B_HAMILTON = 5
         const val B_ENSEMBLE = 6; const val B_EPS = 7; const val B_MEMORY = 8
-        val TECH_NAMES = arrayOf(
+        @JvmField val TECH_NAMES = arrayOf(
             "基础策略", "安全食物", "追尾保命", "空间保底",
             "Q学习改道", "哈密尔顿", "网络集成", "探索随机", "死亡记忆"
         )
@@ -642,7 +642,7 @@ class AiCore(ctx: Context) {
         val base = basePolicyDir(e, sim)
         if (base != null) {
             mark(lastBaseBit)
-            var d = base
+            var d: Int = base
             // 训练期小概率探索
             if (running.get() && rnd.nextDouble() < eps) {
                 val alt = (0 until 4).filter {
@@ -1039,7 +1039,7 @@ class SnakeView @JvmOverloads constructor(
         c.drawText("🧠 策略雷达 — 亮=在用", dp(16f), ty + dp(14f), p)
         p.isFakeBoldText = false
         val colW = (width - dp(32f)) / 2f
-        for (i in ai.TECH_NAMES.indices) {
+        for (i in AiCore.TECH_NAMES.indices) {
             val col = i % 2; val row = i / 2
             val x = dp(16f) + col * colW
             val y = ty + dp(30f) + row * dp(20f)
@@ -1049,7 +1049,7 @@ class SnakeView @JvmOverloads constructor(
             if (on) { p.color = Color.argb(60, 80, 255, 150); c.drawCircle(x + dp(4f), y - dp(3f), dp(7.5f), p) }
             p.color = if (on) Color.WHITE else Color.rgb(110, 110, 115)
             p.textSize = dp(11f); p.textAlign = Paint.Align.LEFT
-            c.drawText(ai.TECH_NAMES[i], x + dp(14f), y, p)
+            c.drawText(AiCore.TECH_NAMES[i], x + dp(14f), y, p)
         }
 
         // ═══ 底部：死亡饼图 + 基因柱状图 ═══
