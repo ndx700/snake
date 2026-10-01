@@ -1,0 +1,3223 @@
+package com.example.snake
+
+import android.content.Context
+import android.graphics.*
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
+import android.media.ToneGenerator
+import android.os.Build
+import android.os.Bundle
+import android.os.Parcelable
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.util.AttributeSet
+import android.view.Choreographer
+import android.view.MotionEvent
+import android.view.View
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.util.ArrayDeque
+import java.util.LinkedHashMap
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.random.Random
+
+class SnakeView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null
+) : View(context, attrs) {
+
+    private val cols = 15
+    private val rows = 15
+    private val total = cols * rows
+
+    private var cell = 0f
+    private var ox = 0f
+    private var oy = 0f
+
+    private data class P(val x: Int, val y: Int)
+
+    // ==========================================
+    // V3 & V4 核心目标与死亡原因定义
+    // ==========================================
+    enum class V4Goal {
+        GET_FOOD, PRESERVE_SPACE, REACH_TAIL, ESCAPE_DANGER, BREAK_LOOP, SURVIVE
+    }
+
+    enum class V4DeathReason {
+        HIT_WALL, HIT_SELF, TRAPPED, DEAD_END, LOOP, SPACE_COLLAPSE, TAIL_CUTOFF, HUNGER, UNKNOWN
+    }
+
+    private data class Candidate(
+        val d: P,
+        val score: Float,
+        val reason: String,
+        val legal: Boolean,
+        val regionScore: Float = 0f,
+        val mobilityScore: Float = 0f,
+        val tailScore: Float = 0f,
+        val foodScore: Float = 0f,
+        val edgeScore: Float = 0f,
+        val spaceScore: Float = 0f,
+        val region: Int = 0,
+        val mobility: Int = 0,
+        val tailOk: Boolean = false,
+        val foodDist: Int = -1,
+        val ate: Boolean = false,
+        val qValue: Float = 0f,
+        val brainValue: Float = 0f,
+        val memoryPenalty: Float = 0f
+    )
+
+    private data class Snapshot(
+        var strategy: String = "V4 融合智能体",
+        var reason: String = "初始化",
+        var danger: Int = 1,
+        var region: Int = 1,
+        var spaceRatio: Float = 1f,
+        var tailReachable: Boolean = false,
+        var foodReachable: Boolean = false,
+        var foodDistance: Int = -1,
+        var hunger: Int = 0,
+        var chosen: P = P(0, 0),
+        var candidates: List<Candidate> = emptyList(),
+        var depth: Int = 0,
+        var nodes: Int = 0,
+        var hungerFactor: Float = 1f,
+        var regionWeight: Float = 11f,
+        var strategyId: Int = -1,
+        var qValue: Float = 0f,
+        var nVisits: Int = 0,
+        var forceEatActive: Boolean = false,
+        var forceEatSafe: Boolean = false,
+        var safeFollowMode: Boolean = false,
+        var goal: V4Goal = V4Goal.SURVIVE
+    )
+
+    private data class Sim(
+        val body: ArrayDeque<P>,
+        val ate: Boolean
+    )
+
+    private data class Particle(
+        var x: Float,
+        var y: Float,
+        var vx: Float,
+        var vy: Float,
+        var life: Float,
+        val color: Int
+    )
+
+    private data class FloatText(
+        var x: Float,
+        var y: Float,
+        var life: Float,
+        val text: String
+    )
+
+    private val snake = ArrayDeque<P>()
+    private val queue = ArrayDeque<P>()
+
+    private val dirs = listOf(
+        P(0, -1), // 0: UP
+        P(0, 1),  // 1: DOWN
+        P(-1, 0), // 2: LEFT
+        P(1, 0)   // 3: RIGHT
+    )
+
+    private var dir = P(1, 0)
+    private var food = P(5, 5)
+
+    private var score = 0
+    private var highScore = 0
+    private var money = 0
+
+    private var gameOver = false
+    private var running = false
+
+    private var aiMode = 1
+    private var forcedStrategy = -1
+
+    private var gameSpeed = 220L
+    private val gameSpeedMin = 45L
+    private val gameSpeedStart = 220L
+
+    private var accumulator = 0L
+    private var lastFrame = 0L
+
+    private var combo = 0
+    private var hunger = 0
+    private var lastFreeRegion = 0f
+
+    private var deathCause = "无"
+    private var lastDeathInfo = ""
+
+    private var ai = Snapshot(chosen = dir)
+
+    private val sharedLock = Any()
+    private val evolveLock = Any()
+
+    // ==========================================
+    // V3 & V4 基因性格与失败长期记忆库
+    // ==========================================
+    data class V4StrategyGenome(
+        var foodPriority: Float = 1.00f,
+        var spacePriority: Float = 1.25f,
+        var tailPriority: Float = 0.90f,
+        var dangerAversion: Float = 1.40f,
+        var loopAversion: Float = 0.80f,
+        var hungerUrgency: Float = 0.80f,
+        var qWeight: Float = 0.65f,
+        var brainWeight: Float = 0.35f,
+        var mutationRate: Float = 0.08f,
+        var mutationSigma: Float = 0.12f,
+        var lookaheadDepth: Int = 3
+    ) {
+        fun normalize() {
+            foodPriority = foodPriority.coerceIn(0.1f, 3.0f)
+            spacePriority = spacePriority.coerceIn(0.1f, 3.0f)
+            tailPriority = tailPriority.coerceIn(0.1f, 3.0f)
+            dangerAversion = dangerAversion.coerceIn(0.1f, 3.0f)
+            loopAversion = loopAversion.coerceIn(0.1f, 3.0f)
+            hungerUrgency = hungerUrgency.coerceIn(0.1f, 3.0f)
+            qWeight = qWeight.coerceIn(0.05f, 0.95f)
+            brainWeight = 1.0f - qWeight
+            mutationRate = mutationRate.coerceIn(0.01f, 0.35f)
+            mutationSigma = mutationSigma.coerceIn(0.01f, 0.40f)
+            lookaheadDepth = lookaheadDepth.coerceIn(1, 5)
+        }
+
+        fun selfAdjust(reason: V4DeathReason, repeated: Boolean, avoidable: Boolean) {
+            val delta = if (repeated) 0.08f else 0.035f
+            when (reason) {
+                V4DeathReason.HIT_WALL, V4DeathReason.HIT_SELF -> dangerAversion += delta
+                V4DeathReason.TRAPPED, V4DeathReason.DEAD_END, V4DeathReason.SPACE_COLLAPSE -> spacePriority += delta
+                V4DeathReason.TAIL_CUTOFF -> tailPriority += delta
+                V4DeathReason.LOOP -> loopAversion += delta
+                V4DeathReason.HUNGER -> hungerUrgency += delta
+                else -> dangerAversion += delta * 0.5f
+            }
+            if (avoidable) qWeight = (qWeight + 0.02f).coerceAtMost(0.9f)
+            normalize()
+        }
+
+        fun crossover(other: V4StrategyGenome): V4StrategyGenome {
+            fun pick(a: Float, b: Float) = if (Random.nextBoolean()) a else b
+            return V4StrategyGenome(
+                foodPriority = pick(foodPriority, other.foodPriority),
+                spacePriority = pick(spacePriority, other.spacePriority),
+                tailPriority = pick(tailPriority, other.tailPriority),
+                dangerAversion = pick(dangerAversion, other.dangerAversion),
+                loopAversion = pick(loopAversion, other.loopAversion),
+                hungerUrgency = pick(hungerUrgency, other.hungerUrgency),
+                qWeight = pick(qWeight, other.qWeight),
+                mutationRate = pick(mutationRate, other.mutationRate),
+                mutationSigma = pick(mutationSigma, other.mutationSigma),
+                lookaheadDepth = max(lookaheadDepth, other.lookaheadDepth)
+            ).also { it.normalize() }
+        }
+
+        fun mutate(scale: Float = 1.0f) {
+            fun noise(): Float = (Random.nextFloat() * 2f - 1f) * mutationSigma * scale
+            if (Random.nextFloat() < mutationRate) foodPriority += noise()
+            if (Random.nextFloat() < mutationRate) spacePriority += noise()
+            if (Random.nextFloat() < mutationRate) tailPriority += noise()
+            if (Random.nextFloat() < mutationRate) dangerAversion += noise()
+            if (Random.nextFloat() < mutationRate) loopAversion += noise()
+            if (Random.nextFloat() < mutationRate) hungerUrgency += noise()
+            if (Random.nextFloat() < mutationRate) qWeight += noise() * 0.2f
+            normalize()
+        }
+
+        fun deepCopy(): V4StrategyGenome = copy()
+    }
+
+    private data class V4Lesson(
+        val contextHash: Long,
+        val badAction: Int,
+        val reason: V4DeathReason,
+        var penalty: Float,
+        var confidence: Float,
+        var occurrences: Int = 1,
+        var alternative: Int? = null
+    )
+
+    private class V4FailureMemory(private val capacity: Int = 20000) {
+        private val memory = LinkedHashMap<Long, V4Lesson>()
+
+        @Synchronized
+        fun remember(hash: Long, badAction: Int, reason: V4DeathReason, penalty: Float, alt: Int?): V4Lesson {
+            val old = memory[hash]
+            if (old == null) {
+                if (memory.size >= capacity) {
+                    val iter = memory.entries.iterator()
+                    if (iter.hasNext()) { iter.next(); iter.remove() }
+                }
+                val lesson = V4Lesson(hash, badAction, reason, penalty.coerceIn(0f, 15f), 0.8f, 1, alt)
+                memory[hash] = lesson
+                return lesson
+            } else {
+                old.occurrences++
+                old.penalty = (old.penalty * 0.8f + penalty * 0.2f).coerceIn(0f, 15f)
+                old.confidence = (old.confidence + 0.04f).coerceIn(0f, 1.0f)
+                if (alt != null) old.alternative = alt
+                return old
+            }
+        }
+
+        @Synchronized
+        fun getPenalty(hash: Long, action: Int): Float {
+            val lesson = memory[hash] ?: return 0f
+            return if (lesson.badAction == action) lesson.penalty * lesson.confidence else 0f
+        }
+
+        @Synchronized
+        fun occurrences(hash: Long): Int = memory[hash]?.occurrences ?: 0
+
+        @Synchronized
+        fun size(): Int = memory.size
+
+        @Synchronized
+        fun clear() = memory.clear()
+    }
+
+    private val failureMemory = V4FailureMemory(20000)
+    private val causalHistory = ArrayDeque<Pair<Long, Int>>(12)
+
+    // ==========================================
+    // V4 Dueling 深度双流神经网络 (D3QN)
+    // ==========================================
+    private inner class DuelingBrain {
+        val inputSize = 32
+        val hidden1Size = 48
+        val hidden2Size = 32
+        val outputSize = 4
+        var lr = 0.0015f
+
+        var w1 = FloatArray(inputSize * hidden1Size) { (Random.nextFloat() * 2f - 1f) * 0.15f }
+        var b1 = FloatArray(hidden1Size)
+        var w2 = FloatArray(hidden1Size * hidden2Size) { (Random.nextFloat() * 2f - 1f) * 0.15f }
+        var b2 = FloatArray(hidden2Size)
+
+        // Value Stream: V(s)
+        var wV = FloatArray(hidden2Size) { (Random.nextFloat() * 2f - 1f) * 0.15f }
+        var bV = 0.0f
+
+        // Advantage Stream: A(s, a)
+        var wA = FloatArray(hidden2Size * outputSize) { (Random.nextFloat() * 2f - 1f) * 0.15f }
+        var bA = FloatArray(outputSize)
+
+        fun forward(inputs: FloatArray): FloatArray {
+            val h1 = FloatArray(hidden1Size)
+            for (i in 0 until hidden1Size) {
+                var sum = b1[i]
+                for (j in 0 until inputSize) sum += inputs[j] * w1[j * hidden1Size + i]
+                h1[i] = max(0f, sum)
+            }
+            val h2 = FloatArray(hidden2Size)
+            for (i in 0 until hidden2Size) {
+                var sum = b2[i]
+                for (j in 0 until hidden1Size) sum += h1[j] * w2[j * hidden2Size + i]
+                h2[i] = max(0f, sum)
+            }
+
+            var v = bV
+            for (j in 0 until hidden2Size) v += h2[j] * wV[j]
+
+            val adv = FloatArray(outputSize)
+            var advMean = 0f
+            for (a in 0 until outputSize) {
+                var sum = bA[a]
+                for (j in 0 until hidden2Size) sum += h2[j] * wA[j * outputSize + a]
+                adv[a] = sum
+                advMean += sum
+            }
+            advMean /= outputSize
+
+            return FloatArray(outputSize) { a ->
+                (v + (adv[a] - advMean)).coerceIn(-30f, 30f)
+            }
+        }
+
+        fun train(inputs: FloatArray, action: Int, target: Float) {
+            val h1 = FloatArray(hidden1Size)
+            for (i in 0 until hidden1Size) {
+                var sum = b1[i]
+                for (j in 0 until inputSize) sum += inputs[j] * w1[j * hidden1Size + i]
+                h1[i] = max(0f, sum)
+            }
+            val h2 = FloatArray(hidden2Size)
+            for (i in 0 until hidden2Size) {
+                var sum = b2[i]
+                for (j in 0 until hidden1Size) sum += h1[j] * w2[j * hidden2Size + i]
+                h2[i] = max(0f, sum)
+            }
+
+            val outputs = forward(inputs)
+            val error = (target - outputs[action]).coerceIn(-4.0f, 4.0f)
+
+            bV += lr * error * 0.5f
+            bA[action] += lr * error * 0.5f
+
+            for (j in 0 until hidden2Size) {
+                wV[j] += lr * error * 0.5f * h2[j]
+                wA[j * outputSize + action] += lr * error * 0.5f * h2[j]
+            }
+
+            for (i in 0 until hidden2Size) {
+                if (h2[i] > 0f) {
+                    val gradH2 = error * 0.5f * (wV[i] + wA[i * outputSize + action])
+                    b2[i] += lr * gradH2
+                    for (j in 0 until hidden1Size) {
+                        w2[j * hidden2Size + i] += lr * gradH2 * h1[j]
+                    }
+                }
+            }
+        }
+
+        fun copyFrom(src: DuelingBrain) {
+            System.arraycopy(src.w1, 0, w1, 0, w1.size)
+            System.arraycopy(src.b1, 0, b1, 0, b1.size)
+            System.arraycopy(src.w2, 0, w2, 0, w2.size)
+            System.arraycopy(src.b2, 0, b2, 0, b2.size)
+            System.arraycopy(src.wV, 0, wV, 0, wV.size)
+            bV = src.bV
+            System.arraycopy(src.wA, 0, wA, 0, wA.size)
+            System.arraycopy(src.bA, 0, bA, 0, bA.size)
+        }
+
+        fun breed(child: DuelingBrain) {
+            val mut = if (generation < 10) 0.18f else if (generation < 30) 0.10f else 0.05f
+            fun noise() = (Random.nextFloat() - 0.5f) * mut
+            for (i in w1.indices) child.w1[i] = w1[i] + noise()
+            for (i in b1.indices) child.b1[i] = b1[i] + noise()
+            for (i in w2.indices) child.w2[i] = w2[i] + noise()
+            for (i in b2.indices) child.b2[i] = b2[i] + noise()
+            for (i in wV.indices) child.wV[i] = wV[i] + noise()
+            child.bV = bV + noise()
+            for (i in wA.indices) child.wA[i] = wA[i] + noise()
+            for (i in bA.indices) child.bA[i] = bA[i] + noise()
+        }
+
+        fun crossover(other: DuelingBrain, child: DuelingBrain) {
+            for (i in w1.indices) child.w1[i] = if (Random.nextBoolean()) w1[i] else other.w1[i]
+            for (i in b1.indices) child.b1[i] = if (Random.nextBoolean()) b1[i] else other.b1[i]
+            for (i in w2.indices) child.w2[i] = if (Random.nextBoolean()) w2[i] else other.w2[i]
+            for (i in b2.indices) child.b2[i] = if (Random.nextBoolean()) b2[i] else other.b2[i]
+            for (i in wV.indices) child.wV[i] = if (Random.nextBoolean()) wV[i] else other.wV[i]
+            child.bV = if (Random.nextBoolean()) bV else other.bV
+            for (i in wA.indices) child.wA[i] = if (Random.nextBoolean()) wA[i] else other.wA[i]
+            for (i in bA.indices) child.bA[i] = if (Random.nextBoolean()) bA[i] else other.bA[i]
+            val mut = if (generation < 10) 0.12f else 0.06f
+            for (i in child.w1.indices) child.w1[i] += (Random.nextFloat() - 0.5f) * mut
+            for (i in child.w2.indices) child.w2[i] += (Random.nextFloat() - 0.5f) * mut
+        }
+    }
+
+    // ===== 神经进化种群变量 =====
+    private val POPULATION_SIZE = 50
+    @Volatile private var generation = 0
+    private val population = MutableList(POPULATION_SIZE) { DuelingBrain() }
+    private val populationGenomes = MutableList(POPULATION_SIZE) { V4StrategyGenome() }
+    @Volatile private var currentAgentIndex = 0
+    private var completedAgents = 0
+    private val currentScores = FloatArray(POPULATION_SIZE)
+    @Volatile private var qWeight = 0.65f
+    @Volatile private var nnWeight = 0.35f
+    @Volatile private var bestScoreThisGen = 0f
+    @Volatile private var bestScoreAllTime = 0f
+    @Volatile private var deadEndPredicted = false
+    @Volatile private var rolloutActive = false
+    @Volatile private var rolloutSteps = 0
+    @Volatile private var foodSpaceRatio = 1f
+    @Volatile private var evolving = false
+    private val visitedStates = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
+
+    // 24 步循环锁死记忆 (V2 Loop History)
+    private val loopWindow = 24
+    private val stateHistory = ArrayDeque<Int>(loopWindow)
+
+    /*
+     * =========================
+     * V2 RULE WEIGHTS
+     * =========================
+     */
+    private var wRegion = 11f
+    private var wMobility = 35f
+    private var wTailGood = 180f
+    private var wTailBad = -250f
+    private var wFoodNear = 300f
+    private var wFoodAte = 850f
+    private var wEdge = 55f
+    private var wSpace = 30f
+
+    private val wRegion0 = 11f
+    private val wMobility0 = 35f
+    private val wTailGood0 = 180f
+    private val wTailBad0 = -250f
+    private val wFoodNear0 = 300f
+    private val wFoodAte0 = 850f
+    private val wEdge0 = 55f
+    private val wSpace0 = 30f
+
+    private var aggression = 1.15f
+    private var safetyMargin = 1.08f
+    private var shortcutBonus = 0.90f
+
+    private var deathWall = 0
+    private var deathSelf = 0
+    private var deathTrap = 0
+    private var totalGames = 0
+
+    private var lastLearnAction = "初始化"
+    private val recentScores = ArrayDeque<Int>()
+    private var bestRecentScore = 0
+
+    /*
+     * ============================================================
+     * V2 REAL RL CORE (73,728 离散 Q 表)
+     * ============================================================
+     */
+    private companion object {
+        const val V2_FOOD_DIR = 4
+        const val V2_DANGER = 16
+        const val V2_MOBILITY = 5
+        const val V2_SPACE = 4
+        const val V2_HUNGER = 5
+        const val V2_LENGTH = 4
+        const val V2_TAIL = 2
+        const val V2_HEADING = 4 // 真正的四方向编码
+
+        const val V2_STATE_COUNT =
+            V2_FOOD_DIR * V2_DANGER * V2_MOBILITY * V2_SPACE * V2_HUNGER * V2_LENGTH * V2_TAIL * V2_HEADING // 73,728
+
+        const val V2_ACTIONS = 4
+        const val V2_Q_SIZE = V2_STATE_COUNT * V2_ACTIONS
+        const val V2_LOCKS = 64
+
+        const val GAMMA = 0.94f
+        const val ALPHA_FAST = 0.18f
+        const val ALPHA_NORMAL = 0.055f
+
+        const val EPS_START = 0.22f
+        const val EPS_MIN = 0.015f
+        const val TAU = 0.005f // Polyak 软更新参数
+
+        const val REWARD_STEP = -0.02f
+        const val REWARD_FOOD = 10.0f
+        const val REWARD_TAIL = 0.55f
+        const val REWARD_DANGER = -0.30f
+        const val REWARD_SPACE_DELTA = 0.08f
+
+        const val DEATH_WALL = -14.0f
+        const val DEATH_SELF = -18.0f
+        const val DEATH_TRAP = -20.0f
+        const val DEATH_HUNGER = -12.0f
+    }
+
+    private val qV2 = FloatArray(V2_Q_SIZE)
+    private val qTarget = FloatArray(V2_Q_SIZE)
+    private val nV2 = IntArray(V2_Q_SIZE)
+    @Volatile private var trainingRunId = 0L
+    private val trainingLifecycleLock = Any()
+    private val targetLock = Any()
+
+    private fun isTrainingRunActive(runId: Long): Boolean =
+        trainActive && trainingRunId == runId
+
+    private val qLocks = Array(V2_LOCKS) { Any() }
+
+    @Volatile private var v2LearningSteps = 0L
+    @Volatile private var v2Episodes = 0L
+    @Volatile private var v2Epsilon = EPS_START
+
+    private var lastV2State = -1
+    private var lastV2Action = -1
+
+    private fun qIndex(state: Int, action: Int): Int = state * V2_ACTIONS + action
+    private fun qLock(index: Int): Any = qLocks[index and (V2_LOCKS - 1)]
+    private fun qStateLock(state: Int): Any = qLocks[state and (V2_LOCKS - 1)]
+
+    private fun qRead(state: Int, action: Int): Float {
+        if (state !in 0 until V2_STATE_COUNT || action !in 0 until V2_ACTIONS) return 0f
+        return synchronized(qLock(state)) { qV2[qIndex(state, action)] }
+    }
+
+    private fun qVisit(state: Int, action: Int): Int {
+        if (state !in 0 until V2_STATE_COUNT || action !in 0 until V2_ACTIONS) return 0
+        return synchronized(qLock(state)) { nV2[qIndex(state, action)] }
+    }
+
+    private fun qMax(state: Int, legalMask: Int = 15): Float {
+        if (state !in 0 until V2_STATE_COUNT) return 0f
+        var bestAction = -1
+        var bestQ = -Float.MAX_VALUE
+        synchronized(qLock(state)) {
+            for (a in 0 until 4) {
+                if ((legalMask and (1 shl a)) == 0) continue
+                val v = qV2[qIndex(state, a)]
+                if (v > bestQ) { bestQ = v; bestAction = a }
+            }
+            if (bestAction < 0) return 0f
+            synchronized(targetLock) {
+                return qTarget[qIndex(state, bestAction)]
+            }
+        }
+    }
+
+    // ==========================================
+    // V4 优先经验回放池 (PER - Prioritized Experience Replay)
+    // ==========================================
+    private data class Experience(
+        val vector: FloatArray,
+        val state: Int,
+        val action: Int,
+        val reward: Float,
+        val nextVector: FloatArray?,
+        val nextState: Int,
+        val nextMask: Int,
+        val terminal: Boolean,
+        var tdError: Float = 1.0f
+    )
+    private val replayBuffer = ArrayList<Experience>(5000)
+    private val REPLAY_CAPACITY = 5000
+
+    private fun qUpdateV4(
+        vector: FloatArray,
+        state: Int,
+        action: Int,
+        reward: Float,
+        nextVector: FloatArray?,
+        nextState: Int,
+        nextMask: Int,
+        terminal: Boolean
+    ) {
+        if (state !in 0 until V2_STATE_COUNT || action !in 0 until V2_ACTIONS) return
+        visitedStates.add(state)
+        val idx = qIndex(state, action)
+
+        val nextBest = if (terminal) 0f else qMax(nextState, nextMask)
+        val oldValue = synchronized(qStateLock(state)) { qV2[idx] }
+        val target = if (terminal) reward else reward + GAMMA * nextBest
+        val tdErr = abs(target - oldValue)
+
+        // 存入优先经验回放队列
+        synchronized(replayBuffer) {
+            replayBuffer.add(Experience(vector, state, action, reward, nextVector, nextState, nextMask, terminal, tdErr))
+            if (replayBuffer.size > REPLAY_CAPACITY) replayBuffer.removeAt(0)
+        }
+
+        // Q 表更新
+        synchronized(qStateLock(state)) {
+            val visits = nV2[idx]
+            val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
+            val updated = oldValue + alpha * (target - oldValue)
+            qV2[idx] = updated.coerceIn(-25f, 25f)
+            nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
+        }
+
+        // 训练 Dueling 神经网络
+        val brain = population[currentAgentIndex % POPULATION_SIZE]
+        brain.train(vector, action, target)
+
+        // PER 重要性抽样回放 (Mini-Batch)
+        synchronized(replayBuffer) {
+            if (replayBuffer.size > 20) {
+                var sumPriority = 0.0
+                for (e in replayBuffer) sumPriority += max(0.01, e.tdError.toDouble())
+                repeat(2) {
+                    var r = Random.nextDouble() * sumPriority
+                    var chosen = replayBuffer.last()
+                    for (e in replayBuffer) {
+                        r -= max(0.01, e.tdError.toDouble())
+                        if (r <= 0.0) { chosen = e; break }
+                    }
+                    val nb = if (chosen.terminal) 0f else qMax(chosen.nextState, chosen.nextMask)
+                    val tVal = if (chosen.terminal) chosen.reward else chosen.reward + GAMMA * nb
+                    synchronized(qStateLock(chosen.state)) {
+                        val eIdx = qIndex(chosen.state, chosen.action)
+                        val curVal = qV2[eIdx]
+                        qV2[eIdx] = (curVal + ALPHA_NORMAL * (tVal - curVal)).coerceIn(-25f, 25f)
+                    }
+                    brain.train(chosen.vector, chosen.action, tVal)
+                }
+            }
+        }
+
+        v2LearningSteps++
+
+        // Polyak 目标网络软更新
+        synchronized(targetLock) {
+            qTarget[idx] = (1f - TAU) * qTarget[idx] + TAU * qV2[idx]
+        }
+    }
+
+    private fun currentEpsilon(): Float {
+        if (!trainingMode && !reinforceTraining) return 0f
+        val e = v2Epsilon
+        if (v2LearningSteps > 0L && v2LearningSteps % 4096L == 0L) {
+            v2Epsilon = max(EPS_MIN, v2Epsilon * 0.985f)
+        }
+        return e
+    }
+
+    private fun resetV2Learning() {
+        synchronized(sharedLock) {
+            java.util.Arrays.fill(qV2, 0f)
+            java.util.Arrays.fill(nV2, 0)
+            v2LearningSteps = 0L
+            v2Episodes = 0L
+            v2Epsilon = EPS_START
+            visitedStates.clear()
+            failureMemory.clear()
+            causalHistory.clear()
+        }
+        synchronized(targetLock) {
+            java.util.Arrays.fill(qTarget, 0f)
+        }
+    }
+
+    private fun evolveNextGeneration() {
+        evolving = true
+        generation++
+        try {
+            val scoresCopy = synchronized(sharedLock) { currentScores.copyOf() }
+            val sortedIndices = (0 until POPULATION_SIZE)
+                .filter { !scoresCopy[it].isNaN() }
+                .sortedByDescending { scoresCopy[it] }
+
+            val bestBrains = if (sortedIndices.isNotEmpty()) {
+                sortedIndices.take(minOf(10, sortedIndices.size)).map {
+                    DuelingBrain().also { copy -> copy.copyFrom(population[it]) }
+                }
+            } else {
+                (0 until minOf(10, POPULATION_SIZE)).map {
+                    DuelingBrain().also { copy -> copy.copyFrom(population[it]) }
+                }
+            }
+            if (bestBrains.isEmpty()) return
+
+            val bestScore = if (sortedIndices.isNotEmpty()) scoresCopy[sortedIndices[0]] else 0f
+            bestScoreThisGen = bestScore
+            if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
+
+            for (i in 0 until POPULATION_SIZE) {
+                try {
+                    when {
+                        i < bestBrains.size -> population[i].copyFrom(bestBrains[i])
+                        i < 40 -> {
+                            val p1 = bestBrains[Random.nextInt(bestBrains.size)]
+                            var p2 = bestBrains[Random.nextInt(bestBrains.size)]
+                            while (p2 === p1 && bestBrains.size > 1) {
+                                p2 = bestBrains[Random.nextInt(bestBrains.size)]
+                            }
+                            val child = DuelingBrain()
+                            p1.crossover(p2, child)
+                            population[i] = child
+                            populationGenomes[i] = populationGenomes[p1.hashCode() % POPULATION_SIZE].crossover(populationGenomes[p2.hashCode() % POPULATION_SIZE])
+                        }
+                        else -> {
+                            val parent = bestBrains[Random.nextInt(bestBrains.size)]
+                            val child = DuelingBrain()
+                            parent.breed(child)
+                            population[i] = child
+                            populationGenomes[i] = populationGenomes[parent.hashCode() % POPULATION_SIZE].deepCopy().also { it.mutate(1.4f) }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            synchronized(sharedLock) {
+                for (i in 0 until POPULATION_SIZE) currentScores[i] = 0f
+            }
+
+            val baseRatio = (generation / 30f).coerceIn(0f, 0.7f)
+            val scoreBonus = (bestScoreThisGen / 25000f).coerceIn(0f, 0.15f)
+            nnWeight = (baseRatio + scoreBonus).coerceIn(0.2f, 0.8f)
+            qWeight = 1.0f - nnWeight
+
+            Thread { try { saveTrainingState() } catch (_: Exception) {} }.apply {
+                isDaemon = true
+                start()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            evolving = false
+        }
+    }
+
+    // 8方向空间射线连续向量感知 (32维输入)
+    private fun buildContinuousState(head: P, target: P, currentBody: ArrayDeque<P>): FloatArray {
+        val inputs = FloatArray(32)
+        var idx = 0
+        val rayDirs = listOf(
+            P(0, -1), P(0, 1), P(-1, 0), P(1, 0),
+            P(-1, -1), P(1, -1), P(-1, 1), P(1, 1)
+        )
+        for (rd in rayDirs) {
+            var step = 0
+            var distWall = 0f
+            var distBody = 1f
+            var distFood = 1f
+            var cx = head.x
+            var cy = head.y
+            while (true) {
+                cx += rd.x
+                cy += rd.y
+                step++
+                if (cx !in 0 until cols || cy !in 0 until rows) {
+                    distWall = 1.0f / step.toFloat()
+                    break
+                }
+                val curP = P(cx, cy)
+                if (distBody == 1f && currentBody.contains(curP)) distBody = 1.0f / step.toFloat()
+                if (distFood == 1f && curP == target) distFood = 1.0f / step.toFloat()
+            }
+            inputs[idx++] = distWall
+            inputs[idx++] = distBody
+            inputs[idx++] = distFood
+        }
+        inputs[idx++] = (target.x - head.x).toFloat() / cols.toFloat()
+        inputs[idx++] = (target.y - head.y).toFloat() / rows.toFloat()
+        inputs[idx++] = freeRegion(currentBody).toFloat() / total.toFloat()
+        inputs[idx++] = currentBody.size.toFloat() / total.toFloat()
+        inputs[idx++] = if (tailReachable(currentBody)) 1.0f else 0.0f
+        inputs[idx++] = (hunger.toFloat() / 200f).coerceIn(0f, 1f)
+        return inputs
+    }
+
+    /*
+     * =========================
+     * CALLBACKS & EFFECTS
+     * =========================
+     */
+    var onScoreChanged: ((Int) -> Unit)? = null
+    var onMoneyChanged: ((Int) -> Unit)? = null
+
+    private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
+
+    private val vibrator: Vibrator? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+
+    private val toneGen: ToneGenerator? = try {
+        ToneGenerator(AudioManager.STREAM_MUSIC, 85)
+    } catch (_: Throwable) { null }
+
+    private var bgm: BgmPlayer? = null
+
+    private var bodyColor = Color.rgb(46, 204, 113)
+    private var headColor = Color.rgb(39, 174, 96)
+    private var bgColor = Color.BLACK
+    private var gridColor = Color.CYAN
+    private var rainbowSkin = false
+
+    private val hsv = IntArray(360) { Color.HSVToColor(floatArrayOf(it.toFloat(), 1f, 1f)) }
+
+    private val particles = mutableListOf<Particle>()
+    private val floats = mutableListOf<FloatText>()
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val panel = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val border = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val snakePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val headPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val foodPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    private var flash = 0f
+    private val hungerKillLimit = 500
+    private val safeFollowLength = 32
+
+    private var trainingMode = false
+    private var reinforceTraining = false
+
+    // 看门狗防死锁
+    @Volatile private var lastHeartbeat = 0L
+    @Volatile private var watchDogThread: Thread? = null
+    @Volatile private var watchdogRestartCount = 0
+
+    private fun heartbeat() { lastHeartbeat = System.currentTimeMillis() }
+
+    private fun startWatchDog() {
+        stopWatchDog()
+        lastHeartbeat = System.currentTimeMillis()
+        watchDogThread = Thread {
+            while (true) {
+                try { Thread.sleep(1000) } catch (_: Exception) {}
+                if (!reinforceTraining) continue
+                val now = System.currentTimeMillis()
+                if (now - lastHeartbeat > 4000) {
+                    watchdogRestartCount++
+                    try { restartTrainingSafely() } catch (_: Exception) {}
+                    try { Thread.sleep(3000) } catch (_: Exception) {}
+                }
+            }
+        }.also { it.priority = Thread.MIN_PRIORITY; it.start() }
+    }
+
+    private fun stopWatchDog() {
+        watchDogThread?.interrupt()
+        watchDogThread = null
+    }
+
+    override fun onSaveInstanceState(): Parcelable? {
+        val superState = super.onSaveInstanceState()
+        val bundle = Bundle()
+        bundle.putParcelable("super", superState)
+        bundle.putBoolean("reinforceTraining", reinforceTraining)
+        bundle.putBoolean("trainingMode", trainingMode)
+        return bundle
+    }
+
+    override fun onRestoreInstanceState(state: Parcelable?) {
+        if (state is Bundle) {
+            reinforceTraining = state.getBoolean("reinforceTraining", false)
+            trainingMode = state.getBoolean("trainingMode", false)
+            super.onRestoreInstanceState(state.getParcelable("super"))
+        } else {
+            super.onRestoreInstanceState(state)
+        }
+    }
+
+    private var renderSkipCounter = 0
+    private val reinforceButtonRect = RectF()
+    private var lastReinforceTap = 0L
+
+    @Volatile private var trainActive = false
+    private val trainThreads = mutableListOf<Thread>()
+    private val TRAIN_THREADS = 6
+
+    private val aiPool: ExecutorService = run {
+        val cores = Runtime.getRuntime().availableProcessors().coerceIn(4, 8)
+        Executors.newFixedThreadPool(cores) { r ->
+            Thread(r, "snake-ai-v4").apply {
+                isDaemon = true
+                priority = Thread.NORM_PRIORITY
+            }
+        }
+    }
+
+    private val tlVisited: ThreadLocal<BooleanArray> = ThreadLocal.withInitial { BooleanArray(cols * rows) }
+    private val tlQueue: ThreadLocal<IntArray> = ThreadLocal.withInitial { IntArray(cols * rows) }
+
+    private fun hungerForceEat(): Int =
+        when {
+            snake.size < 20 -> 50
+            snake.size < 35 -> 70
+            snake.size < 55 -> 100
+            snake.size < 80 -> 140
+            else -> 200
+        }
+
+    private fun vibrateEat() {
+        vibrator?.let {
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    it.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 12, 25, 12), -1))
+                } else {
+                    @Suppress("DEPRECATION") it.vibrate(longArrayOf(0, 12, 25, 12), -1)
+                }
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun vibrateDeath() {
+        vibrator?.let {
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    it.vibrate(VibrationEffect.createOneShot(120, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION") it.vibrate(120)
+                }
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun playEatSound() {
+        try { toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 55) } catch (_: Throwable) {}
+    }
+
+    /*
+     * =========================
+     * FRAME LOOP
+     * =========================
+     */
+    private val frame = object : Choreographer.FrameCallback {
+        override fun doFrame(ns: Long) {
+            if (!running) return
+
+            if (lastFrame == 0L) lastFrame = ns
+            val dt = ((ns - lastFrame) / 1_000_000L).coerceAtMost(100L)
+            lastFrame = ns
+
+            if (reinforceTraining) {
+                if ((++renderSkipCounter % 2) == 0) invalidate()
+                Choreographer.getInstance().postFrameCallback(this)
+                return
+            }
+
+            if (!gameOver) {
+                accumulator += dt
+                var stepCount = 0
+                val maxSteps = if (trainingMode) 10 else Int.MAX_VALUE
+                while (accumulator >= gameSpeed && stepCount < maxSteps) {
+                    updateGame()
+                    if (gameOver && !trainingMode) break
+                    accumulator -= gameSpeed
+                    stepCount++
+                }
+                if (stepCount >= maxSteps) accumulator = 0L
+            }
+
+            updateEffects(dt / 16f)
+            val shouldRender = if (trainingMode) (++renderSkipCounter % 2) == 0 else true
+            if (shouldRender) invalidate()
+
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    /*
+     * =========================
+     * INIT
+     * =========================
+     */
+    init {
+        highScore = prefs.getInt("high_score", 0)
+        money = prefs.getInt("money", 0)
+        trainingMode = prefs.getBoolean("training_mode", false)
+
+        aggression = prefs.getFloat("learn_aggression", 1.15f)
+        safetyMargin = prefs.getFloat("learn_safety", 1.08f)
+        shortcutBonus = prefs.getFloat("learn_shortcut", 0.90f)
+
+        wRegion = prefs.getFloat("w_region", wRegion0)
+        wMobility = prefs.getFloat("w_mobility", wMobility0)
+        wTailGood = prefs.getFloat("w_tail_good", wTailGood0)
+        wTailBad = prefs.getFloat("w_tail_bad", wTailBad0)
+        wFoodNear = prefs.getFloat("w_food_near", wFoodNear0)
+        wFoodAte = prefs.getFloat("w_food_ate", wFoodAte0)
+        wEdge = prefs.getFloat("w_edge", wEdge0)
+        wSpace = prefs.getFloat("w_space", wSpace0)
+
+        deathWall = prefs.getInt("stat_wall", 0)
+        deathSelf = prefs.getInt("stat_self", 0)
+        deathTrap = prefs.getInt("stat_trap", 0)
+        totalGames = prefs.getInt("stat_total", 0)
+
+        bgm = BgmPlayer()
+        updateCurrentSkin()
+        updateCurrentBoard()
+
+        loadTrainingState()
+        reset()
+    }
+
+    fun getAIMode(): Int = aiMode
+
+    fun setAIMode(m: Int) {
+        aiMode = m
+        invalidate()
+    }
+
+    fun setTrainingMode(b: Boolean) {
+        trainingMode = b
+        if (b) {
+            aiMode = 1
+            bgm?.stop()
+            reset()
+        } else {
+            stopParallelTraining()
+            if (running) bgm?.start()
+            reset()
+        }
+        invalidate()
+    }
+
+    fun setReinforceTraining(enable: Boolean) {
+        if (enable) {
+            startParallelTraining()
+            startWatchDog()
+        } else {
+            stopParallelTraining()
+            stopWatchDog()
+        }
+        invalidate()
+    }
+
+    fun isReinforceTraining(): Boolean = reinforceTraining
+    fun isTrainingMode(): Boolean = trainingMode
+
+    private fun restartTrainingSafely() {
+        synchronized(sharedLock) {
+            trainActive = false
+            reinforceTraining = false
+        }
+        val oldThreads = synchronized(trainThreads) { trainThreads.toList() }
+        for (t in oldThreads) { try { t.interrupt() } catch (_: Throwable) {} }
+        for (t in oldThreads) {
+            try { t.join(500) } catch (_: InterruptedException) { break }
+        }
+        synchronized(trainThreads) { trainThreads.clear() }
+        Thread.sleep(200)
+        synchronized(sharedLock) { reinforceTraining = true }
+        startParallelTraining()
+    }
+
+    private fun startParallelTraining() {
+        synchronized(trainingLifecycleLock) {
+            if (trainThreads.any { it.isAlive } || trainActive) return
+
+            trainingRunId++
+            val myRunId = trainingRunId
+
+            reinforceTraining = true
+            trainingMode = true
+            aiMode = 1
+            bgm?.stop()
+
+            gameOver = false
+            trainActive = true
+            trainThreads.clear()
+
+            currentAgentIndex = 0
+            completedAgents = 0
+            bestScoreThisGen = 0f
+            for (i in 0 until POPULATION_SIZE) currentScores[i] = 0f
+
+            for (i in 0 until TRAIN_THREADS) {
+                val t = Thread(
+                    {
+                        val game = TrainGame(
+                            seed = System.nanoTime() + i * 999983L,
+                            runId = myRunId
+                        )
+                        while (isTrainingRunActive(myRunId) && !Thread.currentThread().isInterrupted) {
+                            if (evolving) {
+                                if (Thread.currentThread().isInterrupted) break
+                                Thread.yield()
+                                continue
+                            }
+                            var agentId = -1
+                            synchronized(sharedLock) {
+                                if (currentAgentIndex < POPULATION_SIZE) {
+                                    agentId = currentAgentIndex++
+                                }
+                            }
+                            if (agentId == -1) { Thread.yield(); continue }
+
+                            try {
+                                game.playOneGame(agentId)
+                            } catch (e: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                break
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            } finally {
+                                synchronized(sharedLock) {
+                                    completedAgents++
+                                    if (completedAgents >= POPULATION_SIZE) {
+                                        evolveNextGeneration()
+                                        currentAgentIndex = 0
+                                        completedAgents = 0
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "snake-train-v4-$i"
+                )
+                t.isDaemon = true
+                t.priority = Thread.NORM_PRIORITY
+                t.start()
+                trainThreads.add(t)
+            }
+        }
+    }
+
+    private fun stopParallelTraining() {
+        val threadsToJoin: List<Thread>
+        synchronized(trainingLifecycleLock) {
+            if (!trainActive && trainThreads.none { it.isAlive }) {
+                reinforceTraining = false
+                trainingMode = false
+                return
+            }
+            trainingRunId++
+            trainActive = false
+            reinforceTraining = false
+            trainingMode = false
+            threadsToJoin = trainThreads.toList()
+        }
+
+        for (t in threadsToJoin) { try { t.interrupt() } catch (_: Throwable) {} }
+        for (t in threadsToJoin) { try { t.join(5000L) } catch (_: Throwable) {} }
+
+        synchronized(trainingLifecycleLock) {
+            trainThreads.removeAll { !it.isAlive }
+        }
+
+        saveLearning()
+        saveTrainingState()
+        if (running) bgm?.start()
+        reset()
+    }
+
+    fun setForcedStrategy(s: Int) {
+        forcedStrategy = s
+        invalidate()
+    }
+
+    /*
+     * =========================
+     * SKIN / BOARD (底层保留不改动)
+     * =========================
+     */
+    fun updateCurrentSkin(id: String? = null) {
+        when (prefs.getString("equipped_skin", "green")) {
+            "blue" -> setSnakeColors(Color.rgb(52, 152, 219), Color.rgb(41, 128, 185), false)
+            "red" -> setSnakeColors(Color.rgb(46, 204, 113), Color.rgb(192, 57, 43), false)
+            "purple" -> setSnakeColors(Color.rgb(155, 89, 182), Color.rgb(142, 68, 173), false)
+            "gold" -> setSnakeColors(Color.rgb(241, 196, 15), Color.rgb(243, 156, 18), false)
+            "rainbow" -> setSnakeColors(Color.WHITE, Color.WHITE, true)
+            else -> setSnakeColors(Color.rgb(46, 204, 113), Color.rgb(39, 174, 96), false)
+        }
+        invalidate()
+    }
+
+    private fun setSnakeColors(body: Int, head: Int, rainbow: Boolean) {
+        bodyColor = body
+        headColor = head
+        rainbowSkin = rainbow
+
+        snakePaint.color = body
+        snakePaint.style = Paint.Style.STROKE
+        snakePaint.strokeCap = Paint.Cap.ROUND
+        snakePaint.strokeJoin = Paint.Join.ROUND
+        snakePaint.strokeWidth = 0f
+        headPaint.color = head
+    }
+
+    fun updateCurrentBoard(id: String? = null) {
+        when (prefs.getString("equipped_board", "dark")) {
+            "light" -> { bgColor = Color.rgb(240, 240, 240); gridColor = Color.rgb(200, 200, 200) }
+            "neon" -> { bgColor = Color.rgb(10, 25, 47); gridColor = Color.CYAN }
+            "forest" -> { bgColor = Color.rgb(27, 46, 26); gridColor = Color.rgb(46, 74, 45) }
+            "cyberpunk" -> { bgColor = Color.rgb(43, 15, 59); gridColor = Color.MAGENTA }
+            "rainbow_board" -> { bgColor = Color.BLACK; gridColor = Color.WHITE }
+            else -> { bgColor = Color.BLACK; gridColor = Color.CYAN }
+        }
+        invalidate()
+    }
+
+    /*
+     * =========================
+     * RESET / LIFECYCLE
+     * =========================
+     */
+    fun reset() {
+        snake.clear()
+        queue.clear()
+        if (aiMode == 2) {
+            snake.add(P(0, 0))
+            dir = P(0, 1)
+        } else {
+            snake.add(P(cols / 2, rows / 2))
+            dir = P(1, 0)
+        }
+
+        score = 0
+        combo = 0
+        hunger = 0
+        gameOver = false
+        deathCause = "无"
+        lastDeathInfo = ""
+
+        gameSpeed = if (trainingMode && !reinforceTraining) 2L else gameSpeedStart
+        accumulator = 0L
+        lastFrame = 0L
+
+        particles.clear()
+        floats.clear()
+        flash = 0f
+
+        lastV2State = -1
+        lastV2Action = -1
+        stateHistory.clear()
+        causalHistory.clear()
+
+        ai = Snapshot(chosen = dir)
+        placeFood()
+        lastFreeRegion = freeRegion(snake).toFloat()
+        onScoreChanged?.invoke(score)
+        invalidate()
+    }
+
+    fun resume() {
+        if (running) return
+        running = true
+        lastFrame = 0L
+        if (!trainingMode) bgm?.start()
+        Choreographer.getInstance().postFrameCallback(frame)
+    }
+
+    fun pause() {
+        running = false
+        bgm?.stop()
+        Choreographer.getInstance().removeFrameCallback(frame)
+    }
+
+    /*
+     * =========================
+     * MAIN GAME UPDATE
+     * =========================
+     */
+    private fun updateGame() {
+        if (gameOver) return
+
+        if (hunger >= hungerKillLimit) {
+            die("HUNGER")
+            return
+        }
+
+        if (aiMode != 0) {
+            queue.clear()
+            queue.add(chooseMove())
+        }
+
+        if (queue.isNotEmpty()) {
+            val requested = queue.removeFirst()
+            if (!isReverse(requested, dir) && legalDirection(requested)) {
+                dir = requested
+            }
+        }
+
+        if (dir == P(0, 0)) return
+
+        val head = snake.first()
+        val oldVector = buildContinuousState(head, food, snake)
+        val oldState = buildState(snake, dir, food, hunger)
+        val oldAction = dirs.indexOfFirst { it == dir }.coerceAtLeast(0)
+        val stateHash = computeStateHash(head, food, snake.size)
+
+        val nh = P(head.x + dir.x, head.y + dir.y)
+
+        // 撞墙判定
+        if (!inside(nh)) {
+            qUpdateV4(oldVector, oldState, oldAction, DEATH_WALL, null, oldState, 0, true)
+            die("WALL")
+            return
+        }
+
+        val ate = nh == food
+        val body = snake.toList()
+        val hitIndex = body.indexOf(nh)
+        val tail = snake.last()
+
+        // 撞自身判定
+        if (hitIndex >= 0 && !(nh == tail && !ate)) {
+            val sim = simulateOn(ArrayDeque(snake), dir)
+            val region = freeRegion(sim.body)
+            val cause = if (region < max(2, (snake.size * safetyMargin).toInt())) "TRAP" else "SELF"
+            val reward = if (cause == "TRAP") DEATH_TRAP else DEATH_SELF
+
+            qUpdateV4(oldVector, oldState, oldAction, reward, null, oldState, 0, true)
+            die(cause)
+            return
+        }
+
+        snake.addFirst(nh)
+        rememberLoopState(oldState)
+
+        // 记录因果溯源责任历史
+        causalHistory.addLast(Pair(stateHash, oldAction))
+        while (causalHistory.size > 12) causalHistory.removeFirst()
+
+        var reward = REWARD_STEP
+
+        if (ate) {
+            val gain = 10 + min(combo, 30) * 3 + snake.size
+            score += gain
+            combo++
+            hunger = 0
+            money += gain * 3 + 30
+
+            if (score > highScore) highScore = score
+            onScoreChanged?.invoke(score)
+            onMoneyChanged?.invoke(money)
+
+            prefs.edit().putInt("money", money).putInt("high_score", highScore).apply()
+            gameSpeed = max(gameSpeedMin, gameSpeedStart - snake.size * 2L)
+
+            vibrateEat()
+            playEatSound()
+            spawnFoodEffect(nh)
+            placeFood()
+            reward += REWARD_FOOD + combo * 0.06f
+        } else {
+            snake.removeLast()
+            hunger++
+            combo = max(0, combo - 1)
+
+            val curFree = freeRegion(snake).toFloat()
+            val spaceDelta = curFree - lastFreeRegion
+            lastFreeRegion = curFree
+            reward += spaceDelta * REWARD_SPACE_DELTA
+
+            if (tailReachable(snake)) reward += REWARD_TAIL
+            if (calculateDanger() >= 4) reward += REWARD_DANGER
+            reward += -(hunger * hunger * 0.001f).coerceAtMost(0.15f)
+        }
+
+        val nextVector = buildContinuousState(snake.first(), food, snake)
+        val nextState = buildState(snake, dir, food, hunger)
+        val nextMask = legalActionMask(snake, dir, food)
+
+        qUpdateV4(oldVector, oldState, oldAction, reward, nextVector, nextState, nextMask, false)
+        lastV2State = nextState
+        lastV2Action = oldAction
+    }
+
+    /*
+     * =========================
+     * V2 STATE (73,728)
+     * =========================
+     */
+    private fun directionIndex(d: P): Int =
+        when (d) {
+            P(0, -1) -> 0
+            P(0, 1) -> 1
+            P(-1, 0) -> 2
+            else -> 3
+        }
+
+    private fun foodDirection(head: P, target: P): Int {
+        val dx = target.x - head.x
+        val dy = target.y - head.y
+        return if (abs(dx) >= abs(dy)) {
+            if (dx >= 0) 3 else 2
+        } else {
+            if (dy >= 0) 1 else 0
+        }
+    }
+
+    private fun dangerMask(body: ArrayDeque<P>, heading: P, target: P): Int {
+        if (body.isEmpty()) return 15
+        val h = body.first()
+        var mask = 0
+
+        for (i in dirs.indices) {
+            val d = dirs[i]
+            if (isReverse(d, heading)) { mask = mask or (1 shl i); continue }
+            val np = P(h.x + d.x, h.y + d.y)
+            if (!inside(np)) { mask = mask or (1 shl i); continue }
+            val ate = np == target
+            if (body.contains(np) && !(np == body.last() && !ate)) { mask = mask or (1 shl i); continue }
+            val sim = simulateForBody(body, d, target)
+            if (sim.body.isEmpty()) { mask = mask or (1 shl i); continue }
+            val region = freeRegion(sim.body)
+            val tail = tailReachable(sim.body)
+            val ratio = region.toFloat() / max(1, sim.body.size)
+            if (!tail && sim.body.size > 8) mask = mask or (1 shl i)
+            else if (ratio < 0.55f && sim.body.size > 12) mask = mask or (1 shl i)
+        }
+        return mask and 15
+    }
+
+    private fun buildState(body: ArrayDeque<P>, heading: P, target: P, hungerValue: Int): Int {
+        if (body.isEmpty()) return 0
+        val h = body.first()
+        val foodD = foodDirection(h, target)
+        val danger = dangerMask(body, heading, target)
+        val mobility = countSafeMovesFor(body, heading, target).coerceIn(0, 4)
+        val region = freeRegion(body)
+        val ratio = region.toFloat() / max(1, body.size)
+
+        val spaceBucket = when {
+            ratio < 0.8f -> 0
+            ratio < 1.3f -> 1
+            ratio < 2.0f -> 2
+            else -> 3
+        }
+
+        val hungerBucket = when {
+            hungerValue < 10 -> 0
+            hungerValue < 25 -> 1
+            hungerValue < 50 -> 2
+            hungerValue < 100 -> 3
+            else -> 4
+        }
+
+        val lengthBucket = when {
+            body.size < 12 -> 0
+            body.size < 30 -> 1
+            body.size < 60 -> 2
+            else -> 3
+        }
+
+        val tail = if (tailReachable(body)) 1 else 0
+        val headingIndex = directionIndex(heading)
+
+        var s = foodD
+        s = s * V2_DANGER + danger
+        s = s * V2_MOBILITY + mobility
+        s = s * V2_SPACE + spaceBucket
+        s = s * V2_HUNGER + hungerBucket
+        s = s * V2_LENGTH + lengthBucket
+        s = s * V2_TAIL + tail
+        s = s * V2_HEADING + headingIndex
+
+        return s.coerceIn(0, V2_STATE_COUNT - 1)
+    }
+
+    private fun legalActionMask(body: ArrayDeque<P>, heading: P, target: P): Int {
+        if (body.isEmpty()) return 0
+        val h = body.first()
+        var mask = 0
+        for (i in dirs.indices) {
+            val d = dirs[i]
+            if (isReverse(d, heading)) continue
+            val np = P(h.x + d.x, h.y + d.y)
+            if (!inside(np)) continue
+            val ate = np == target
+            if (body.contains(np) && !(np == body.last() && !ate)) continue
+            mask = mask or (1 shl i)
+        }
+        return mask
+    }
+
+    // 状态哈希计算 (用于 V3/V4 失败长效记忆与因果追责)
+    private fun computeStateHash(head: P, target: P, length: Int): Long {
+        var h = -3750763034362895579L
+        h = (h xor head.x.toLong()) * 1099511628211L
+        h = (h xor head.y.toLong()) * 1099511628211L
+        h = (h xor target.x.toLong()) * 1099511628211L
+        h = (h xor target.y.toLong()) * 1099511628211L
+        h = (h xor length.toLong()) * 1099511628211L
+        return h
+    }
+
+    private fun rememberLoopState(stateId: Int) {
+        stateHistory.addLast(stateId)
+        while (stateHistory.size > loopWindow) stateHistory.removeFirst()
+    }
+
+    private fun isLooping(): Boolean {
+        if (stateHistory.size < loopWindow) return false
+        val last = stateHistory.last()
+        return stateHistory.count { it == last } >= 5
+    }
+
+    private fun selectGoal(): V4Goal {
+        val region = freeRegion(snake)
+        val ratio = region.toFloat() / max(1, snake.size)
+        val tailOk = tailReachable(snake)
+        return when {
+            isLooping() -> V4Goal.BREAK_LOOP
+            ratio < 0.35f -> V4Goal.PRESERVE_SPACE
+            hunger > 120 -> V4Goal.GET_FOOD
+            ratio < 0.70f && tailOk -> V4Goal.REACH_TAIL
+            tailOk -> V4Goal.GET_FOOD
+            else -> V4Goal.SURVIVE
+        }
+    }
+
+    /*
+     * =========================
+     * MAIN AI (V4 集成决策)
+     * =========================
+     */
+    private fun chooseMove(): P {
+        val futures: List<Future<Candidate>> = dirs.map { d ->
+            aiPool.submit(Callable { evaluate(d) })
+        }
+        val candidates = futures.map {
+            try { it.get() } catch (_: Throwable) { Candidate(P(0, 0), -1e9f, "AI异常", false) }
+        }
+        val legal = candidates.filter { it.legal }
+
+        if (legal.isEmpty()) {
+            ai = Snapshot(strategy = "NO MOVE", reason = "四个方向都无法前进", danger = 5, chosen = dir, candidates = candidates)
+            return dir
+        }
+
+        val danger = calculateDanger()
+        val regionNow = freeRegion(snake)
+        val foodDistNow = distance(snake.first(), food, snake, true)
+        val stateDiscrete = buildState(snake, dir, food, hunger)
+        val currentGoal = selectGoal()
+
+        // 破环器拦截 (V2 Loop Breaker)
+        if (isLooping()) {
+            val breakStep = breakLoop(snake)
+            if (breakStep != null) {
+                val action = dirs.indexOfFirst { it == breakStep }.coerceAtLeast(0)
+                lastV2State = stateDiscrete
+                lastV2Action = action
+                ai = Snapshot(strategy = "V2 破环介入", reason = "检测到死循环，强制空间破环", danger = danger, region = regionNow, chosen = breakStep, candidates = candidates, goal = V4Goal.BREAK_LOOP)
+                return breakStep
+            }
+        }
+
+        // 第一层：安全食物快速通道
+        val safeFood = findSafeFoodStep()
+        if (safeFood != null && currentGoal != V4Goal.BREAK_LOOP) {
+            val action = dirs.indexOfFirst { it == safeFood }.coerceAtLeast(0)
+            val q = qRead(stateDiscrete, action)
+            lastV2State = stateDiscrete
+            lastV2Action = action
+            ai = Snapshot(strategy = "V2 绝对安全食物", reason = "吃后尾巴完全可达", danger = danger, region = regionNow, tailReachable = tailReachable(snake), foodReachable = true, foodDistance = foodDistNow, chosen = safeFood, candidates = candidates, qValue = q, nVisits = qVisit(stateDiscrete, action), goal = V4Goal.GET_FOOD)
+            return safeFood
+        }
+
+        // 第二层：循尾安全兜底
+        val tailStep = followTailStep(legal)
+        if (tailStep != null && hunger < hungerForceEat() && currentGoal == V4Goal.REACH_TAIL) {
+            val action = dirs.indexOfFirst { it == tailStep }.coerceAtLeast(0)
+            val q = qRead(stateDiscrete, action)
+            lastV2State = stateDiscrete
+            lastV2Action = action
+            ai = Snapshot(strategy = "V2 循尾保活", reason = "沿尾巴维持空间循环", danger = danger, region = regionNow, tailReachable = true, chosen = tailStep, candidates = candidates, qValue = q, nVisits = qVisit(stateDiscrete, action), safeFollowMode = true, goal = V4Goal.REACH_TAIL)
+            return tailStep
+        }
+
+        // 第三层：V4 Dueling 双流神经网络 + Q 表 + 失败记忆综合集成
+        val shielded = legal.filter {
+            val ratio = it.region.toFloat() / max(1, snake.size)
+            it.tailOk || ratio >= 1.0f || (snake.size < 15 && ratio >= 0.75f)
+        }
+        val pool = if (shielded.isNotEmpty()) shielded else legal
+
+        val head = snake.first()
+        val continuousState = buildContinuousState(head, food, snake)
+        val brain = if (trainingMode || reinforceTraining) population[currentAgentIndex % POPULATION_SIZE] else population[0]
+        val genome = if (trainingMode || reinforceTraining) populationGenomes[currentAgentIndex % POPULATION_SIZE] else populationGenomes[0]
+        val nnVals = brain.forward(continuousState)
+        val stateHash = computeStateHash(head, food, snake.size)
+
+        val de = checkFoodDeadEnd()
+        deadEndPredicted = de.first
+        foodSpaceRatio = de.second
+        val deadEndPenalty = if (de.first) -6f else 0f
+
+        val rSteps = when {
+            snake.size > 60 -> 5
+            snake.size > 25 -> 3
+            else -> 0
+        }
+        rolloutActive = rSteps > 0
+        rolloutSteps = rSteps
+
+        var best = pool.first()
+        var bestValue = -Float.MAX_VALUE
+
+        for (candidate in pool) {
+            val action = dirs.indexOfFirst { it == candidate.d }
+            if (action < 0) continue
+
+            val q = qRead(stateDiscrete, action)
+            val nn = nnVals[action]
+            val memPenalty = failureMemory.getPenalty(stateHash, action)
+            val rolloutScore = if (rSteps > 0) rolloutN(candidate.d, rSteps) else 0f
+
+            // V4 综合评分公式：Q表 + Dueling网络 + 目标偏好 + 记忆惩罚 + 前瞻展开
+            val ensembleScore = (genome.qWeight * q) +
+                    (genome.brainWeight * nn * 4.5f) +
+                    (candidate.score * 0.001f) +
+                    deadEndPenalty +
+                    (rolloutScore * 0.45f) -
+                    (memPenalty * 2.2f)
+
+            if (ensembleScore > bestValue) {
+                bestValue = ensembleScore
+                best = candidate.copy(qValue = q, brainValue = nn, memoryPenalty = memPenalty)
+            }
+        }
+
+        val action = dirs.indexOfFirst { it == best.d }.coerceAtLeast(0)
+        lastV2State = stateDiscrete
+        lastV2Action = action
+
+        ai = Snapshot(
+            strategy = "V4 进化集成 (D3QN+Q+PER)",
+            reason = "目标[${currentGoal.name}] 综合决断",
+            danger = danger,
+            region = regionNow,
+            spaceRatio = regionNow.toFloat() / max(1, snake.size),
+            tailReachable = tailReachable(snake),
+            foodReachable = foodDistNow >= 0,
+            foodDistance = foodDistNow,
+            hunger = hunger,
+            chosen = best.d,
+            candidates = candidates.map { if (it.d == best.d) it.copy(qValue = qRead(stateDiscrete, action)) else it },
+            qValue = qRead(stateDiscrete, action),
+            nVisits = qVisit(stateDiscrete, action),
+            goal = currentGoal
+        )
+
+        return best.d
+    }
+
+    private fun breakLoop(stateBody: ArrayDeque<P>): P? {
+        val legal = legalActionsFor(stateBody, dir)
+        if (legal.isEmpty()) return null
+
+        var best = legal.first()
+        var bestScore = -Float.MAX_VALUE
+
+        for (action in legal) {
+            val nextSim = simulateOn(ArrayDeque(stateBody), action)
+            val space = freeRegion(nextSim.body)
+            val tail = if (tailReachable(nextSim.body)) 1f else 0f
+            val distance = distance(nextSim.body.first(), food, nextSim.body, true)
+            val score = space * 5f + tail * 20f - (if (distance >= 0) distance * 0.2f else 50f)
+            if (score > bestScore) {
+                bestScore = score
+                best = action
+            }
+        }
+        stateHistory.clear()
+        return best
+    }
+
+    private fun legalActionsFor(body: ArrayDeque<P>, curDir: P): List<P> {
+        val list = mutableListOf<P>()
+        for (d in dirs) {
+            if (isReverse(d, curDir)) continue
+            val nh = P(body.first().x + d.x, body.first().y + d.y)
+            if (inside(nh) && (!body.contains(nh) || (nh == body.last() && nh != food))) {
+                list.add(d)
+            }
+        }
+        return list
+    }
+
+    private fun hungerFactorValue(): Float =
+        when {
+            hunger >= 60 -> 4f
+            hunger >= 30 -> 2.5f
+            hunger >= 15 -> 1.6f
+            else -> 1f
+        }
+
+    private fun followTailStep(legal: List<Candidate>): P? {
+        if (snake.size < 2) return null
+        val path = shortestPath(snake.first(), snake.last(), snake, allowTail = true) ?: return null
+        if (path.isEmpty()) return null
+        val step = path.first()
+        if (legal.none { it.d == step }) return null
+
+        val sim = simulate(snake.first(), step)
+        if (sim.body.isEmpty() || !tailReachable(sim.body)) return null
+        val r = freeRegion(sim.body)
+        if (r < 3 && snake.size < total - 5) return null
+        return step
+    }
+
+    private fun findSafeFoodStep(): P? {
+        val path = shortestPath(snake.first(), food, snake, allowTail = true) ?: return null
+        if (path.isEmpty()) return null
+
+        val simBody = ArrayDeque(snake)
+        var ate = false
+
+        for (step in path) {
+            val nh = P(simBody.first().x + step.x, simBody.first().y + step.y)
+            if (!inside(nh)) return null
+            val willEat = nh == food
+            if (simBody.contains(nh) && !(nh == simBody.last() && !willEat)) return null
+            simBody.addFirst(nh)
+            if (!willEat) simBody.removeLast() else ate = true
+        }
+
+        if (!ate || !tailReachable(simBody)) return null
+
+        val len = simBody.size
+        val freeLeft = total - len
+        if (len > 180 && freeLeft < 4) return null
+        if (len > 150 && freeLeft < 6) return null
+        if (len > 120 && freeLeft < 10) return null
+        if (len > 90 && freeLeft < 14) return null
+        if (len > 60 && freeLeft < 20) return null
+
+        if (len <= 60 && freeLeft >= 20) {
+            val r = freeRegion(simBody)
+            if (r < max(4, freeLeft / 3)) return null
+        }
+        return path.first()
+    }
+
+    private fun evaluate(d: P): Candidate {
+        if (!legalDirection(d)) return Candidate(d, -1e9f, "撞墙/身体", false)
+        val sim = simulate(snake.first(), d)
+        val region = freeRegion(sim.body)
+        val tail = tailReachable(sim.body)
+        val foodDist = distance(sim.body.first(), food, sim.body, true)
+        val ate = sim.ate
+        val mobility = countSafeMoves(sim.body)
+        val hungerFactor = hungerFactorValue()
+
+        val lenBoost = if (snake.size >= safeFollowLength) {
+            (snake.size.toFloat() / safeFollowLength).coerceIn(1f, 3f)
+        } else 1f
+
+        val regionScoreVal = region * wRegion * lenBoost
+        val mobilityScoreVal = mobility * wMobility
+        val tailScoreVal = if (tail) wTailGood * lenBoost else wTailBad * lenBoost
+
+        var foodScoreVal = if (foodDist >= 0) {
+            hungerFactor * aggression * (wFoodNear / (foodDist + 1))
+        } else {
+            -450f * hungerFactor
+        }
+
+        if (ate) foodScoreVal += wFoodAte * aggression
+
+        var eatPenalty = 0f
+        if (ate) {
+            val afterSize = sim.body.size
+            val needSpace = (afterSize * safetyMargin).toInt() + 2
+            if (!tail || region < needSpace) {
+                eatPenalty = -2500f - snake.size * 35f
+            }
+        }
+
+        val edge = min(
+            min(sim.body.first().x, cols - 1 - sim.body.first().x),
+            min(sim.body.first().y, rows - 1 - sim.body.first().y)
+        )
+        val edgeScoreVal = -max(0, 2 - edge) * wEdge
+        val spacePenalty = max(0f, snake.size * safetyMargin - region.toFloat())
+        val spaceScoreVal = -spacePenalty * wSpace
+
+        val totalScore = regionScoreVal + mobilityScoreVal + tailScoreVal + foodScoreVal + edgeScoreVal + spaceScoreVal + eatPenalty
+
+        val reason = when {
+            ate && eatPenalty < 0 -> "困局防范"
+            ate -> "获取食物"
+            tail -> "维持可达"
+            else -> "开辟空间"
+        }
+
+        return Candidate(
+            d = d,
+            score = totalScore,
+            reason = reason,
+            legal = true,
+            regionScore = regionScoreVal,
+            mobilityScore = mobilityScoreVal,
+            tailScore = tailScoreVal,
+            foodScore = foodScoreVal,
+            edgeScore = edgeScoreVal,
+            spaceScore = spaceScoreVal,
+            region = region,
+            mobility = mobility,
+            tailOk = tail,
+            foodDist = foodDist,
+            ate = ate
+        )
+    }
+
+    private fun clampW(v: Float, lo: Float, hi: Float): Float = v.coerceIn(lo, hi)
+
+    private fun adjustWeights(cause: String) {
+        val beforeEdge = wEdge
+        val beforeTail = wTailGood
+        val beforeSpace = wSpace
+        val beforeFood = wFoodNear
+        val beforeAgg = aggression
+        val beforeSafety = safetyMargin
+
+        when (cause) {
+            "WALL" -> {
+                wEdge = clampW(wEdge * 1.03f, wEdge0 * 0.9f, wEdge0 * 1.1f)
+                aggression = clampW(aggression * 0.99f, 0.95f, 1.35f)
+            }
+            "SELF" -> {
+                wTailGood = clampW(wTailGood * 1.03f, wTailGood0 * 0.9f, wTailGood0 * 1.1f)
+                wTailBad = clampW(wTailBad * 1.02f, wTailBad0 * 1.1f, wTailBad0 * 0.9f)
+                safetyMargin = clampW(safetyMargin * 1.01f, 1.0f, 1.20f)
+            }
+            "TRAP" -> {
+                wSpace = clampW(wSpace * 1.04f, wSpace0 * 0.9f, wSpace0 * 1.1f)
+                wRegion = clampW(wRegion * 1.02f, wRegion0 * 0.9f, wRegion0 * 1.1f)
+                safetyMargin = clampW(safetyMargin * 1.01f, 1.0f, 1.20f)
+                aggression = clampW(aggression * 1.005f, 0.95f, 1.35f)
+                wFoodAte = clampW(wFoodAte * 1.02f, wFoodAte0 * 0.9f, wFoodAte0 * 1.1f)
+            }
+            "HUNGER" -> {
+                wFoodNear = clampW(wFoodNear * 1.04f, wFoodNear0 * 0.9f, wFoodNear0 * 1.1f)
+                wFoodAte = clampW(wFoodAte * 1.03f, wFoodAte0 * 0.9f, wFoodAte0 * 1.1f)
+                aggression = clampW(aggression * 1.02f, 0.95f, 1.35f)
+                wSpace = clampW(wSpace * 0.98f, wSpace0 * 0.9f, wSpace0 * 1.1f)
+                safetyMargin = clampW(safetyMargin * 0.99f, 1.0f, 1.20f)
+            }
+        }
+
+        wRegion = wRegion * 0.95f + wRegion0 * 0.05f
+        wMobility = wMobility * 0.95f + wMobility0 * 0.05f
+        wEdge = wEdge * 0.95f + wEdge0 * 0.05f
+        wSpace = wSpace * 0.95f + wSpace0 * 0.05f
+        wFoodNear = wFoodNear * 0.95f + wFoodNear0 * 0.05f
+        wTailGood = wTailGood * 0.95f + wTailGood0 * 0.05f
+        wFoodAte = wFoodAte * 0.95f + wFoodAte0 * 0.05f
+
+        lastLearnAction = when (cause) {
+            "WALL" -> "边界${"%.0f→%.0f".format(beforeEdge, wEdge)} 攻${"%.2f→%.2f".format(beforeAgg, aggression)}"
+            "SELF" -> "尾+${"%.0f→%.0f".format(beforeTail, wTailGood)} 安全${"%.2f→%.2f".format(beforeSafety, safetyMargin)}"
+            "TRAP" -> "空间${"%.0f→%.0f".format(beforeSpace, wSpace)} 安全${"%.2f→%.2f".format(beforeSafety, safetyMargin)}"
+            "HUNGER" -> "食近${"%.0f→%.0f".format(beforeFood, wFoodNear)} 攻${"%.2f→%.2f".format(beforeAgg, aggression)}"
+            else -> "微调"
+        }
+    }
+
+    private fun saveTrainingState() {
+        try {
+            val file = context.getFileStreamPath("snake_training_v4.dat")
+            val genCopy: Int
+            val scoreCopy: Float
+            val qCopy: FloatArray
+            val nCopy: IntArray
+            val popCopy: List<DuelingBrain>
+
+            synchronized(sharedLock) {
+                genCopy = generation
+                scoreCopy = bestScoreAllTime
+                qCopy = qV2.copyOf()
+                nCopy = nV2.copyOf()
+                popCopy = population.map { brain ->
+                    DuelingBrain().apply { copyFrom(brain) }
+                }
+            }
+
+            DataOutputStream(BufferedOutputStream(FileOutputStream(file))).use { out ->
+                out.writeInt(genCopy)
+                out.writeFloat(scoreCopy)
+                for (brain in popCopy) {
+                    for (v in brain.w1) out.writeFloat(v)
+                    for (v in brain.b1) out.writeFloat(v)
+                    for (v in brain.w2) out.writeFloat(v)
+                    for (v in brain.b2) out.writeFloat(v)
+                    for (v in brain.wV) out.writeFloat(v)
+                    out.writeFloat(brain.bV)
+                    for (v in brain.wA) out.writeFloat(v)
+                    for (v in brain.bA) out.writeFloat(v)
+                }
+                for (q in qCopy) out.writeFloat(q)
+                for (n in nCopy) out.writeInt(n)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun loadTrainingState() {
+        try {
+            val file = context.getFileStreamPath("snake_training_v4.dat")
+            if (!file.exists()) return
+
+            DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
+                generation = input.readInt()
+                bestScoreAllTime = input.readFloat()
+                for (i in 0 until POPULATION_SIZE) {
+                    val brain = DuelingBrain()
+                    for (j in brain.w1.indices) brain.w1[j] = input.readFloat()
+                    for (j in brain.b1.indices) brain.b1[j] = input.readFloat()
+                    for (j in brain.w2.indices) brain.w2[j] = input.readFloat()
+                    for (j in brain.b2.indices) brain.b2[j] = input.readFloat()
+                    for (j in brain.wV.indices) brain.wV[j] = input.readFloat()
+                    brain.bV = input.readFloat()
+                    for (j in brain.wA.indices) brain.wA[j] = input.readFloat()
+                    for (j in brain.bA.indices) brain.bA[j] = input.readFloat()
+                    population[i] = brain
+                }
+                for (i in qV2.indices) qV2[i] = input.readFloat()
+                for (i in nV2.indices) nV2[i] = input.readInt()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            generation = 0
+            bestScoreAllTime = 0f
+            for (i in 0 until POPULATION_SIZE) population[i] = DuelingBrain()
+            java.util.Arrays.fill(qV2, 0f)
+            java.util.Arrays.fill(nV2, 0)
+        }
+    }
+
+    private fun saveLearning() {
+        synchronized(sharedLock) {
+            prefs.edit()
+                .putFloat("learn_aggression", aggression)
+                .putFloat("learn_safety", safetyMargin)
+                .putFloat("learn_shortcut", shortcutBonus)
+                .putFloat("w_region", wRegion)
+                .putFloat("w_mobility", wMobility)
+                .putFloat("w_tail_good", wTailGood)
+                .putFloat("w_tail_bad", wTailBad)
+                .putFloat("w_food_near", wFoodNear)
+                .putFloat("w_food_ate", wFoodAte)
+                .putFloat("w_edge", wEdge)
+                .putFloat("w_space", wSpace)
+                .putString("last_learn_action", lastLearnAction)
+                .putInt("stat_wall", deathWall)
+                .putInt("stat_self", deathSelf)
+                .putInt("stat_trap", deathTrap)
+                .putInt("stat_total", totalGames)
+                .putInt("money", money)
+                .putInt("high_score", highScore)
+                .apply()
+        }
+    }
+
+    private fun die(cause: String) {
+        gameOver = true
+        deathCause = cause
+
+        val reason = when (cause) {
+            "WALL" -> { deathWall++; V4DeathReason.HIT_WALL }
+            "SELF" -> { deathSelf++; V4DeathReason.HIT_SELF }
+            "HUNGER" -> { deathTrap++; V4DeathReason.HUNGER }
+            else -> { deathTrap++; V4DeathReason.TRAPPED }
+        }
+
+        // V3 失败反思与因果归因 (Causal Credit Assignment)
+        val stateHash = computeStateHash(snake.firstOrNull() ?: P(0, 0), food, snake.size)
+        val avoidable = legalDirection(dir)
+        failureMemory.remember(
+            hash = stateHash,
+            badAction = lastV2Action,
+            reason = reason,
+            penalty = 4.0f,
+            alt = dirs.indexOfFirst { legalDirection(it) }.takeIf { it >= 0 }
+        )
+
+        var decay = 1.0f
+        for ((h, a) in causalHistory.toList().reversed()) {
+            failureMemory.remember(h, a, reason, 1.5f * decay, null)
+            decay *= 0.70f
+        }
+        causalHistory.clear()
+
+        populationGenomes[currentAgentIndex % POPULATION_SIZE].selfAdjust(reason, failureMemory.occurrences(stateHash) > 1, avoidable)
+
+        adjustWeights(cause)
+        totalGames++
+        heartbeat()
+
+        recentScores.addLast(score)
+        while (recentScores.size > 50) recentScores.removeFirst()
+        if (score > bestRecentScore) bestRecentScore = score
+
+        currentScores[currentAgentIndex % POPULATION_SIZE] = max(currentScores[currentAgentIndex % POPULATION_SIZE], score.toFloat())
+
+        lastDeathInfo = "死因=$cause 长度=${snake.size} 分=$score 空间=${ai.region} 目标=${ai.goal.name}"
+        saveLearning()
+
+        if (trainingMode) {
+            reset()
+            return
+        }
+
+        flash = 1f
+        vibrateDeath()
+        invalidate()
+    }
+
+    /*
+     * =========================
+     * SIMULATION / PATH / BFS
+     * =========================
+     */
+    private fun simulate(head: P, d: P): Sim = simulateOn(ArrayDeque(snake), d)
+
+    private fun simulateOn(src: ArrayDeque<P>, d: P): Sim {
+        val b = ArrayDeque(src)
+        if (b.isEmpty()) return Sim(b, false)
+        val nh = P(b.first().x + d.x, b.first().y + d.y)
+        if (!inside(nh)) return Sim(b, false)
+        val ate = nh == food
+        if (b.contains(nh) && !(nh == b.last() && !ate)) return Sim(b, false)
+        b.addFirst(nh)
+        if (!ate) b.removeLast()
+        return Sim(b, ate)
+    }
+
+    private fun rolloutN(startDir: P, maxSteps: Int): Float {
+        var body = ArrayDeque(snake)
+        var score = 0f
+        for (step in 0 until maxSteps) {
+            var bestNext: P? = null
+            var bestSpace = -1
+            for (d in dirs) {
+                val nh = P(body.first().x + d.x, body.first().y + d.y)
+                if (!inside(nh)) continue
+                if (body.contains(nh) && nh != body.last()) continue
+                var space = 0
+                for (sd in dirs) {
+                    val sx = nh.x + sd.x
+                    val sy = nh.y + sd.y
+                    if (sx in 0 until cols && sy in 0 until rows) {
+                        if (!body.any { it.x == sx && it.y == sy }) space++
+                    }
+                }
+                if (space > bestSpace) { bestSpace = space; bestNext = d }
+            }
+            if (bestNext == null) return -50f + step * -10f
+            val sim = simulateOn(body, bestNext)
+            body = sim.body
+            score += 5f
+            if (sim.ate) score += 15f
+        }
+        return score
+    }
+
+    private fun simulateForBody(src: ArrayDeque<P>, d: P, target: P): Sim {
+        val b = ArrayDeque(src)
+        if (b.isEmpty()) return Sim(b, false)
+        val nh = P(b.first().x + d.x, b.first().y + d.y)
+        if (!inside(nh)) return Sim(b, false)
+        val ate = nh == target
+        if (b.contains(nh) && !(nh == b.last() && !ate)) return Sim(b, false)
+        b.addFirst(nh)
+        if (!ate) b.removeLast()
+        return Sim(b, ate)
+    }
+
+    private fun canSim(body: ArrayDeque<P>, d: P): Boolean {
+        if (body.isEmpty()) return false
+        val h = body.first()
+        val nh = P(h.x + d.x, h.y + d.y)
+        if (!inside(nh)) return false
+        val ate = nh == food
+        return !body.contains(nh) || (nh == body.last() && !ate)
+    }
+
+    private fun legalDirection(d: P): Boolean =
+        d != P(0, 0) && !isReverse(d, dir) && canSim(snake, d)
+
+    private fun isReverse(a: P, b: P): Boolean = a.x == -b.x && a.y == -b.y
+
+    private fun inside(p: P): Boolean = p.x in 0 until cols && p.y in 0 until rows
+
+    private fun shortestPath(start: P, target: P, body: Collection<P>, allowTail: Boolean): List<P>? {
+        if (start == target) return emptyList()
+        if (!inside(start) || !inside(target)) return null
+
+        val visited = tlVisited.get()
+        val queue = tlQueue.get()
+        val parent = IntArray(total) { -1 }
+        val parentDir = arrayOfNulls<P>(total)
+
+        java.util.Arrays.fill(visited, 0, total, false)
+        for (p in body) if (inside(p)) visited[p.y * cols + p.x] = true
+        if (allowTail && body.isNotEmpty()) {
+            val last = body.last()
+            if (inside(last)) visited[last.y * cols + last.x] = false
+        }
+
+        val startIndex = start.y * cols + start.x
+        val targetIndex = target.y * cols + target.x
+        visited[startIndex] = true
+
+        var head = 0
+        var tail = 0
+        queue[tail++] = startIndex
+        var found = false
+
+        while (head < tail) {
+            val curr = queue[head++]
+            if (curr == targetIndex) { found = true; break }
+
+            val cx = curr % cols
+            val cy = curr / cols
+
+            val candidates = arrayOf(
+                P(0, -1) to if (cy > 0) curr - cols else -1,
+                P(0, 1) to if (cy < rows - 1) curr + cols else -1,
+                P(-1, 0) to if (cx > 0) curr - 1 else -1,
+                P(1, 0) to if (cx < cols - 1) curr + 1 else -1
+            )
+
+            for ((d, ni) in candidates) {
+                if (ni < 0 || ni >= total || visited[ni]) continue
+                visited[ni] = true
+                parent[ni] = curr
+                parentDir[ni] = d
+                if (tail < total) queue[tail++] = ni
+            }
+        }
+
+        if (!found) return null
+
+        val steps = ArrayList<P>()
+        var cur = targetIndex
+        while (cur != startIndex) {
+            val d = parentDir[cur] ?: return null
+            steps.add(d)
+            cur = parent[cur]
+            if (cur < 0) return null
+        }
+        steps.reverse()
+        return steps
+    }
+
+    private fun freeRegion(body: ArrayDeque<P>): Int {
+        if (body.isEmpty()) return 0
+        val visited = tlVisited.get()
+        val queue = tlQueue.get()
+        java.util.Arrays.fill(visited, 0, total, false)
+
+        for (p in body) if (inside(p)) visited[p.y * cols + p.x] = true
+        val start = body.first()
+        if (!inside(start)) return 0
+
+        val startIndex = start.y * cols + start.x
+        visited[startIndex] = true
+        var head = 0
+        var tail = 0
+        queue[tail++] = startIndex
+        var count = 0
+
+        while (head < tail) {
+            val curr = queue[head++]
+            val cx = curr % cols
+            val cy = curr / cols
+            count++
+
+            if (cx > 0) { val ni = curr - 1; if (!visited[ni]) { visited[ni] = true; if (tail < total) queue[tail++] = ni } }
+            if (cx < cols - 1) { val ni = curr + 1; if (!visited[ni]) { visited[ni] = true; if (tail < total) queue[tail++] = ni } }
+            if (cy > 0) { val ni = curr - cols; if (!visited[ni]) { visited[ni] = true; if (tail < total) queue[tail++] = ni } }
+            if (cy < rows - 1) { val ni = curr + cols; if (!visited[ni]) { visited[ni] = true; if (tail < total) queue[tail++] = ni } }
+        }
+        return count
+    }
+
+    private fun distance(start: P, target: P, body: Collection<P>, allowTail: Boolean): Int {
+        if (!inside(start) || !inside(target)) return -1
+        if (start == target) return 0
+
+        val visited = tlVisited.get()
+        val queue = tlQueue.get()
+        java.util.Arrays.fill(visited, 0, total, false)
+
+        for (p in body) if (inside(p)) visited[p.y * cols + p.x] = true
+        if (allowTail && body.isNotEmpty()) {
+            val last = body.last()
+            if (inside(last)) visited[last.y * cols + last.x] = false
+        }
+
+        val startIndex = start.y * cols + start.x
+        visited[startIndex] = true
+        var head = 0
+        var tail = 0
+        queue[tail++] = startIndex
+        var dist = 0
+
+        while (head < tail) {
+            val layerSize = tail - head
+            repeat(layerSize) {
+                if (head >= tail) return@repeat
+                val curr = queue[head++]
+                val cx = curr % cols
+                val cy = curr / cols
+                if (cx == target.x && cy == target.y) return dist
+                if (cx > 0) { val ni = curr - 1; if (!visited[ni]) { visited[ni] = true; if (tail < total) queue[tail++] = ni } }
+                if (cx < cols - 1) { val ni = curr + 1; if (!visited[ni]) { visited[ni] = true; if (tail < total) queue[tail++] = ni } }
+                if (cy > 0) { val ni = curr - cols; if (!visited[ni]) { visited[ni] = true; if (tail < total) queue[tail++] = ni } }
+                if (cy < rows - 1) { val ni = curr + cols; if (!visited[ni]) { visited[ni] = true; if (tail < total) queue[tail++] = ni } }
+            }
+            dist++
+        }
+        return -1
+    }
+
+    private fun countSafeMoves(body: ArrayDeque<P>): Int {
+        if (body.isEmpty()) return 0
+        val heading = if (body.size < 2) dir else P(body.elementAt(0).x - body.elementAt(1).x, body.elementAt(0).y - body.elementAt(1).y)
+        return countSafeMovesFor(body, heading, food)
+    }
+
+    private fun countSafeMovesFor(body: ArrayDeque<P>, heading: P, target: P): Int {
+        if (body.isEmpty()) return 0
+        val h = body.first()
+        return dirs.count { d ->
+            if (isReverse(d, heading)) return@count false
+            val nh = P(h.x + d.x, h.y + d.y)
+            if (!inside(nh)) return@count false
+            val ate = nh == target
+            !body.contains(nh) || (nh == body.last() && !ate)
+        }
+    }
+
+    private fun tailReachable(body: ArrayDeque<P>): Boolean =
+        if (body.isEmpty()) false else distance(body.first(), body.last(), body, true) >= 0
+
+    private fun checkFoodDeadEnd(): Pair<Boolean, Float> {
+        if (snake.isEmpty()) return Pair(false, 10f)
+        val visited = Array(cols) { BooleanArray(rows) }
+        val q = ArrayDeque<P>()
+        q.addLast(food)
+        visited[food.x][food.y] = true
+        var space = 0
+        while (!q.isEmpty()) {
+            val cur = q.removeFirst()
+            space++
+            for (d in dirs) {
+                val nx = cur.x + d.x
+                val ny = cur.y + d.y
+                if (nx in 0 until cols && ny in 0 until rows && !visited[nx][ny]) {
+                    val isBody = snake.any { it.x == nx && it.y == ny }
+                    if (!isBody) {
+                        visited[nx][ny] = true
+                        q.addLast(P(nx, ny))
+                    }
+                }
+            }
+        }
+        val ratio = space.toFloat() / snake.size
+        return Pair(ratio < 1.2f, ratio)
+    }
+
+    private fun calculateDanger(): Int {
+        val region = freeRegion(snake)
+        val ratio = region.toFloat() / max(1, snake.size)
+        val mobility = countSafeMoves(snake)
+        return when {
+            mobility <= 0 -> 5
+            ratio < 1.5f -> 5
+            ratio < 2.2f -> 4
+            ratio < 3.5f -> 3
+            ratio < 5f -> 2
+            else -> 1
+        }
+    }
+
+    private fun placeFood() {
+        val free = ArrayList<P>()
+        for (x in 0 until cols) {
+            for (y in 0 until rows) {
+                val p = P(x, y)
+                if (!snake.contains(p)) free.add(p)
+            }
+        }
+        if (free.isNotEmpty()) food = free[Random.nextInt(free.size)]
+    }
+
+    /*
+     * =========================
+     * EFFECTS (粒子与音效逻辑保留)
+     * =========================
+     */
+    private fun spawnFoodEffect(p: P) {
+        repeat(14) {
+            particles.add(Particle(p.x.toFloat(), p.y.toFloat(), Random.nextFloat() - 0.5f, Random.nextFloat() - 0.5f, 1f, Color.YELLOW))
+        }
+        floats.add(FloatText(p.x.toFloat(), p.y.toFloat(), 1f, "+10"))
+    }
+
+    private fun updateEffects(dt: Float) {
+        flash = max(0f, flash - dt * 0.035f)
+        particles.forEach { it.x += it.vx * dt; it.y += it.vy * dt; it.life -= dt * 0.035f }
+        particles.removeAll { it.life <= 0f }
+        floats.forEach { it.y -= dt * 0.04f; it.life -= dt * 0.025f }
+        floats.removeAll { it.life <= 0f }
+    }
+
+    /*
+     * =========================
+     * DRAWING (位置与原 HUD 严格一致)
+     * =========================
+     */
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        val hudReserve = 760f + 24f
+        val availTop = 12f
+        val availBottom = (h - hudReserve).coerceAtLeast(availTop + h * 0.30f)
+        val availH = availBottom - availTop
+
+        cell = min(w.toFloat() / cols, availH / rows)
+        ox = (w - cols * cell) / 2f
+        val baseOy = availTop + (availH - rows * cell) / 2f
+        val moveDown = cell * 2.5f
+        val maxOy = availBottom - rows * cell
+        oy = (baseOy + moveDown).coerceAtMost(maxOy)
+    }
+
+    override fun onDraw(c: Canvas) {
+        super.onDraw(c)
+
+        if (reinforceTraining || trainingMode) {
+            c.drawColor(Color.BLACK)
+            text.textAlign = Paint.Align.LEFT
+            drawDebug(c)
+            return
+        }
+
+        c.drawColor(bgColor)
+        gridPaint.color = gridColor
+        gridPaint.style = Paint.Style.STROKE
+        gridPaint.strokeWidth = 1f
+
+        for (i in 0..cols) c.drawLine(ox + i * cell, oy, ox + i * cell, oy + rows * cell, gridPaint)
+        for (i in 0..rows) c.drawLine(ox, oy + i * cell, ox + cols * cell, oy + i * cell, gridPaint)
+
+        drawFood(c)
+        drawSnake(c)
+        drawParticles(c)
+        drawDebug(c)
+
+        if (gameOver) drawGameOver(c)
+    }
+
+    private fun drawFood(c: Canvas) {
+        val cx = ox + (food.x + 0.5f) * cell
+        val cy = oy + (food.y + 0.5f) * cell
+
+        foodPaint.color = Color.argb(90, 255, 80, 80)
+        c.drawCircle(cx, cy, cell * 0.38f, foodPaint)
+        foodPaint.color = Color.RED
+        c.drawCircle(cx, cy, cell * 0.22f, foodPaint)
+        foodPaint.color = Color.WHITE
+        c.drawCircle(cx, cy, cell * 0.07f, foodPaint)
+    }
+
+    private fun drawSnake(c: Canvas) {
+        if (snake.isEmpty()) return
+        snakePaint.strokeWidth = max(8f, cell * 0.62f)
+        val list = snake.toList()
+
+        for (i in 0 until list.size - 1) {
+            val a = list[i]
+            val b = list[i + 1]
+            snakePaint.color = if (rainbowSkin) hsv[(i * 23 + score) % 360] else bodyColor
+            c.drawLine(ox + (a.x + 0.5f) * cell, oy + (a.y + 0.5f) * cell, ox + (b.x + 0.5f) * cell, oy + (b.y + 0.5f) * cell, snakePaint)
+        }
+
+        val h = snake.first()
+        headPaint.color = headColor
+        c.drawCircle(ox + (h.x + 0.5f) * cell, oy + (h.y + 0.5f) * cell, cell * 0.36f, headPaint)
+
+        val ex = when { dir.x > 0 -> 0.12f; dir.x < 0 -> -0.12f; else -> 0f }
+        val ey = when { dir.y > 0 -> 0.12f; dir.y < 0 -> -0.12f; else -> 0f }
+
+        paint.color = Color.WHITE
+        c.drawCircle(ox + (h.x + 0.5f) * cell + cell * (0.13f + ex), oy + (h.y + 0.5f) * cell + cell * (0.13f + ey), cell * 0.075f, paint)
+        c.drawCircle(ox + (h.x + 0.5f) * cell - cell * (0.13f - ex), oy + (h.y + 0.5f) * cell - cell * (0.13f - ey), cell * 0.075f, paint)
+    }
+
+    private fun drawParticles(c: Canvas) {
+        particles.forEach {
+            paint.color = Color.argb((it.life * 255).toInt().coerceIn(0, 255), Color.red(it.color), Color.green(it.color), Color.blue(it.color))
+            c.drawCircle(ox + (it.x + 0.5f) * cell, oy + (it.y + 0.5f) * cell, max(2f, cell * 0.05f), paint)
+        }
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = cell * 0.3f
+        floats.forEach {
+            text.color = Color.argb((it.life * 255).toInt().coerceIn(0, 255), 255, 215, 0)
+            c.drawText(it.text, ox + (it.x + 0.5f) * cell, oy + (it.y + 0.3f) * cell, text)
+        }
+    }
+
+    private fun drawDangerGauge(c: Canvas, cx: Float, cy: Float, r: Float, danger: Int) {
+        val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 13f
+            strokeCap = Paint.Cap.ROUND
+        }
+        val oval = RectF(cx - r, cy - r, cx + r, cy + r)
+        arcPaint.color = Color.rgb(50, 50, 50)
+        c.drawArc(oval, -90f, 360f, false, arcPaint)
+
+        arcPaint.color = when (danger) {
+            1 -> Color.GREEN
+            2 -> Color.rgb(150, 255, 80)
+            3 -> Color.YELLOW
+            4 -> Color.rgb(255, 150, 0)
+            else -> Color.RED
+        }
+        c.drawArc(oval, -90f, 360f * (danger.coerceIn(1, 5) / 5f), false, arcPaint)
+    }
+
+    private val prevWeights = FloatArray(8) { 1f }
+
+    private fun drawWeightBars(c: Canvas, left: Float, top: Float, w: Float, h: Float) {
+        val names = listOf("区域", "机动", "尾+", "尾-", "食近", "食吃", "边界", "空间")
+        val values = floatArrayOf(
+            wRegion / wRegion0, wMobility / wMobility0, wTailGood / wTailGood0, wTailBad / wTailBad0,
+            wFoodNear / wFoodNear0, wFoodAte / wFoodAte0, wEdge / wEdge0, wSpace / wSpace0
+        )
+        val barW = w / names.size
+        val maxRatio = 2.0f
+
+        names.forEachIndexed { i, name ->
+            val x = left + i * barW
+            val ratio = values[i].coerceIn(0f, maxRatio)
+            val barH = h * (ratio / maxRatio)
+
+            barPaint.style = Paint.Style.FILL
+            barPaint.color = Color.rgb(40, 40, 40)
+            c.drawRect(x + 3f, top, x + barW - 8f, top + h, barPaint)
+
+            val prevRatio = prevWeights.getOrElse(i) { 1f }
+            val delta = ratio - prevRatio
+            prevWeights[i] = ratio
+
+            barPaint.color = when {
+                delta > 0.05f || delta < -0.05f -> Color.rgb(46, 204, 113)
+                ratio > 1.3f -> Color.rgb(46, 204, 113)
+                ratio > 1.1f -> Color.rgb(241, 196, 15)
+                ratio < 0.8f -> Color.rgb(52, 152, 219)
+                else -> Color.rgb(46, 204, 113)
+            }
+            c.drawRect(x + 3f, top + h - barH, x + barW - 8f, top + h, barPaint)
+
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 12f
+            text.color = Color.LTGRAY
+            c.drawText(name, x + (barW - 5f) / 2f, top + h + 15f, text)
+
+            text.color = Color.WHITE
+            c.drawText("${(values[i] * 100f).toInt()}%", x + (barW - 5f) / 2f, top + h + 30f, text)
+        }
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawLearningCurve(c: Canvas, left: Float, top: Float, w: Float, h: Float) {
+        barPaint.style = Paint.Style.FILL
+        barPaint.color = Color.rgb(25, 25, 25)
+        c.drawRect(left, top, left + w, top + h, barPaint)
+
+        if (recentScores.size < 2) {
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 13f
+            text.color = Color.GRAY
+            c.drawText("数据不足", left + w / 2f, top + h / 2f, text)
+            text.textAlign = Paint.Align.LEFT
+            return
+        }
+
+        val scores = recentScores.toList()
+        val maxScore = scores.max().coerceAtLeast(1)
+        val stepX = w / (scores.size - 1).coerceAtLeast(1)
+
+        val areaPath = Path().apply {
+            moveTo(left, top + h)
+            scores.forEachIndexed { i, s -> lineTo(left + i * stepX, top + h - h * (s.toFloat() / maxScore)) }
+            lineTo(left + w, top + h)
+            close()
+        }
+
+        barPaint.color = Color.argb(60, 120, 255, 180)
+        c.drawPath(areaPath, barPaint)
+
+        val linePath = Path()
+        scores.forEachIndexed { i, s ->
+            val x = left + i * stepX
+            val y = top + h - h * (s.toFloat() / maxScore)
+            if (i == 0) linePath.moveTo(x, y) else linePath.lineTo(x, y)
+        }
+
+        val curvePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+            color = Color.rgb(120, 255, 180)
+        }
+        c.drawPath(linePath, curvePaint)
+
+        text.textSize = 12f
+        text.color = Color.LTGRAY
+        c.drawText("max $maxScore", left + 5f, top + 14f, text)
+    }
+
+    private fun drawDeathPie(c: Canvas, cx: Float, cy: Float, r: Float) {
+        val totalD = deathWall + deathSelf + deathTrap
+        barPaint.style = Paint.Style.FILL
+        if (totalD == 0) {
+            barPaint.color = Color.rgb(60, 60, 60)
+            c.drawCircle(cx, cy, r, barPaint)
+            return
+        }
+
+        val oval = RectF(cx - r, cy - r, cx + r, cy + r)
+        var start = -90f
+        val sweepW = 360f * deathWall / totalD
+        if (sweepW > 0f) {
+            barPaint.color = Color.rgb(255, 100, 100)
+            c.drawArc(oval, start, sweepW, true, barPaint)
+            start += sweepW
+        }
+        val sweepS = 360f * deathSelf / totalD
+        if (sweepS > 0f) {
+            barPaint.color = Color.rgb(100, 150, 255)
+            c.drawArc(oval, start, sweepS, true, barPaint)
+            start += sweepS
+        }
+        val sweepT = 360f * deathTrap / totalD
+        if (sweepT > 0f) {
+            barPaint.color = Color.rgb(255, 200, 100)
+            c.drawArc(oval, start, sweepT, true, barPaint)
+        }
+    }
+
+    private fun drawQHeatmap(c: Canvas, left: Float, top: Float, w: Float, h: Float) {
+        val grid = 10
+        val cellW = w / grid
+        val cellH = h / grid
+        barPaint.style = Paint.Style.FILL
+        barPaint.color = Color.rgb(35, 35, 35)
+        c.drawRect(left, top, left + w, top + h, barPaint)
+
+        val sampleList = visitedStates.take(100)
+        var maxAbs = 0.001f
+        for (s in sampleList) {
+            for (a in 0 until 4) {
+                val qv = qRead(s, a)
+                if (abs(qv) > maxAbs) maxAbs = abs(qv)
+            }
+        }
+
+        for (i in 0 until 100) {
+            val px = left + (i % grid) * cellW
+            val py = top + (i / grid) * cellH
+            if (i >= sampleList.size) {
+                barPaint.color = Color.rgb(30, 30, 35)
+            } else {
+                val s = sampleList[i]
+                var bestQ = -Float.MAX_VALUE
+                for (a in 0 until 4) {
+                    val qv = qRead(s, a)
+                    if (qv > bestQ) bestQ = qv
+                }
+                val t = (bestQ / maxAbs).coerceIn(-1f, 1f)
+                barPaint.color = if (t >= 0f) {
+                    Color.rgb((60 * (1f - t)).toInt(), (60 + 195 * t).toInt(), 60)
+                } else {
+                    val nt = -t
+                    Color.rgb((60 + 195 * nt).toInt(), (60 * (1f - nt)).toInt(), (60 * (1f - nt)).toInt())
+                }
+            }
+            c.drawRect(px, py, px + cellW - 1f, py + cellH - 1f, barPaint)
+        }
+    }
+
+    private fun drawDebug(c: Canvas) {
+        if (aiMode == 0 && !reinforceTraining) return
+        val w = min(width * 0.97f, 720f)
+        val h = 760f
+        val left = (width - w) / 2f
+        val top = max(12f, height - h - 12f)
+
+        panel.color = Color.argb(232, 0, 0, 0)
+        c.drawRoundRect(left, top, left + w, top + h, 22f, 22f, panel)
+
+        border.color = Color.argb(60, 46, 204, 113)
+        border.style = Paint.Style.STROKE
+        border.strokeWidth = 1.5f
+        c.drawRoundRect(left, top, left + w, top + h, 22f, 22f, border)
+
+        text.textAlign = Paint.Align.LEFT
+        text.isFakeBoldText = true
+        text.textSize = 26f
+        text.color = Color.WHITE
+        c.drawText(if (reinforceTraining) "V4 融合进化中 · 世代 $generation" else ai.strategy, left + 16f, top + 36f, text)
+
+        text.isFakeBoldText = false
+        text.textSize = 14f
+        text.color = Color.YELLOW
+        c.drawText(if (reinforceTraining) "D3QN对决网络 + PER优先回放 + 因果学习" else ai.reason, left + 16f, top + 58f, text)
+
+        val gaugeCX = left + 58f
+        val gaugeCY = top + 116f
+
+        if (reinforceTraining) {
+            val progRatio = currentAgentIndex.toFloat() / POPULATION_SIZE
+            val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = 13f
+                strokeCap = Paint.Cap.ROUND
+            }
+            val oval = RectF(gaugeCX - 42f, gaugeCY - 42f, gaugeCX + 42f, gaugeCY + 42f)
+            arcPaint.color = Color.rgb(50, 50, 50)
+            c.drawArc(oval, -90f, 360f, false, arcPaint)
+            arcPaint.color = Color.rgb(46, 204, 113)
+            c.drawArc(oval, -90f, 360f * progRatio, false, arcPaint)
+
+            text.textAlign = Paint.Align.CENTER
+            text.isFakeBoldText = true
+            text.textSize = 22f
+            text.color = Color.WHITE
+            c.drawText("$generation", gaugeCX, gaugeCY + 8f, text)
+            text.isFakeBoldText = false
+            text.textSize = 11f
+            text.color = Color.LTGRAY
+            c.drawText("世代", gaugeCX, gaugeCY + 28f, text)
+        } else {
+            drawDangerGauge(c, gaugeCX, gaugeCY, 42f, ai.danger)
+            text.textAlign = Paint.Align.CENTER
+            text.isFakeBoldText = true
+            text.textSize = 26f
+            text.color = Color.WHITE
+            c.drawText("${ai.danger}", gaugeCX, gaugeCY + 9f, text)
+            text.isFakeBoldText = false
+            text.textSize = 12f
+            text.color = Color.LTGRAY
+            c.drawText("危险", gaugeCX, gaugeCY + 28f, text)
+        }
+
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = 16f
+        text.color = Color.WHITE
+        c.drawText("局数 $totalGames", left + 118f, top + 86f, text)
+
+        val avg = if (recentScores.isEmpty()) 0f else recentScores.average().toFloat()
+        c.drawText("近50均分 ${"%.0f".format(avg)}   最佳 $bestRecentScore", left + 118f, top + 110f, text)
+
+        val threadInfo = if (reinforceTraining) "${trainThreads.size} 线程" else "单局"
+        c.drawText("模式 $threadInfo   主蛇长 ${snake.size}   Q覆盖${visitedStates.size}", left + 118f, top + 134f, text)
+
+        if (reinforceTraining) {
+            barPaint.style = Paint.Style.FILL
+            var meterY = top + 155f
+            val meterW = w - 32f
+
+            text.textSize = 9f
+            text.color = Color.rgb(200, 180, 255)
+            c.drawText("Q覆盖 ${visitedStates.size}/$V2_STATE_COUNT", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(200, 150, 255)
+            val qCovR = (visitedStates.size.toFloat() / V2_STATE_COUNT).coerceIn(0f, 1f)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * qCovR, meterY + 19f, 3f, 3f, barPaint)
+            meterY += 24f
+
+            text.color = Color.rgb(100, 220, 255)
+            c.drawText("PER回放池 ${replayBuffer.size}/$REPLAY_CAPACITY", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(100, 200, 255)
+            val rpR = replayBuffer.size.toFloat() / REPLAY_CAPACITY
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * rpR, meterY + 19f, 3f, 3f, barPaint)
+            meterY += 24f
+
+            text.color = Color.rgb(241, 196, 15)
+            c.drawText("ε ${"%.2f".format(v2Epsilon)}", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(241, 196, 15)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * v2Epsilon, meterY + 19f, 3f, 3f, barPaint)
+            meterY += 24f
+
+            text.color = Color.rgb(200, 200, 200)
+            c.drawText("Q ${"%.2f".format(qWeight)} / D3QN ${"%.2f".format(nnWeight)}", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(231, 76, 60)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * qWeight, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(46, 204, 113)
+            c.drawRoundRect(left + 16f + meterW * qWeight, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+        }
+
+        val wbY = top + 250f
+        text.isFakeBoldText = true
+        text.textSize = 14f
+        text.color = Color.rgb(255, 200, 100)
+        c.drawText("【权重柱状图】", left + 16f, wbY, text)
+        text.isFakeBoldText = false
+        drawWeightBars(c, left + 16f, wbY + 8f, w - 32f, 66f)
+
+        val learnY = top + 290f
+        text.isFakeBoldText = true
+        text.textSize = 14f
+        text.color = Color.rgb(255, 150, 255)
+        c.drawText("【V4 学习状态】", left + 16f, learnY, text)
+        text.isFakeBoldText = false
+        text.color = Color.WHITE
+        c.drawText("教训库:${failureMemory.size()} 目标:${ai.goal.name}", left + 118f, learnY, text)
+
+        val barStartX = left + 118f
+        val barEndX = left + w - 16f
+        val barW = barEndX - barStartX
+        var barY = top + 318f
+
+        if (!reinforceTraining) {
+            text.isFakeBoldText = true
+            text.textSize = 14f
+            text.color = Color.rgb(255, 200, 100)
+            c.drawText("【四方向安全 / Q】", left + 16f, barY, text)
+            text.isFakeBoldText = false
+            barY += 10f
+
+            val dirNames = listOf("UP", "DN", "LF", "RT")
+            ai.candidates.forEachIndexed { idx, cand ->
+                text.textSize = 18f
+                text.color = if (!cand.legal) Color.GRAY else if (cand.d == ai.chosen) Color.CYAN else Color.WHITE
+                c.drawText(dirNames[idx], left + 16f, barY + 19f, text)
+
+                if (!cand.legal) {
+                    text.textSize = 14f
+                    text.color = Color.GRAY
+                    c.drawText("非法", barStartX, barY + 19f, text)
+                } else {
+                    val regionRatio = if (snake.isNotEmpty()) cand.region.toFloat() / snake.size else 0f
+                    val safeScore = when {
+                        cand.tailOk && regionRatio >= 1.5f -> 1.0f
+                        cand.tailOk && regionRatio >= 1.0f -> 0.75f
+                        regionRatio >= 1.0f -> 0.5f
+                        regionRatio >= 0.6f -> 0.3f
+                        else -> 0.15f
+                    }
+
+                    barPaint.color = Color.rgb(40, 40, 40)
+                    barPaint.style = Paint.Style.FILL
+                    c.drawRoundRect(barStartX, barY, barEndX, barY + 24f, 4f, 4f, barPaint)
+
+                    val barColor = when {
+                        safeScore >= 0.9f -> Color.rgb(46, 204, 113)
+                        safeScore >= 0.7f -> Color.rgb(241, 196, 15)
+                        safeScore >= 0.5f -> Color.rgb(230, 126, 34)
+                        else -> Color.rgb(231, 76, 60)
+                    }
+                    barPaint.color = barColor
+                    c.drawRoundRect(barStartX, barY, barStartX + barW * safeScore, barY + 24f, 4f, 4f, barPaint)
+
+                    text.textSize = 13f
+                    text.color = Color.WHITE
+                    c.drawText("空间${cand.region} 尾${if (cand.tailOk) "Y" else "N"} 食${if (cand.foodDist < 0) "∞" else cand.foodDist} Q${"%.2f".format(cand.qValue)}", barStartX + 8f, barY + 18f, text)
+                }
+                barY += 28f
+            }
+        } else {
+            barY = top + 318f
+        }
+
+        val chartY = barY + 20f
+        val chartH = 72f
+        val curveX = left + 16f
+        val curveW = (w - 32f) * 0.55f
+
+        text.isFakeBoldText = true
+        text.textSize = 14f
+        text.color = Color.rgb(120, 255, 180)
+        c.drawText("【历史分数】", curveX, chartY, text)
+        text.isFakeBoldText = false
+        drawLearningCurve(c, curveX, chartY + 8f, curveW, chartH)
+
+        val pieCX = left + w - 130f
+        val pieCY = chartY + chartH / 2f + 14f
+        val pieR = 34f
+
+        text.isFakeBoldText = true
+        text.textSize = 14f
+        text.color = Color.rgb(255, 150, 150)
+        c.drawText("【死亡统计】", pieCX - 52f, chartY, text)
+        text.isFakeBoldText = false
+        drawDeathPie(c, pieCX, pieCY, pieR)
+
+        text.textSize = 13f
+        text.color = Color.rgb(255, 100, 100)
+        c.drawText("W $deathWall", pieCX + 42f, pieCY - 16f, text)
+        text.color = Color.rgb(100, 150, 255)
+        c.drawText("S $deathSelf", pieCX + 42f, pieCY + 4f, text)
+        text.color = Color.rgb(255, 200, 100)
+        c.drawText("T $deathTrap", pieCX + 42f, pieCY + 24f, text)
+
+        val heatY = chartY + chartH + 30f
+        text.textAlign = Paint.Align.LEFT
+        text.isFakeBoldText = true
+        text.textSize = 14f
+        text.color = Color.rgb(200, 180, 255)
+        c.drawText("【V4 Q表热度】", left + 16f, heatY, text)
+        text.isFakeBoldText = false
+        drawQHeatmap(c, left + 16f, heatY + 8f, w - 32f, 66f)
+
+        val infoY = heatY + 8f + 66f + 22f
+        var visited = 0
+        var sumQ = 0f
+        var cntQ = 0
+        val sampleStep = max(1, V2_STATE_COUNT / 400)
+        for (s in 0 until V2_STATE_COUNT step sampleStep) {
+            for (a in 0 until 4) {
+                val idx = qIndex(s, a)
+                if (nV2[idx] > 0) {
+                    visited++
+                    sumQ += qV2[idx]
+                    cntQ++
+                }
+            }
+        }
+        val avgQ = if (cntQ > 0) sumQ / cntQ else 0f
+
+        text.textSize = 14f
+        text.color = Color.WHITE
+        text.textAlign = Paint.Align.LEFT
+
+        if (reinforceTraining) {
+            c.drawText("世代 $generation   当前个体 $currentAgentIndex/$POPULATION_SIZE   Q覆盖${visitedStates.size}", left + 16f, infoY, text)
+            c.drawText("本代最佳 ${"%.0f".format(bestScoreThisGen)}   历史最佳 ${"%.0f".format(bestScoreAllTime)}", left + 16f, infoY + 18f, text)
+            c.drawText("Q表权重 ${"%.2f".format(qWeight)}   D3QN权重 ${"%.2f".format(nnWeight)}", left + 16f, infoY + 36f, text)
+            c.drawText("回放${replayBuffer.size}/${REPLAY_CAPACITY}   ε${"%.2f".format(v2Epsilon)}   步${v2LearningSteps}", left + 16f, infoY + 54f, text)
+
+            val learnStatus = when {
+                generation < 3 -> "🧬 种群初筛试错..."
+                v2Epsilon > 0.15f -> "🔍 探索期：D3QN优势挖掘"
+                v2Epsilon < 0.05f && nnWeight > 0.5f -> "🧠 收敛期：对决网络主导"
+                bestScoreThisGen > bestScoreAllTime * 0.95f && bestScoreAllTime > 0 -> "🚀 突破中！策略进化"
+                else -> "📊 V4 自适应迭代中..."
+            }
+            text.textSize = 13f
+            text.isFakeBoldText = true
+            text.color = Color.rgb(100, 220, 255)
+            c.drawText(learnStatus, left + 16f, infoY + 74f, text)
+
+            if (deadEndPredicted) {
+                text.color = Color.rgb(255, 80, 80)
+                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
+            } else {
+                text.color = Color.rgb(80, 200, 120)
+                c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
+            }
+            text.color = if (rolloutActive) Color.rgb(180, 180, 255) else Color.rgb(100, 100, 120)
+            c.drawText(if (rolloutActive) "🔮 前瞻展开${rolloutSteps}步（蛇长${snake.size}）" else "🔮 前瞻展开：未触发", left + 16f, infoY + 112f, text)
+            text.isFakeBoldText = false
+            text.color = Color.WHITE
+            text.textSize = 14f
+        } else {
+            c.drawText("局数 $totalGames   近50均分 ${"%.0f".format(avg)}   最佳 $bestRecentScore", left + 16f, infoY, text)
+            c.drawText("V4覆盖 ${visited}   平均Q ${"%.2f".format(avgQ)}   学习步 $v2LearningSteps", left + 16f, infoY + 18f, text)
+            c.drawText("ε ${"%.3f".format(v2Epsilon)}   攻击x${"%.2f".format(aggression)}   安全x${"%.2f".format(safetyMargin)}", left + 16f, infoY + 36f, text)
+        }
+
+        if (gameOver && !reinforceTraining) {
+            text.color = Color.RED
+            text.isFakeBoldText = true
+            text.textSize = 16f
+            c.drawText("死亡原因：$deathCause", left + 16f, infoY + 62f, text)
+            text.isFakeBoldText = false
+        }
+
+        val btnW = 160f
+        val btnH = 42f
+        val btnLeft = left + w - btnW - 16f
+        val btnTop = infoY + 48f
+        reinforceButtonRect.set(btnLeft, btnTop, btnLeft + btnW, btnTop + btnH)
+
+        panel.color = if (reinforceTraining) Color.rgb(231, 76, 60) else Color.rgb(46, 204, 113)
+        c.drawRoundRect(reinforceButtonRect, 12f, 12f, panel)
+
+        text.textAlign = Paint.Align.CENTER
+        text.isFakeBoldText = true
+        text.textSize = 18f
+        text.color = Color.WHITE
+        c.drawText(if (reinforceTraining) "停止进化" else "神经进化", reinforceButtonRect.centerX(), reinforceButtonRect.centerY() + 7f, text)
+        text.isFakeBoldText = false
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawGameOver(c: Canvas) {
+        paint.color = Color.argb(150, 0, 0, 0)
+        c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+
+        text.textAlign = Paint.Align.CENTER
+        text.isFakeBoldText = true
+        text.textSize = 30f
+        text.color = Color.WHITE
+        c.drawText("GAME OVER", width / 2f, height / 2f - 45, text)
+
+        text.textSize = 15f
+        text.isFakeBoldText = false
+        c.drawText("分数 $score   最高 $highScore   长度 ${snake.size}", width / 2f, height / 2f - 15, text)
+
+        text.color = Color.YELLOW
+        c.drawText("点击屏幕重新开始", width / 2f, height / 2f + 20, text)
+        text.color = Color.LTGRAY
+        text.textSize = 11f
+        c.drawText(lastDeathInfo, width / 2f, height / 2f + 48, text)
+    }
+
+    /*
+     * =========================
+     * TOUCH & INPUT (手势与按钮判定严格保留)
+     * =========================
+     */
+    private var touchStartX = 0f
+    private var touchStartY = 0f
+
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        when (e.action) {
+            MotionEvent.ACTION_DOWN -> {
+                touchStartX = e.x
+                touchStartY = e.y
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (reinforceButtonRect.contains(e.x, e.y)) {
+                    val now = System.currentTimeMillis()
+                    if (now - lastReinforceTap > 400L) {
+                        lastReinforceTap = now
+                        setReinforceTraining(!reinforceTraining)
+                    }
+                    return true
+                }
+                if (reinforceTraining) return true
+                if (gameOver) { reset(); return true }
+                if (aiMode != 0) return true
+                if (snake.isEmpty()) return true
+
+                val dx = e.x - touchStartX
+                val dy = e.y - touchStartY
+                val useSwipe = abs(dx) > 24f || abs(dy) > 24f
+
+                val d = if (useSwipe) {
+                    if (abs(dx) > abs(dy)) {
+                        P(if (dx > 0) 1 else -1, 0)
+                    } else {
+                        P(0, if (dy > 0) 1 else -1)
+                    }
+                } else {
+                    val hx = ox + (snake.first().x + 0.5f) * cell
+                    val hy = oy + (snake.first().y + 0.5f) * cell
+                    val rdx = e.x - hx
+                    val rdy = e.y - hy
+                    if (abs(rdx) > abs(rdy)) {
+                        P(if (rdx > 0) 1 else -1, 0)
+                    } else {
+                        P(0, if (rdy > 0) 1 else -1)
+                    }
+                }
+
+                if (!isReverse(d, dir)) {
+                    queue.clear()
+                    queue.add(d)
+                }
+                return true
+            }
+            else -> return true
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        stopParallelTraining()
+        super.onDetachedFromWindow()
+        bgm?.stop()
+        try { toneGen?.release() } catch (_: Throwable) {}
+        try { aiPool.shutdownNow() } catch (_: Throwable) {}
+        saveTrainingState()
+    }
+
+    /*
+     * ============================================================
+     * TRAINING GAME WORKER (多线程轻量对局)
+     * ============================================================
+     */
+    private inner class TrainGame(seed: Long, private val runId: Long) {
+        val rng = Random(seed)
+        val gSnake = ArrayDeque<P>()
+        var gDir = P(1, 0)
+        var gFood = P(7, 7)
+        var gScore = 0
+        var gHunger = 0
+        var gLastFreeRegion = 0f
+        var gCombo = 0
+        var gSteps = 0
+        var gOver = false
+
+        fun playOneGame(agentId: Int) {
+            gSnake.clear()
+            gSnake.add(P(7, 7)); gSnake.add(P(6, 7)); gSnake.add(P(5, 7))
+            gDir = P(1, 0)
+            gScore = 0
+            gHunger = 0
+            gCombo = 0
+            gSteps = 0
+            gOver = false
+            gLastFreeRegion = freeRegion(gSnake).toFloat()
+            gPlaceFood()
+
+            var iter = 0
+            while (!gOver && isTrainingRunActive(runId) && !Thread.currentThread().isInterrupted && iter < 30000) {
+                gStep(agentId)
+                iter++
+            }
+
+            synchronized(sharedLock) {
+                currentScores[agentId % POPULATION_SIZE] = max(currentScores[agentId % POPULATION_SIZE], gScore.toFloat())
+                totalGames++
+            }
+        }
+
+        fun gPlaceFood() {
+            val free = ArrayList<P>(total)
+            for (x in 0 until cols) {
+                for (y in 0 until rows) {
+                    val p = P(x, y)
+                    if (!gSnake.contains(p)) free.add(p)
+                }
+            }
+            if (free.isNotEmpty()) gFood = free[rng.nextInt(free.size)]
+        }
+
+        fun gStep(agentId: Int) {
+            val head = gSnake.first()
+            val stateVec = buildContinuousState(head, gFood, gSnake)
+            val stateDisc = buildState(gSnake, gDir, gFood, gHunger)
+
+            // Dueling Brain + Q 表混合动作
+            val brain = population[agentId % POPULATION_SIZE]
+            val qVals = brain.forward(stateVec)
+            val mask = legalActionMask(gSnake, gDir, gFood)
+
+            var bestA = -1
+            var bestScore = -Float.MAX_VALUE
+            for (a in 0 until 4) {
+                if ((mask and (1 shl a)) != 0) {
+                    val qVal = qRead(stateDisc, a)
+                    val mix = qWeight * qVal + nnWeight * qVals[a] * 4.5f
+                    if (mix > bestScore) {
+                        bestScore = mix
+                        bestA = a
+                    }
+                }
+            }
+
+            if (bestA == -1) bestA = dirs.indexOfFirst { (mask and (1 shl it.ordinal)) != 0 }.coerceAtLeast(0)
+            gDir = dirs[bestA]
+            val nh = P(head.x + gDir.x, head.y + gDir.y)
+
+            if (!inside(nh) || (gSnake.contains(nh) && !(nh == gSnake.last() && nh != gFood))) {
+                qUpdateV4(stateVec, stateDisc, bestA, DEATH_WALL, null, stateDisc, 0, true)
+                gOver = true
+                return
+            }
+
+            val ate = nh == gFood
+            gSnake.addFirst(nh)
+            var reward = REWARD_STEP
+
+            if (ate) {
+                gScore += 10 + min(gCombo, 30) * 3 + gSnake.size
+                gCombo++
+                gHunger = 0
+                gPlaceFood()
+                reward += REWARD_FOOD + gCombo * 0.06f
+            } else {
+                gSnake.removeLast()
+                gHunger++
+                gCombo = max(0, gCombo - 1)
+                val curFree = freeRegion(gSnake).toFloat()
+                reward += (curFree - gLastFreeRegion) * REWARD_SPACE_DELTA
+                gLastFreeRegion = curFree
+                if (tailReachable(gSnake)) reward += REWARD_TAIL
+                reward -= (gHunger * gHunger * 0.001f).coerceAtMost(0.15f)
+            }
+
+            gSteps++
+            if (gHunger >= hungerKillLimit) {
+                qUpdateV4(stateVec, stateDisc, bestA, DEATH_HUNGER, null, stateDisc, 0, true)
+                gOver = true
+                return
+            }
+
+            val nextVec = buildContinuousState(gSnake.first(), gFood, gSnake)
+            val nextDisc = buildState(gSnake, gDir, gFood, gHunger)
+            val nextMask = legalActionMask(gSnake, gDir, gFood)
+            qUpdateV4(stateVec, stateDisc, bestA, reward, nextVec, nextDisc, nextMask, false)
+        }
+    }
+
+    /*
+     * =========================
+     * BGM 8-BIT 合成音效引擎 (严格保留)
+     * =========================
+     */
+    private class BgmPlayer {
+        private var audioTrack: AudioTrack? = null
+        @Volatile private var playing = false
+        private var thread: Thread? = null
+
+        fun start() {
+            if (playing) return
+            playing = true
+            thread = Thread {
+                try {
+                    val sr = 22050
+                    val pcm = generateMelody(sr)
+                    val track = AudioTrack.Builder()
+                        .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                        .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sr).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                        .setBufferSizeInBytes(pcm.size * 2)
+                        .setTransferMode(AudioTrack.MODE_STATIC)
+                        .build()
+
+                    track.write(pcm, 0, pcm.size)
+                    if (Build.VERSION.SDK_INT >= 23) track.setLoopPoints(0, pcm.size, -1)
+                    audioTrack = track
+                    if (playing) track.play()
+                } catch (_: Throwable) {}
+            }.also { it.start() }
+        }
+
+        fun stop() {
+            playing = false
+            try { audioTrack?.pause() } catch (_: Throwable) {}
+            try { audioTrack?.flush() } catch (_: Throwable) {}
+            try { audioTrack?.release() } catch (_: Throwable) {}
+            audioTrack = null
+            thread = null
+        }
+
+        private fun generateMelody(sampleRate: Int): ShortArray {
+            val N = 0f
+            val E5 = 659.25f; val G5 = 783.99f; val C6 = 1046.50f; val D5 = 587.33f
+            val F5 = 698.46f; val A5 = 880.00f; val C5 = 523.25f; val E4 = 329.63f
+            val G4 = 392.00f; val B4 = 493.88f; val A4 = 440.00f
+
+            val notes = listOf(
+                E5 to 180, G5 to 180, C6 to 180, G5 to 180, E5 to 180, G5 to 180, C6 to 260, N to 100,
+                D5 to 180, F5 to 180, A5 to 180, F5 to 180, D5 to 180, F5 to 180, A5 to 260, N to 100,
+                E5 to 180, G5 to 180, C6 to 180, G5 to 180, E5 to 180, G5 to 180, C6 to 180, E4 to 180,
+                F5 to 180, A5 to 180, C6 to 180, A5 to 180, G5 to 260, D5 to 260, C5 to 420, N to 260
+            )
+
+            val out = ArrayList<Short>()
+            for ((freq, durMs) in notes) {
+                val n = durMs * sampleRate / 1000
+                if (freq == N || freq <= 0f) {
+                    repeat(n) { out.add(0) }
+                } else {
+                    val period = (sampleRate / freq).toInt().coerceAtLeast(1)
+                    for (i in 0 until n) {
+                        val phase = (i % period) / period.toFloat()
+                        val t = i.toFloat() / n
+                        val env = when {
+                            t < 0.05f -> t / 0.05f
+                            t > 0.70f -> (1f - t) / 0.30f
+                            else -> 1f
+                        }.coerceIn(0f, 1f)
+                        val v = (if (phase < 0.5f) 1f else -1f) * env * 0.06f
+                        out.add((v * Short.MAX_VALUE).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort())
+                    }
+                }
+            }
+            return out.toShortArray()
+        }
+    }
+}
