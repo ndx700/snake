@@ -5621,33 +5621,18 @@ class SnakeView @JvmOverloads constructor(
         )
 
         border.color =
-            when (ai.danger) {
-                1 -> Color.GREEN
-                2 ->
-                    Color.rgb(
-                        150,
-                        255,
-                        80
-                    )
-
-                3 -> Color.YELLOW
-
-                4 ->
-                    Color.rgb(
-                        255,
-                        150,
-                        0
-                    )
-
-                else ->
-                    Color.RED
-            }
+            Color.argb(
+                60,
+                46,
+                204,
+                113
+            )
 
         border.style =
             Paint.Style.STROKE
 
         border.strokeWidth =
-            5f
+            1.5f
 
         c.drawRoundRect(
             left,
@@ -5707,48 +5692,46 @@ class SnakeView @JvmOverloads constructor(
         val gaugeCY =
             top + 116f
 
-        drawDangerGauge(
-            c,
-            gaugeCX,
-            gaugeCY,
-            42f,
-            ai.danger
-        )
+        if (reinforceTraining) {
+            // 训练模式：圆环显示进化进度
+            val progRatio = currentAgentIndex.toFloat() / POPULATION_SIZE
+            val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+            arcPaint.style = Paint.Style.STROKE
+            arcPaint.strokeWidth = 13f
+            arcPaint.strokeCap = Paint.Cap.ROUND
+            val oval = RectF(gaugeCX - 42f, gaugeCY - 42f, gaugeCX + 42f, gaugeCY + 42f)
+            arcPaint.color = Color.rgb(50, 50, 50)
+            c.drawArc(oval, -90f, 360f, false, arcPaint)
+            arcPaint.color = Color.rgb(46, 204, 113)
+            c.drawArc(oval, -90f, 360f * progRatio, false, arcPaint)
 
-        text.textAlign =
-            Paint.Align.CENTER
-
-        text.isFakeBoldText =
-            true
-
-        text.textSize =
-            26f
-
-        text.color =
-            Color.WHITE
-
-        c.drawText(
-            "${ai.danger}",
-            gaugeCX,
-            gaugeCY + 9f,
-            text
-        )
-
-        text.isFakeBoldText =
-            false
-
-        text.textSize =
-            12f
-
-        text.color =
-            Color.LTGRAY
-
-        c.drawText(
-            "危险",
-            gaugeCX,
-            gaugeCY + 28f,
-            text
-        )
+            text.textAlign = Paint.Align.CENTER
+            text.isFakeBoldText = true
+            text.textSize = 22f
+            text.color = Color.WHITE
+            c.drawText("$generation", gaugeCX, gaugeCY + 8f, text)
+            text.isFakeBoldText = false
+            text.textSize = 11f
+            text.color = Color.LTGRAY
+            c.drawText("世代", gaugeCX, gaugeCY + 28f, text)
+        } else {
+            drawDangerGauge(
+                c,
+                gaugeCX,
+                gaugeCY,
+                42f,
+                ai.danger
+            )
+            text.textAlign = Paint.Align.CENTER
+            text.isFakeBoldText = true
+            text.textSize = 26f
+            text.color = Color.WHITE
+            c.drawText("${ai.danger}", gaugeCX, gaugeCY + 9f, text)
+            text.isFakeBoldText = false
+            text.textSize = 12f
+            text.color = Color.LTGRAY
+            c.drawText("危险", gaugeCX, gaugeCY + 28f, text)
+        }
 
         text.textAlign =
             Paint.Align.LEFT
@@ -5792,14 +5775,61 @@ class SnakeView @JvmOverloads constructor(
             }
 
         c.drawText(
-            "模式 $threadInfo   主蛇长 ${snake.size}",
+            "模式 $threadInfo   主蛇长 ${snake.size}   Q覆盖${visitedStates.size}",
             left + 118f,
             top + 134f,
             text
         )
 
+        // 训练数据条（Q覆盖/回放/ε/Q-NN权重）
+        if (reinforceTraining) {
+            barPaint.style = Paint.Style.FILL
+            var meterY = top + 155f
+            val meterW = w - 32f
+
+            // Q覆盖条
+            text.textSize = 9f
+            text.color = Color.rgb(200, 180, 255)
+            c.drawText("Q覆盖 ${visitedStates.size}/$V2_STATE_COUNT", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(200, 150, 255)
+            val qCovR = (visitedStates.size.toFloat() / V2_STATE_COUNT).coerceIn(0f, 1f)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * qCovR, meterY + 19f, 3f, 3f, barPaint)
+            meterY += 24f
+
+            // 经验回放条
+            text.color = Color.rgb(100, 220, 255)
+            c.drawText("回放 ${replayBuffer.size}/$REPLAY_CAPACITY", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(100, 200, 255)
+            val rpR = replayBuffer.size.toFloat() / REPLAY_CAPACITY
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * rpR, meterY + 19f, 3f, 3f, barPaint)
+            meterY += 24f
+
+            // 探索率ε条
+            text.color = Color.rgb(241, 196, 15)
+            c.drawText("ε ${"%.2f".format(v2Epsilon)}", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(241, 196, 15)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * v2Epsilon, meterY + 19f, 3f, 3f, barPaint)
+            meterY += 24f
+
+            // Q/NN权重条
+            text.color = Color.rgb(200, 200, 200)
+            c.drawText("Q ${"%.2f".format(qWeight)} / NN ${"%.2f".format(nnWeight)}", left + 16f, meterY + 8f, text)
+            barPaint.color = Color.rgb(30, 30, 40)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(231, 76, 60)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * qWeight, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(46, 204, 113)
+            c.drawRoundRect(left + 16f + meterW * qWeight, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+        }
+
         val wbY =
-            top + 175f
+            top + 250f
 
         text.isFakeBoldText =
             true
@@ -6311,7 +6341,7 @@ class SnakeView @JvmOverloads constructor(
 
         if (reinforceTraining) {
             c.drawText(
-                "世代 $generation   当前个体 $currentAgentIndex/$POPULATION_SIZE",
+                "世代 $generation   当前个体 $currentAgentIndex/$POPULATION_SIZE   Q覆盖${visitedStates.size}",
                 left + 16f,
                 infoY,
                 text
@@ -6319,15 +6349,47 @@ class SnakeView @JvmOverloads constructor(
             c.drawText(
                 "本代最佳 ${"%.0f".format(bestScoreThisGen)}   历史最佳 ${"%.0f".format(bestScoreAllTime)}",
                 left + 16f,
-                infoY + 20f,
+                infoY + 18f,
                 text
             )
             c.drawText(
                 "Q表权重 ${"%.2f".format(qWeight)}   神经网络权重 ${"%.2f".format(nnWeight)}",
                 left + 16f,
-                infoY + 40f,
+                infoY + 36f,
                 text
             )
+            c.drawText(
+                "回放${replayBuffer.size}/${REPLAY_CAPACITY}   ε${"%.2f".format(v2Epsilon)}   步${v2LearningSteps}",
+                left + 16f,
+                infoY + 54f,
+                text
+            )
+            val learnStatus = when {
+                generation < 3 -> "🧬 初始化种群，随机试错中..."
+                v2Epsilon > 0.15f -> "🔍 探索阶段：尝试新策略"
+                v2Epsilon < 0.05f && nnWeight > 0.5f -> "🧠 收敛阶段：神经网络主导"
+                bestScoreThisGen > bestScoreAllTime * 0.95f && bestScoreAllTime > 0 -> "🚀 突破中！分数上升"
+                bestScoreThisGen < bestScoreAllTime * 0.3f && bestScoreAllTime > 1000 -> "⚡ 瓶颈期，等待变异突破"
+                else -> "📊 正常进化中..."
+            }
+            text.textSize = 13f
+            text.isFakeBoldText = true
+            text.color = Color.rgb(100, 220, 255)
+            c.drawText(learnStatus, left + 16f, infoY + 74f, text)
+
+            // 死局预判指示器
+            if (deadEndPredicted) {
+                text.color = Color.rgb(255, 80, 80)
+                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
+            } else {
+                text.color = Color.rgb(80, 200, 120)
+                c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
+            }
+            text.color = if (rolloutActive) Color.rgb(180, 180, 255) else Color.rgb(100, 100, 120)
+            c.drawText(if (rolloutActive) "🔮 前瞻模拟${rolloutSteps}步（蛇长${snake.size}）" else "🔮 前瞻模拟：蛇短不启用", left + 16f, infoY + 112f, text)
+            text.isFakeBoldText = false
+            text.color = Color.WHITE
+            text.textSize = 14f
         } else {
             c.drawText(
                 "局数 $totalGames   近50均分 ${
@@ -6347,7 +6409,7 @@ class SnakeView @JvmOverloads constructor(
                     v2LearningSteps
                 }",
                 left + 16f,
-                infoY + 20f,
+                infoY + 18f,
                 text
             )
 
@@ -6366,7 +6428,7 @@ class SnakeView @JvmOverloads constructor(
                     )
                 }",
                 left + 16f,
-                infoY + 40f,
+                infoY + 36f,
                 text
             )
         }
