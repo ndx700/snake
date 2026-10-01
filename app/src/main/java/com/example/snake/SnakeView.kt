@@ -359,9 +359,7 @@ class SnakeView @JvmOverloads constructor(
         if (state !in 0 until V2_STATE_COUNT) return
         if (action !in 0 until V2_ACTIONS) return
 
-        val isNewState = visitedStates.add(state)
-        val curiosityBonus = if (isNewState) 0.02f else 0f
-        val effectiveReward = reward + curiosityBonus
+        val effectiveReward = reward
         val idx = qIndex(state, action)
 
         // 先算nextBest，不持锁
@@ -535,9 +533,13 @@ class SnakeView @JvmOverloads constructor(
                 .sortedByDescending { scoresCopy[it] }
 
             val bestBrains = if (sortedIndices.isNotEmpty()) {
-                sortedIndices.take(minOf(10, sortedIndices.size)).map { population[it] }
+                sortedIndices.take(minOf(10, sortedIndices.size)).map {
+                    TinyBrain().also { copy -> copy.copyFrom(population[it]) }
+                }
             } else {
-                (0 until minOf(10, POPULATION_SIZE)).map { population[it] }
+                (0 until minOf(10, POPULATION_SIZE)).map {
+                    TinyBrain().also { copy -> copy.copyFrom(population[it]) }
+                }
             }
             if (bestBrains.isEmpty()) return
 
@@ -1451,6 +1453,7 @@ class SnakeView @JvmOverloads constructor(
             )
 
         placeFood()
+        lastFreeRegion = freeRegion(snake)
 
         onScoreChanged?.invoke(score)
 
@@ -6857,7 +6860,7 @@ class SnakeView @JvmOverloads constructor(
 
             prevState = -1
             prevAction = -1
-            gLastFreeRegion = 0f
+            gLastFreeRegion = gFreeRegion(gSnake)
 
             gPlaceFood()
 
