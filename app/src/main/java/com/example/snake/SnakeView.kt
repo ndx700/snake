@@ -24,7 +24,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /* ============================================================================
- * SNAKE PRO — 35项AI技术 + 商店皮肤/棋盘 + MainActivity 完整对接版
+ * SNAKE PRO — 35项AI技术 + 商店皮肤/棋盘 + MainActivity 完整对接版（修正版）
  * ==========================================================================*/
 
 // ═══════════════════ 引擎 ═══════════════════
@@ -36,11 +36,12 @@ enum class Goal { FOOD, TAIL, SPACE, SEARCH, SPIRAL, LEARN, NONE }
 class GameEngine(val w: Int = 15, val h: Int = 15) {
     companion object {
         val DIRS = arrayOf(0 to -1, 1 to 0, 0 to 1, -1 to 0)
-        fun dirBetween(a: Int, b: Int, w: Int): Int = when (b) {
-            a - w -> 0
-            a + 1 -> 1
-            a + w -> 2
-            else -> 3
+
+        fun dirBetween(a: Int, b: Int, w: Int): Int {
+            if (b == a - w) return 0
+            if (b == a + 1) return 1
+            if (b == a + w) return 2
+            return 3
         }
     }
 
@@ -260,8 +261,10 @@ class Sim(val w: Int, val h: Int) {
         val art = BooleanArray(n); val maxComp = IntArray(n)
         var timer = 0
         val buf = IntArray(4)
-        fun dfs(u: Int, parent: Int): Unit {
-            disc[u] = low[u] = timer++
+        val dfs: (Int, Int) -> Unit = fun(u: Int, parent: Int) {
+            disc[u] = timer
+            low[u] = timer
+            timer++
             var children = 0
             val m = neighbors(u, buf)
             for (i in 0 until m) {
@@ -343,7 +346,7 @@ object Hamiltonian {
             if (e.occupied(c.first, c.second)) continue
             val ci = c.second * e.w + c.first
             val gain = (order[ci] - hi + N) % N
-            val ok: Boolean
+            var ok = false
             if (strict) {
                 ok = gain == 1
             } else {
@@ -354,9 +357,12 @@ object Hamiltonian {
                     if (e.occupied(mid % e.w, mid / e.w)) allFree = false
                     k++
                 }
-                ok = gain in 1..min(N - 1, 40) && allFree
+                ok = gain >= 1 && gain <= min(N - 1, 40) && allFree
             }
-            if (ok && gain < bestGain) { bestGain = gain; bestD = d }
+            if (ok && gain < bestGain) {
+                bestGain = gain
+                bestD = d
+            }
         }
         if (bestD >= 0) return bestD
         for (d in 0 until 4) {
@@ -649,13 +655,13 @@ class Genome {
         regretSens = v[8].coerceIn(0.0, 2.0); rate = v[9].coerceIn(0.01, 0.15)
     }
 
-    fun personality() = when {
-        margin > 8 && tailBias > 1.5 -> "稳健守成型"
-        risk > 0.6 && patience < 0.35 -> "激进捕食型"
-        lambda > 1.2 -> "风险厌恶型"
-        wanderlust > 2.0 -> "游走探索型"
-        shortcut > 3.5 -> "路径贪婪型"
-        else -> "均衡型"
+    fun personality(): String {
+        if (margin > 8 && tailBias > 1.5) return "稳健守成型"
+        if (risk > 0.6 && patience < 0.35) return "激进捕食型"
+        if (lambda > 1.2) return "风险厌恶型"
+        if (wanderlust > 2.0) return "游走探索型"
+        if (shortcut > 3.5) return "路径贪婪型"
+        return "均衡型"
     }
 
     fun adjust(r: DeathReason) {
@@ -990,8 +996,12 @@ class MetaController {
         }
     }
 
-    private fun targetLevel(best: Int) = when {
-        best >= 100 -> 4; best >= 60 -> 3; best >= 30 -> 2; best >= 10 -> 1; else -> 0
+    private fun targetLevel(best: Int): Int {
+        if (best >= 100) return 4
+        if (best >= 60) return 3
+        if (best >= 30) return 2
+        if (best >= 10) return 1
+        return 0
     }
 
     fun escalateToSpiral() { strategy = Strategy.SPIRAL }
@@ -1025,7 +1035,6 @@ class AiCore(ctx: Context) {
     var deathStreak = 0
     val deathStats = IntArray(5)
 
-    // 训练强度：0=静默低速 1=训练模式 2=强化模式
     @Volatile var intensity = 0
 
     class Info {
@@ -1079,11 +1088,6 @@ class AiCore(ctx: Context) {
         val dTail = sim.distField(sim.tail)
         val oscPen = loop.oscillationPenalty()
 
-        class Cand(
-            val d: Int, var hard: Boolean, var safety: Double, var food: Double,
-            var space: Double, var danger: Double, var cfGain: Double
-        )
-
         val cands = ArrayList<Cand>()
         val s0 = Features.extract(e, e.dir)
         val qVectors = ensemble.map { it.forward(s0) }
@@ -1099,7 +1103,8 @@ class AiCore(ctx: Context) {
             val s2 = sim.copy()
             if (!s2.step(d, eat)) { cands.add(Cand(d, true, 0.0, 0.0, 0.0, 1.0, 0.0)); continue }
 
-            val (area, deadEnds, perim) = s2.regionStats(s2.head)
+            val stats = s2.regionStats(s2.head)
+            val area = stats.first; val deadEnds = stats.second; val perim = stats.third
             var articRisk = 0.0
             if (art[cellIdx]) {
                 val m = artMax[cellIdx]
@@ -1125,7 +1130,7 @@ class AiCore(ctx: Context) {
             val pred = predictor.predict(s0, d)
             val deathProb = pred[0]
             val distNow = e.distToFood(e.head().first, e.head().second)
-            val distAfter = if (eat) 0 else e.distToFood(nc.first, nc.second)
+            val distAfter: Int = if (eat) 0 else e.distToFood(nc.first, nc.second)
             val foodGain = (distNow - distAfter).toDouble()
 
             var followupOk = false
@@ -1146,7 +1151,7 @@ class AiCore(ctx: Context) {
             safety -= min(0.15, deadEnds * 0.03)
             safety -= min(0.1, perim / 200.0 * 0.1)
 
-            var food = foodGain * 0.10 + (if (eat) 1.0 else 0.0) + pred[1] * 0.15
+            val food = foodGain * 0.10 + (if (eat) 1.0 else 0.0) + pred[1] * 0.15
             val space = min(1.0, m4 / 25.0) * 0.3 + min(1.0, m8 / 60.0) * 0.25 +
                     min(1.0, max(0.0, territory) / 8.0) * 0.25 + min(1.0, access / 28.0) * 0.2
             val danger = loop.cellPenalty(nc.first, nc.second) + oscPen * 0.4 + memory.danger(nc.first, nc.second, d)
@@ -1228,6 +1233,11 @@ class AiCore(ctx: Context) {
         info.searchMs = searchMs
         Decision(best.d, learnerDir, qMean, meta.strategy, info.goal, info.area, marginI, meta.timeBudgetMicros, searchMs)
     }
+
+    private class Cand(
+        val d: Int, val hard: Boolean, val safety: Double, val food: Double,
+        val space: Double, val danger: Double, val cfGain: Double
+    )
 
     fun postStep(s: DoubleArray, d: Decision, r: Double, ns: DoubleArray?, done: Boolean, ep: Long, prevLink: Int): Int {
         if (ns != null) {
@@ -1412,11 +1422,10 @@ class AiCore(ctx: Context) {
                             synchronized(lock) { genome.copyFrom(pop[order[0]]) }
                         generation++
                     }
-                    // 强度控制：0=慢速后台 1=训练 2=强化（吃满CPU）
                     when (intensity) {
                         0 -> Thread.sleep(30)
                         1 -> Thread.sleep(5)
-                        else -> { /* 不休眠 */ }
+                        else -> { }
                     }
                 } catch (t: Throwable) {
                     Log.w("SnakeAI", "train error", t)
@@ -1475,7 +1484,7 @@ class AiCore(ctx: Context) {
     }
 }
 
-// ═══════════════════ 主题（皮肤 + 棋盘） ═══════════════════
+// ═══════════════════ 主题 ═══════════════════
 
 class Theme(ctx: Context) {
     var bg = Color.parseColor("#0D1117"); private set
@@ -1486,8 +1495,6 @@ class Theme(ctx: Context) {
     var body = Color.parseColor("#2E9E57"); private set
     var text = Color.parseColor("#E6EDF3"); private set
     var dim = Color.parseColor("#8B949E"); private set
-    var btn = Color.parseColor("#21262D"); private set
-    var btnHot = Color.parseColor("#30363D"); private set
     var skinId = "green"; private set
     var boardId = "dark"; private set
 
@@ -1496,7 +1503,6 @@ class Theme(ctx: Context) {
     fun reload() {
         skinId = prefs.getString("equipped_skin", "green") ?: "green"
         boardId = prefs.getString("equipped_board", "dark") ?: "dark"
-        // 棋盘主题
         when (boardId) {
             "light" -> { bg = Color.parseColor("#E8EAED"); board = Color.parseColor("#FFFFFF"); grid = Color.parseColor("#DADCE0"); text = Color.parseColor("#202124"); dim = Color.parseColor("#5F6368") }
             "neon" -> { bg = Color.parseColor("#050510"); board = Color.parseColor("#0A0A2A"); grid = Color.parseColor("#202060"); food = Color.parseColor("#00FFFF") }
@@ -1504,7 +1510,6 @@ class Theme(ctx: Context) {
             "cyberpunk" -> { bg = Color.parseColor("#12051F"); board = Color.parseColor("#1F0A33"); grid = Color.parseColor("#3A1560"); food = Color.parseColor("#FF00A0") }
             else -> { bg = Color.parseColor("#0D1117"); board = Color.parseColor("#161B22"); grid = Color.parseColor("#21262D"); text = Color.parseColor("#E6EDF3"); dim = Color.parseColor("#8B949E") }
         }
-        // 蛇皮肤
         when (skinId) {
             "blue" -> { head = Color.parseColor("#60A5FA"); body = Color.parseColor("#2563EB") }
             "red" -> { head = Color.parseColor("#F87171"); body = Color.parseColor("#DC2626") }
@@ -1531,7 +1536,6 @@ class SnakeView @JvmOverloads constructor(
     private val theme = Theme(context)
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
-    // ══════ MainActivity 对接接口 ══════
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
     private var sessionMoney = 0
@@ -1556,7 +1560,6 @@ class SnakeView @JvmOverloads constructor(
     fun updateCurrentSkin() { theme.reload(); invalidate() }
     fun updateCurrentBoard() { theme.reload(); invalidate() }
 
-    /** 金币结算：会话金币写回 prefs 并回调 */
     private fun flushMoney() {
         if (sessionMoney <= 0) return
         val total = prefs.getInt("money", 0) + sessionMoney
@@ -1569,11 +1572,15 @@ class SnakeView @JvmOverloads constructor(
     private var stepAccum = 0L
     private var lastFrame = 0L
     private var tick = 0L
-    private val frameCb = Choreographer.FrameCallback { t ->
-        onFrame(t)
-        if (attached) Choreographer.getInstance().postFrameCallback(frameCb)
-    }
     private var attached = false
+
+    // 修复：显式类型标注，断开递归类型推断
+    private val frameCb: Choreographer.FrameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            onFrame(frameTimeNanos)
+            if (attached) Choreographer.getInstance().postFrameCallback(frameCb)
+        }
+    }
 
     private class P(var x: Float, var y: Float, var vx: Float, var vy: Float, var life: Float)
     private val particles = ArrayList<P>()
@@ -1596,7 +1603,7 @@ class SnakeView @JvmOverloads constructor(
         super.onAttachedToWindow()
         attached = true
         Choreographer.getInstance().postFrameCallback(frameCb)
-        ai.startTraining()  // 低速后台常驻，训练/强化档由 intensity 控制
+        ai.startTraining()
     }
 
     override fun onDetachedFromWindow() {
@@ -1606,7 +1613,6 @@ class SnakeView @JvmOverloads constructor(
         super.onDetachedFromWindow()
     }
 
-    // 棋盘顶部避开 MainActivity 的两行面板
     private fun boardRect(): RectF {
         val top = dp(122f)
         val size = min(width - dp(24f), height - top - dp(24f)).toFloat()
@@ -1621,7 +1627,6 @@ class SnakeView @JvmOverloads constructor(
         val dt = min(100L, now - lastFrame)
         lastFrame = now; tick++
         if (!pausedByLifecycle && aiOn && engine.alive) {
-            // AI 演示节奏：训练/强化档时加速
             val interval = when (ai.intensity) { 2 -> 35L; 1 -> 60L; else -> 110L }
             stepAccum += dt
             while (stepAccum >= interval) {
@@ -1693,7 +1698,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // 手动模式滑动（aiOn=false 时生效）
     private var downX = 0f; private var downY = 0f
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
@@ -1714,10 +1718,7 @@ class SnakeView @JvmOverloads constructor(
         return super.onTouchEvent(e)
     }
 
-    // ══════ 绘制 ══════
-
     override fun onDraw(cv: Canvas) {
-        // 背景（RGB流光棋盘：色相缓慢流动）
         if (theme.isRainbowBoard()) {
             val hue = (tick * 0.15f) % 360f
             cv.drawColor(Color.HSVToColor(floatArrayOf(hue, 0.55f, 0.10f)))
@@ -1730,10 +1731,12 @@ class SnakeView @JvmOverloads constructor(
 
     private fun drawGame(cv: Canvas) {
         val b = boardRect(); val c = cell()
-        fill.color = if (theme.isRainbowBoard()) {
+        if (theme.isRainbowBoard()) {
             val hue = (tick * 0.15f + 30f) % 360f
-            Color.HSVToColor(floatArrayOf(hue, 0.6f, 0.16f))
-        } else theme.board
+            fill.color = Color.HSVToColor(floatArrayOf(hue, 0.6f, 0.16f))
+        } else {
+            fill.color = theme.board
+        }
         cv.drawRoundRect(RectF(b.left - dp(5f), b.top - dp(5f), b.right + dp(5f), b.bottom + dp(5f)), dp(12f), dp(12f), fill)
         stroke.color = theme.grid
         stroke.strokeWidth = 1.5f
@@ -1765,14 +1768,12 @@ class SnakeView @JvmOverloads constructor(
             fill.color = Color.argb((p.life * 255).toInt().coerceIn(0, 255), 255, 205, 120)
             cv.drawCircle(p.x, p.y, c * .1f * p.life, fill)
         }
-        // 死亡提示（手动模式或短暂展示）
         if (!engine.alive && !aiOn) {
             bold.color = theme.text; bold.textSize = dp(26f); bold.textAlign = Paint.Align.CENTER
             cv.drawText("游戏结束 · 滑动重开", width / 2f, b.centerY(), bold)
         }
     }
 
-    /** 底部一行迷你状态（避开 MainActivity 顶部面板，放棋盘下方） */
     private fun drawMiniStatus(cv: Canvas) {
         val b = boardRect()
         val y = min(b.bottom + dp(26f), height - dp(10f))
