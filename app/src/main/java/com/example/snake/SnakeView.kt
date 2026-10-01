@@ -166,6 +166,8 @@ class SnakeView @JvmOverloads constructor(
             dir.y == -1 -> V3Action.UP
             else -> V3Action.DOWN
         }
+        val currentHash = bodyArr.contentHashCode().toLong() * 31 + food.y * cols + food.x + dirV3.ordinal
+        val prevHashes = v3PrevState?.recentHashes ?: LongArray(0)
         return V3State(
             width = cols,
             height = rows,
@@ -176,7 +178,8 @@ class SnakeView @JvmOverloads constructor(
             steps = steps,
             stepsSinceFood = hunger,
             hunger = hunger.toFloat(),
-            gameOver = gameOver
+            gameOver = gameOver,
+            recentHashes = (prevHashes + currentHash).takeLast(16).toLongArray()
         )
     }
 
