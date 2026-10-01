@@ -144,10 +144,9 @@ class SnakeView @JvmOverloads constructor(
     private var v3Enabled = true
 
     // V3 50 Agent 训练
-    private val POPULATION_SIZE = 50
     private val v3PopulationLock = Any()
     private val v3TrainingShared = V3SharedLearning()
-    private var v3Population: List<AIEngineV3> = List(POPULATION_SIZE) { AIEngineV3(v3TrainingShared) }
+    private var v3Population: List<AIEngineV3> = emptyList()
     private val v3AgentResults = arrayOfNulls<V3AgentResult>(POPULATION_SIZE)
     private val v3EvolveLock = Any()
     @Volatile private var v3Evolving = false
@@ -213,6 +212,9 @@ class SnakeView @JvmOverloads constructor(
 
     // ===== 神经进化新增变量 =====
     private val POPULATION_SIZE = 50
+    init {
+        v3Population = List(POPULATION_SIZE) { AIEngineV3(v3TrainingShared) }
+    }
     @Volatile
     private var generation = 0
     private val population = MutableList(POPULATION_SIZE) { TinyBrain() }
