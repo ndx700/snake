@@ -675,6 +675,49 @@ class SnakeView @JvmOverloads constructor(
     private var trainingMode = false
     private var reinforceTraining = false
 
+    // === 卡死自动检测 ===
+    @Volatile private var lastHeartbeat = 0L
+    @Volatile private var watchDogThread: Thread? = null
+    @Volatile private var watchdogRestartCount = 0
+
+    private fun heartbeat() {
+        lastHeartbeat = System.currentTimeMillis()
+    }
+
+    private fun startWatchDog() {
+        stopWatchDog()
+        lastHeartbeat = System.currentTimeMillis()
+        watchDogThread = Thread {
+            while (true) {
+                try { Thread.sleep(1000) } catch (_: Exception) {}
+                if (!reinforceTraining) continue
+                val now = System.currentTimeMillis()
+                if (now - lastHeartbeat > 4000) {
+                    // 卡死了，重启训练
+                    watchdogRestartCount++
+                    post {
+                        try {
+                            // 停掉旧线程
+                            for (t in trainThreads) {
+                                try { t.interrupt() } catch (_: Exception) {}
+                            }
+                            trainThreads.clear()
+                            Thread.sleep(200)
+                            // 重启
+                            startReinforceTrainingInternal()
+                        } catch (_: Exception) {}
+                    }
+                    try { Thread.sleep(3000) } catch (_: Exception) {}
+                }
+            }
+        }.also { it.priority = Thread.MIN_PRIORITY; it.start() }
+    }
+
+    private fun stopWatchDog() {
+        watchDogThread?.interrupt()
+        watchDogThread = null
+    }
+
     // 保存/恢复状态：切出去再切回来保持强化学习
     override fun onSaveInstanceState(): Parcelable? {
         val superState = super.onSaveInstanceState()
@@ -1045,8 +1088,10 @@ class SnakeView @JvmOverloads constructor(
     fun setReinforceTraining(enable: Boolean) {
         if (enable) {
             startParallelTraining()
+            startWatchDog()
         } else {
             stopParallelTraining()
+            stopWatchDog()
         }
 
         invalidate()
@@ -1063,6 +1108,14 @@ class SnakeView @JvmOverloads constructor(
      * PARALLEL TRAINING (神经进化 + Q表融合)
      * =========================
      */
+
+    private fun startReinforceTrainingInternal() {
+        try {
+            reinforceTraining = true
+            startParallelTraining()
+            heartbeat()
+        } catch (_: Exception) {}
+    }
 
     private fun startParallelTraining() {
         if (trainActive) return
@@ -3572,6 +3625,7 @@ class SnakeView @JvmOverloads constructor(
         adjustWeights(cause)
 
         totalGames++
+        heartbeat()
 
         recentScores.addLast(score)
 
