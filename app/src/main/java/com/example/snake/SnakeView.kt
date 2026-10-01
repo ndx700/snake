@@ -4599,45 +4599,7 @@ class SnakeView @JvmOverloads constructor(
             c.drawColor(
                 Color.BLACK
             )
-
-            text.textAlign =
-                Paint.Align.CENTER
-
-            text.isFakeBoldText =
-                true
-
-            text.textSize =
-                46f
-
-            text.color =
-                Color.rgb(
-                    46,
-                    204,
-                    113
-                )
-
-            c.drawText(
-                "混合进化中",
-                width / 2f,
-                140f,
-                text
-            )
-
-            text.isFakeBoldText =
-                false
-
-            text.textSize =
-                20f
-
-            text.color =
-                Color.LTGRAY
-
-            c.drawText(
-                "Q表 + 神经网络 在规则约束下自我迭代",
-                width / 2f,
-                178f,
-                text
-            )
+            // 全屏HUD模式，不画大标题，HUD面板自己带标题
 
             text.textAlign =
                 Paint.Align.LEFT
@@ -5535,20 +5497,18 @@ class SnakeView @JvmOverloads constructor(
 
         val w =
             min(
-                width * 0.97f,
-                720f
+                width * 0.96f,
+                900f
             )
 
-        val h = 760f
+        val h =
+            height - 24f
 
         val left =
             (width - w) / 2f
 
         val top =
-            max(
-                12f,
-                height - h - 12f
-            )
+            12f
 
         panel.color =
             Color.argb(
