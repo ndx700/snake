@@ -218,19 +218,10 @@ class SnakeView @JvmOverloads constructor(
     }
     @Volatile
     private var generation = 0
-    private val population = MutableList(POPULATION_SIZE) { TinyBrain() }
     @Volatile
     private var currentAgentIndex = 0
     private var completedAgents = 0
     private val currentScores = FloatArray(POPULATION_SIZE)
-    @Volatile
-    private var qWeight = 1.0f
-    @Volatile
-    private var nnWeight = 0.0f
-    @Volatile
-    private var bestScoreThisGen = 0f
-    @Volatile
-    private var bestScoreAllTime = 0f
     @Volatile private var deadEndPredicted = false
     @Volatile private var rolloutActive = false
     @Volatile private var rolloutSteps = 0
@@ -328,257 +319,11 @@ class SnakeView @JvmOverloads constructor(
         const val DEATH_HUNGER = -12.0f
     }
 
-    private val qV2 = FloatArray(V2_Q_SIZE)
-    private val qTarget = FloatArray(V2_Q_SIZE)
-    private val nV2 = IntArray(V2_Q_SIZE)
     @Volatile private var trainingRunId = 0L
     private val trainingLifecycleLock = Any()
-    private val targetLock = Any()
-    private val targetUpdateCounter = java.util.concurrent.atomic.AtomicInteger(0)
-
     private fun isTrainingRunActive(runId: Long): Boolean =
         trainActive && trainingRunId == runId
 
-    private val qLocks = Array(V2_LOCKS) { Any() }
-
-    @Volatile
-    private var v2LearningSteps = 0L
-
-    @Volatile
-    private var v2Episodes = 0L
-
-    @Volatile
-    private var v2Epsilon = EPS_START
-
-    private var lastV2State = -1
-    private var lastV2Action = -1
-
-    private fun qIndex(state: Int, action: Int): Int {
-        return state * V2_ACTIONS + action
-    }
-
-    private fun qLock(index: Int): Any {
-        return qLocks[index and (V2_LOCKS - 1)]
-    }
-
-    private fun qStateLock(state: Int): Any {
-        return qLocks[state and (V2_LOCKS - 1)]
-    }
-
-    private fun qRead(state: Int, action: Int): Float {
-        if (state !in 0 until V2_STATE_COUNT) return 0f
-        if (action !in 0 until V2_ACTIONS) return 0f
-        return synchronized(qLock(state)) {
-            qV2[qIndex(state, action)]
-        }
-    }
-
-    private fun qVisit(state: Int, action: Int): Int {
-        if (state !in 0 until V2_STATE_COUNT) return 0
-        if (action !in 0 until V2_ACTIONS) return 0
-        return synchronized(qLock(state)) {
-            nV2[qIndex(state, action)]
-        }
-    }
-
-    private fun qMax(state: Int, legalMask: Int = 15): Float {
-        if (state !in 0 until V2_STATE_COUNT) return 0f
-        var bestAction = -1
-        var bestQ = -Float.MAX_VALUE
-        synchronized(qLock(state)) {
-            for (a in 0 until 4) {
-                if ((legalMask and (1 shl a)) == 0) continue
-                val v = qV2[qIndex(state, a)]
-                if (v > bestQ) { bestQ = v; bestAction = a }
-            }
-            if (bestAction < 0) return 0f
-            synchronized(targetLock) {
-                return qTarget[qIndex(state, bestAction)]
-            }
-        }
-    }
-
-    // 经验回放buffer（用ArrayList支持O(1)随机访问）
-    private data class Experience(
-        val state: Int, val action: Int, val reward: Float,
-        val nextState: Int, val nextMask: Int, val terminal: Boolean,
-        val tdError: Float = 0f
-    )
-    private val replayBuffer = ArrayList<Experience>(5000)
-    private var replaySkipCounter = 0
-    private val REPLAY_CAPACITY = 5000
-
-    private fun qUpdate(
-        state: Int,
-        action: Int,
-        reward: Float,
-        nextState: Int,
-        nextMask: Int,
-        terminal: Boolean
-    ) {
-        if (state !in 0 until V2_STATE_COUNT) return
-        if (action !in 0 until V2_ACTIONS) return
-
-        visitedStates.add(state)
-        val effectiveReward = reward
-        val idx = qIndex(state, action)
-
-        // 先算nextBest，不持锁
-        val nextBest = if (terminal) 0f else qMax(nextState, nextMask)
-
-        // 读旧值
-        val oldValue = synchronized(qStateLock(state)) { qV2[idx] }
-
-        val tdErr = if (terminal) effectiveReward - oldValue
-                    else effectiveReward + GAMMA * nextBest - oldValue
-
-        // 存经验
-        synchronized(replayBuffer) {
-            replayBuffer.add(Experience(state, action, effectiveReward, nextState, nextMask, terminal, tdErr))
-            if (replayBuffer.size > REPLAY_CAPACITY) replayBuffer.removeAt(0)
-        }
-
-        // 更新Q表，只锁当前state
-        synchronized(qStateLock(state)) {
-            val visits = nV2[idx]
-            val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
-            val target = if (terminal) effectiveReward else effectiveReward + GAMMA * nextBest
-            val old = qV2[idx]
-            val updated = old + alpha * (target - old)
-            qV2[idx] = updated.coerceIn(-10f, 10f)
-            nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
-        }
-
-        // 经验回放：mini-batch 2条，减少重复强化
-        synchronized(replayBuffer) {
-            if (replayBuffer.size > 10) {
-                repeat(2) {
-                    val e = replayBuffer[Random.nextInt(replayBuffer.size)]
-                    evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
-                }
-            }
-        }
-
-        v2LearningSteps++
-
-        val cnt = targetUpdateCounter.incrementAndGet()
-        if (cnt >= 50 && targetUpdateCounter.compareAndSet(cnt, 0)) {
-            synchronized(targetLock) {
-                for (i in qTarget.indices) {
-                    qTarget[i] = qTarget[i] + 0.01f * (qV2[i] - qTarget[i])
-                }
-            }
-        }
-    }
-
-    private fun evoUpdate(state: Int, action: Int, reward: Float, nextState: Int, nextMask: Int, terminal: Boolean) {
-        if (state !in 0 until V2_STATE_COUNT) return
-        if (action !in 0 until V2_ACTIONS) return
-        val idx = qIndex(state, action)
-        // 先算nextBest，不持锁
-        val nextBest = if (terminal) 0f else qMax(nextState, nextMask)
-        synchronized(qStateLock(state)) {
-            val visits = nV2[idx]
-            val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
-            val target = if (terminal) reward else reward + GAMMA * nextBest
-            val old = qV2[idx]
-            val updated = old + alpha * (target - old)
-            qV2[idx] = updated.coerceIn(-10f, 10f)
-            nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
-        }
-    }
-
-    private fun currentEpsilon(): Float {
-        if (!trainingMode && !reinforceTraining) return 0f
-
-        val e = v2Epsilon
-
-        if (v2LearningSteps > 0L && v2LearningSteps % 4096L == 0L) {
-            v2Epsilon = max(
-                EPS_MIN,
-                v2Epsilon * 0.985f
-            )
-        }
-
-        return e
-    }
-
-    private fun resetV2Learning() {
-        synchronized(sharedLock) {
-            java.util.Arrays.fill(qV2, 0f)
-            java.util.Arrays.fill(nV2, 0)
-            v2LearningSteps = 0L
-            v2Episodes = 0L
-            v2Epsilon = EPS_START
-            visitedStates.clear()
-        }
-        synchronized(targetLock) {
-            java.util.Arrays.fill(qTarget, 0f)
-        }
-    }
-
-    /*
-     * =========================
-     * 神经进化大脑 (TinyBrain)
-     * =========================
-     */
-    private inner class TinyBrain {
-        // 8输入 -> 32隐藏 -> 16隐藏 -> 4输出
-        var w1 = FloatArray(8 * 32) { Random.nextFloat() * 2f - 1f }
-        var w2 = FloatArray(32 * 16) { Random.nextFloat() * 2f - 1f }
-        var w3 = FloatArray(16 * 4) { Random.nextFloat() * 2f - 1f }
-
-        fun think(inputs: FloatArray): FloatArray {
-            val h1 = FloatArray(32)
-            for (i in 0 until 32) {
-                var sum = 0f
-                for (j in 0 until 8) sum += inputs[j] * w1[j * 32 + i]
-                h1[i] = max(0f, sum)
-            }
-            val h2 = FloatArray(16)
-            for (i in 0 until 16) {
-                var sum = 0f
-                for (j in 0 until 32) sum += h1[j] * w2[j * 16 + i]
-                h2[i] = max(0f, sum)
-            }
-            val outputs = FloatArray(4)
-            for (i in 0 until 4) {
-                var sum = 0f
-                for (j in 0 until 16) sum += h2[j] * w3[j * 4 + i]
-                outputs[i] = sum
-            }
-            return outputs
-        }
-
-        fun copyFrom(src: TinyBrain) {
-            System.arraycopy(src.w1, 0, w1, 0, w1.size)
-            System.arraycopy(src.w2, 0, w2, 0, w2.size)
-            System.arraycopy(src.w3, 0, w3, 0, w3.size)
-        }
-
-        fun breed(child: TinyBrain) {
-            val mut = if (generation < 10) 0.18f else if (generation < 30) 0.10f else 0.05f
-            for (i in w1.indices) child.w1[i] = w1[i] + (Random.nextFloat() - 0.5f) * mut
-            for (i in w2.indices) child.w2[i] = w2[i] + (Random.nextFloat() - 0.5f) * mut
-            for (i in w3.indices) child.w3[i] = w3[i] + (Random.nextFloat() - 0.5f) * mut
-        }
-
-        fun crossover(other: TinyBrain, child: TinyBrain) {
-            val s1 = w1.size / 2
-            val s2 = w2.size / 2
-            val s3 = w3.size / 2
-            System.arraycopy(w1, 0, child.w1, 0, s1)
-            System.arraycopy(other.w1, s1, child.w1, s1, w1.size - s1)
-            System.arraycopy(w2, 0, child.w2, 0, s2)
-            System.arraycopy(other.w2, s2, child.w2, s2, w2.size - s2)
-            System.arraycopy(w3, 0, child.w3, 0, s3)
-            System.arraycopy(other.w3, s3, child.w3, s3, w3.size - s3)
-            val mut = if (generation < 10) 0.12f else 0.06f
-            for (i in child.w1.indices) child.w1[i] += (Random.nextFloat() - 0.5f) * mut
-            for (i in child.w2.indices) child.w2[i] += (Random.nextFloat() - 0.5f) * mut
-            for (i in child.w3.indices) child.w3[i] += (Random.nextFloat() - 0.5f) * mut
-        }
-    }
 
     private fun performV3Evolution(runId: Long) {
         synchronized(v3EvolveLock) {
@@ -622,78 +367,7 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun evolveNextGeneration() {
-        evolving = true
-        // 先世代+1，确保即使进化出错世代也涨
-        generation++
-        try {
-            val scoresCopy = synchronized(sharedLock) {
-                currentScores.copyOf()
-            }
-
-            val sortedIndices = (0 until POPULATION_SIZE)
-                .filter { !scoresCopy[it].isNaN() }
-                .sortedByDescending { scoresCopy[it] }
-
-            val bestBrains = if (sortedIndices.isNotEmpty()) {
-                sortedIndices.take(minOf(10, sortedIndices.size)).map {
-                    TinyBrain().also { copy -> copy.copyFrom(population[it]) }
-                }
-            } else {
-                (0 until minOf(10, POPULATION_SIZE)).map {
-                    TinyBrain().also { copy -> copy.copyFrom(population[it]) }
-                }
-            }
-            if (bestBrains.isEmpty()) return
-
-            val bestScore = if (sortedIndices.isNotEmpty()) scoresCopy[sortedIndices[0]] else 0f
-            bestScoreThisGen = bestScore
-            if (bestScoreThisGen > bestScoreAllTime) bestScoreAllTime = bestScoreThisGen
-
-            for (i in 0 until POPULATION_SIZE) {
-                try {
-                    when {
-                        i < bestBrains.size -> population[i].copyFrom(bestBrains[i])
-                        i < 40 -> {
-                            val p1 = bestBrains[Random.nextInt(bestBrains.size)]
-                            var p2 = bestBrains[Random.nextInt(bestBrains.size)]
-                            while (p2 === p1 && bestBrains.size > 1) {
-                                p2 = bestBrains[Random.nextInt(bestBrains.size)]
-                            }
-                            val child = TinyBrain()
-                            p1.crossover(p2, child)
-                            population[i] = child
-                        }
-                        else -> {
-                            val parent = bestBrains[Random.nextInt(bestBrains.size)]
-                            val child = TinyBrain()
-                            parent.breed(child)
-                            population[i] = child
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-
-            synchronized(sharedLock) {
-                for (i in 0 until POPULATION_SIZE) {
-                    currentScores[i] = 0f
-                }
-            }
-
-            // 动态权重：世代越高+分数越好，NN权重越大
-            val baseRatio = (generation / 30f).coerceIn(0f, 0.7f)
-            val scoreBonus = (bestScoreThisGen / 25000f).coerceIn(0f, 0.15f)
-            nnWeight = (baseRatio + scoreBonus).coerceIn(0f, 0.8f)
-            qWeight = 1.0f - nnWeight
-
-            Thread { try { saveTrainingState() } catch (_: Exception) {} }.apply {
-                isDaemon = true
-                start()
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        } finally {
-            evolving = false
-        }
+        // V2 已废弃
     }
 
     private fun buildInputs(head: P, target: P, currentBody: ArrayDeque<P>): FloatArray {
@@ -1261,7 +935,7 @@ class SnakeView @JvmOverloads constructor(
                 completedAgentIds.clear()
                 java.util.Arrays.fill(v3AgentResults, null)
             }
-            bestScoreThisGen = 0f
+            0f = 0f
             for (i in 0 until POPULATION_SIZE) {
                 currentScores[i] = 0f
             }
@@ -1827,18 +1501,8 @@ class SnakeView @JvmOverloads constructor(
                 food
             )
 
-        qUpdate(
-            oldState,
-            oldAction,
-            reward,
-            nextState,
-            nextMask,
-            false
-        )
-
-        lastV2State = nextState
-        lastV2Action = oldAction
-    }
+        
+                    }
 
     /*
      * =========================
@@ -2087,15 +1751,7 @@ class SnakeView @JvmOverloads constructor(
         action: Int,
         reward: Float
     ) {
-        qUpdate(
-            state,
-            action,
-            reward,
-            state,
-            0,
-            true
-        )
-    }
+            }
 
     /*
      * =========================
@@ -2123,7 +1779,7 @@ class SnakeView @JvmOverloads constructor(
 
         val epsilon =
             if (training) {
-                currentEpsilon()
+                0.1f
             } else {
                 0f
             }
@@ -2172,10 +1828,7 @@ class SnakeView @JvmOverloads constructor(
             if (action < 0) continue
 
             val q =
-                qRead(
-                    state,
-                    action
-                )
+                0f
 
             val visits =
                 qVisit(
@@ -2349,14 +2002,9 @@ class SnakeView @JvmOverloads constructor(
                 }.coerceAtLeast(0)
 
             val q =
-                qRead(
-                    state,
-                    action
-                )
+                0f
 
-            lastV2State = state
-            lastV2Action = action
-
+                        
             ai =
                 Snapshot(
                     strategy = "V2 SAFE FOOD",
@@ -2413,14 +2061,9 @@ class SnakeView @JvmOverloads constructor(
                 }.coerceAtLeast(0)
 
             val q =
-                qRead(
-                    state,
-                    action
-                )
+                0f
 
-            lastV2State = state
-            lastV2Action = action
-
+                        
             ai =
                 Snapshot(
                     strategy = "V2 TAIL",
@@ -2494,9 +2137,7 @@ class SnakeView @JvmOverloads constructor(
                         it == selected.d
                     }.coerceAtLeast(0)
 
-                lastV2State = state
-                lastV2Action = action
-
+                                
                 ai =
                     Snapshot(
                         strategy = "V2 HUNGER",
@@ -2525,10 +2166,7 @@ class SnakeView @JvmOverloads constructor(
                                 if (it.d == selected.d) {
                                     it.copy(
                                         qValue =
-                                            qRead(
-                                                state,
-                                                action
-                                            )
+                                            0f
                                     )
                                 } else {
                                     it
@@ -2541,10 +2179,7 @@ class SnakeView @JvmOverloads constructor(
                         regionWeight = wRegion,
                         strategyId = 12,
                         qValue =
-                            qRead(
-                                state,
-                                action
-                            ),
+                            0f,
                         nVisits =
                             qVisit(
                                 state,
@@ -2589,12 +2224,8 @@ class SnakeView @JvmOverloads constructor(
             }
 
         // =========================================================
-        // 融合：神经网络 + Q表 混合决策
+        // 规则决策（V2已删除）
         // =========================================================
-        val brain = if (trainingMode || reinforceTraining) population[currentAgentIndex % POPULATION_SIZE] else population[0]
-        val nnInputs = buildInputs(snake.first(), food, snake)
-        val nnVals = brain.think(nnInputs)
-
         var best = pool.first()
         var bestValue = -Float.MAX_VALUE
 
@@ -2602,8 +2233,7 @@ class SnakeView @JvmOverloads constructor(
             val action = dirs.indexOfFirst { it == candidate.d }
             if (action < 0) continue
 
-            val q = qRead(state, action)
-            val nn = nnVals[action]
+            val q = 0f
             val rule = candidate.score
 
             // 混合分数：Q表分数 * 权重 + 神经网络分数 * 权重 * 放大系数 + 规则分数微调
@@ -2623,7 +2253,7 @@ class SnakeView @JvmOverloads constructor(
         rolloutActive = rSteps > 0
         rolloutSteps = rSteps
         val rolloutScore = if (rSteps > 0) rolloutN(candidate.d, rSteps) else 0f
-        val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f + deadEndPenalty + rolloutScore * 0.5f
+        val mixed = 1.0f * q + 0.0f * nn * 5f + rule * 0.001f + deadEndPenalty + rolloutScore * 0.5f
             if (mixed > bestValue) {
                 bestValue = mixed
                 best = candidate.copy(qValue = q)
@@ -2635,9 +2265,7 @@ class SnakeView @JvmOverloads constructor(
                 it == best.d
             }.coerceAtLeast(0)
 
-        lastV2State = state
-        lastV2Action = action
-
+                
         ai =
             Snapshot(
                 strategy = "混合进化 (Q表+NN)",
@@ -2662,10 +2290,7 @@ class SnakeView @JvmOverloads constructor(
                         if (it.d == best.d) {
                             it.copy(
                                 qValue =
-                                    qRead(
-                                        state,
-                                        action
-                                    )
+                                    0f
                             )
                         } else {
                             it
@@ -2678,10 +2303,7 @@ class SnakeView @JvmOverloads constructor(
                 regionWeight = wRegion,
                 strategyId = 20,
                 qValue =
-                    qRead(
-                        state,
-                        action
-                    ),
+                    0f,
                 nVisits =
                     qVisit(
                         state,
@@ -3621,37 +3243,12 @@ class SnakeView @JvmOverloads constructor(
     private fun saveTrainingState() {
         try {
             val file = context.getFileStreamPath("snake_training.dat")
-            
             val genCopy: Int
-            val scoreCopy: Float
-            val qCopy: FloatArray
-            val nCopy: IntArray
-            val popCopy: List<TinyBrain>
-
             synchronized(sharedLock) {
                 genCopy = generation
-                scoreCopy = bestScoreAllTime
-                qCopy = qV2.copyOf()
-                nCopy = nV2.copyOf()
-                popCopy = population.map { brain ->
-                    TinyBrain().apply {
-                        System.arraycopy(brain.w1, 0, w1, 0, brain.w1.size)
-                        System.arraycopy(brain.w2, 0, w2, 0, brain.w2.size)
-                        System.arraycopy(brain.w3, 0, w3, 0, brain.w3.size)
-                    }
-                }
             }
-
             DataOutputStream(BufferedOutputStream(FileOutputStream(file))).use { out ->
                 out.writeInt(genCopy)
-                out.writeFloat(scoreCopy)
-                for (brain in popCopy) {
-                    for (v in brain.w1) out.writeFloat(v)
-                    for (v in brain.w2) out.writeFloat(v)
-                    for (v in brain.w3) out.writeFloat(v)
-                }
-                for (q in qCopy) out.writeFloat(q)
-                for (n in nCopy) out.writeInt(n)
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -3662,30 +3259,11 @@ class SnakeView @JvmOverloads constructor(
         try {
             val file = context.getFileStreamPath("snake_training.dat")
             if (!file.exists()) return
-            
             DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
                 generation = input.readInt()
-                bestScoreAllTime = input.readFloat()
-                for (i in 0 until POPULATION_SIZE) {
-                    val brain = TinyBrain()
-                    for (j in brain.w1.indices) brain.w1[j] = input.readFloat()
-                    for (j in brain.w2.indices) brain.w2[j] = input.readFloat()
-                    for (j in brain.w3.indices) brain.w3[j] = input.readFloat()
-                    population[i] = brain
-                }
-                for (i in qV2.indices) qV2[i] = input.readFloat()
-                for (i in nV2.indices) nV2[i] = input.readInt()
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            // 如果读取失败，重置训练状态
-            generation = 0
-            bestScoreAllTime = 0f
-            for (i in 0 until POPULATION_SIZE) {
-                population[i] = TinyBrain()
-            }
-            java.util.Arrays.fill(qV2, 0f)
-            java.util.Arrays.fill(nV2, 0)
         }
     }
 
@@ -5689,7 +5267,7 @@ class SnakeView @JvmOverloads constructor(
         var maxAbs = 0.001f
         for (s in sampleList) {
             for (a in 0 until 4) {
-                val qv = qRead(s, a)
+                val qv = 0f
                 if (abs(qv) > maxAbs) maxAbs = abs(qv)
             }
         }
@@ -5704,7 +5282,7 @@ class SnakeView @JvmOverloads constructor(
                 val s = sampleList[i]
                 var bestQ = -Float.MAX_VALUE
                 for (a in 0 until 4) {
-                    val qv = qRead(s, a)
+                    val qv = 0f
                     if (qv > bestQ) bestQ = qv
                 }
                 val t = (bestQ / maxAbs).coerceIn(-1f, 1f)
@@ -5939,45 +5517,46 @@ class SnakeView @JvmOverloads constructor(
             var meterY = top + 155f
             val meterW = w - 32f
 
-            // Q覆盖条
+            // V3 Agent进度
             text.textSize = 9f
             text.color = Color.rgb(200, 180, 255)
-            c.drawText("Q覆盖 ${visitedStates.size}/$V2_STATE_COUNT", left + 16f, meterY + 8f, text)
+            c.drawText("Agent ${completedAgents}/$POPULATION_SIZE", left + 16f, meterY + 8f, text)
             barPaint.color = Color.rgb(30, 30, 40)
             c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
             barPaint.color = Color.rgb(200, 150, 255)
-            val qCovR = (visitedStates.size.toFloat() / V2_STATE_COUNT).coerceIn(0f, 1f)
-            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * qCovR, meterY + 19f, 3f, 3f, barPaint)
+            val agR = (completedAgents.toFloat() / POPULATION_SIZE).coerceIn(0f, 1f)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * agR, meterY + 19f, 3f, 3f, barPaint)
             meterY += 24f
 
-            // 经验回放条
+            // V3 Fallback
             text.color = Color.rgb(100, 220, 255)
-            c.drawText("回放 ${replayBuffer.size}/$REPLAY_CAPACITY", left + 16f, meterY + 8f, text)
+            c.drawText("V3 Fallback $v3FallbackCount", left + 16f, meterY + 8f, text)
             barPaint.color = Color.rgb(30, 30, 40)
             c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
             barPaint.color = Color.rgb(100, 200, 255)
-            val rpR = replayBuffer.size.toFloat() / REPLAY_CAPACITY
-            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * rpR, meterY + 19f, 3f, 3f, barPaint)
+            val fbR = (v3FallbackCount.toFloat() / (v3FallbackCount + v3ExceptionCount + 1)).coerceIn(0f, 1f)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * fbR, meterY + 19f, 3f, 3f, barPaint)
             meterY += 24f
 
-            // 探索率ε条
+            // V3 Exception
             text.color = Color.rgb(241, 196, 15)
-            c.drawText("ε ${"%.2f".format(v2Epsilon)}", left + 16f, meterY + 8f, text)
+            c.drawText("Exception $v3ExceptionCount", left + 16f, meterY + 8f, text)
             barPaint.color = Color.rgb(30, 30, 40)
             c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
-            barPaint.color = Color.rgb(241, 196, 15)
-            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * v2Epsilon, meterY + 19f, 3f, 3f, barPaint)
+            barPaint.color = Color.rgb(231, 76, 60)
+            val exR = (v3ExceptionCount.toFloat() / (v3FallbackCount + v3ExceptionCount + 1)).coerceIn(0f, 1f)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * exR, meterY + 19f, 3f, 3f, barPaint)
             meterY += 24f
 
             // Q/NN权重条
             text.color = Color.rgb(200, 200, 200)
-            c.drawText("Q ${"%.2f".format(qWeight)} / NN ${"%.2f".format(nnWeight)}", left + 16f, meterY + 8f, text)
+            c.drawText("V3 Gen $generation", left + 16f, meterY + 8f, text)
             barPaint.color = Color.rgb(30, 30, 40)
             c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
             barPaint.color = Color.rgb(231, 76, 60)
-            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * qWeight, meterY + 19f, 3f, 3f, barPaint)
+            c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * 1.0f, meterY + 19f, 3f, 3f, barPaint)
             barPaint.color = Color.rgb(46, 204, 113)
-            c.drawRoundRect(left + 16f + meterW * qWeight, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
+            c.drawRoundRect(left + 16f + meterW * 1.0f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
         }
 
         val wbY =
@@ -6453,31 +6032,7 @@ class SnakeView @JvmOverloads constructor(
                     400
             )
 
-        for (
-            s in
-            0 until
-                V2_STATE_COUNT
-                step sampleStep
-        ) {
-            for (a in 0 until 4) {
-                val idx =
-                    qIndex(
-                        s,
-                        a
-                    )
-
-                if (nV2[idx] > 0) {
-                    visited++
-                    sumQ +=
-                        qV2[idx]
-                    cntQ++
-                }
-            }
-        }
-
-        val avgQ =
-            if (cntQ > 0) {
-                sumQ / cntQ
+        val avgQ = 0f
             } else {
                 0f
             }
@@ -6499,13 +6054,13 @@ class SnakeView @JvmOverloads constructor(
                 text
             )
             c.drawText(
-                "本代最佳 ${"%.0f".format(bestScoreThisGen)}   历史最佳 ${"%.0f".format(bestScoreAllTime)}",
+                "本代最佳 ${"%.0f".format(0f)}   历史最佳 ${"%.0f".format(0f)}",
                 left + 16f,
                 infoY + 18f,
                 text
             )
             c.drawText(
-                "Q表权重 ${"%.2f".format(qWeight)}   神经网络权重 ${"%.2f".format(nnWeight)}",
+                "Q表权重 ${"%.2f".format(1.0f)}   神经网络权重 ${"%.2f".format(0.0f)}",
                 left + 16f,
                 infoY + 36f,
                 text
@@ -6519,9 +6074,9 @@ class SnakeView @JvmOverloads constructor(
             val learnStatus = when {
                 generation < 3 -> "🧬 初始化种群，随机试错中..."
                 v2Epsilon > 0.15f -> "🔍 探索阶段：尝试新策略"
-                v2Epsilon < 0.05f && nnWeight > 0.5f -> "🧠 收敛阶段：神经网络主导"
-                bestScoreThisGen > bestScoreAllTime * 0.95f && bestScoreAllTime > 0 -> "🚀 突破中！分数上升"
-                bestScoreThisGen < bestScoreAllTime * 0.3f && bestScoreAllTime > 1000 -> "⚡ 瓶颈期，等待变异突破"
+                v2Epsilon < 0.05f && 0.0f > 0.5f -> "🧠 收敛阶段：神经网络主导"
+                0f > 0f * 0.95f && 0f > 0 -> "🚀 突破中！分数上升"
+                0f < 0f * 0.3f && 0f > 1000 -> "⚡ 瓶颈期，等待变异突破"
                 else -> "📊 正常进化中..."
             }
             text.textSize = 13f
@@ -7525,101 +7080,8 @@ class SnakeView @JvmOverloads constructor(
             state: Int,
             legal: List<Candidate>
         ): Candidate {
-            if (legal.size == 1) {
-                return legal.first()
-            }
-
-            if (
-                rng.nextFloat() <
-                currentEpsilon()
-            ) {
-                val safe =
-                    legal.filter {
-                        it.tailOk ||
-                            it.region >=
-                            max(
-                                5,
-                                gSnake.size / 2
-                            )
-                    }
-
-                return if (safe.isNotEmpty()) {
-                    safe[
-                        rng.nextInt(
-                            safe.size
-                        )
-                    ]
-                } else {
-                    legal[
-                        rng.nextInt(
-                            legal.size
-                        )
-                    ]
-                }
-            }
-
-            val brain = population[currentAgentId % POPULATION_SIZE]
-            val nnInputs = buildInputs(gSnake.first(), gFood, gSnake)
-            val nnVals = brain.think(nnInputs)
-
-            var best =
-                legal.first()
-
-            var bestValue =
-                -Float.MAX_VALUE
-
-            for (candidate in legal) {
-                val a =
-                    dirs.indexOfFirst {
-                        it == candidate.d
-                    }
-
-                if (a < 0) continue
-
-                val q =
-                    qRead(
-                        state,
-                        a
-                    )
-
-                val nn = nnVals[a]
-                val rule = candidate.score
-
-                // 死局预判：如果食物周围空间不够，大幅降低吃食物的优先级
-        val de = checkFoodDeadEnd()
-        deadEndPredicted = de.first
-        foodSpaceRatio = de.second
-        var deadEndPenalty = 0f
-        if (de.first) deadEndPenalty = -5f
-
-        // 按需启用前瞻模拟：蛇长>20才启用，越长模拟越多步
-        val rSteps = when {
-            snake.size > 60 -> 5
-            snake.size > 25 -> 3
-            else -> 0
+            return legal.maxByOrNull { it.region } ?: legal.first()
         }
-        rolloutActive = rSteps > 0
-        rolloutSteps = rSteps
-        val rolloutScore = if (rSteps > 0) rolloutN(candidate.d, rSteps) else 0f
-        val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f + deadEndPenalty + rolloutScore * 0.5f
-
-                if (
-                    mixed >
-                    bestValue
-                ) {
-                    bestValue =
-                        mixed
-
-                    best =
-                        candidate.copy(
-                            qValue = q
-                        )
-                }
-            }
-
-            return best
-        }
-
         private fun gBuildState(): Int {
             val h =
                 gSnake.first()
@@ -9402,7 +8864,7 @@ data class V3StrategyGenome(
 
     var explorationBias: Float = 1.00f,
 
-    var qWeight: Float = 0.70f,
+    var 1.0f: Float = 0.70f,
 
     var brainWeight: Float = 0.30f,
 
@@ -9442,11 +8904,11 @@ data class V3StrategyGenome(
         explorationBias =
             explorationBias.coerceIn(0.2f, 2f)
 
-        qWeight =
-            qWeight.coerceIn(0.05f, 0.95f)
+        1.0f =
+            1.0f.coerceIn(0.05f, 0.95f)
 
         brainWeight =
-            1f - qWeight
+            1f - 1.0f
 
         mutationRate =
             mutationRate.coerceIn(0.005f, 0.35f)
@@ -9561,8 +9023,8 @@ data class V3StrategyGenome(
             explorationBias =
                 pick(explorationBias, other.explorationBias),
 
-            qWeight =
-                pick(qWeight, other.qWeight),
+            1.0f =
+                pick(1.0f, other.1.0f),
 
             brainWeight = 0f,
 
@@ -9623,7 +9085,7 @@ data class V3StrategyGenome(
             explorationBias += noise()
 
         if (Random.nextFloat() < mutationRate)
-            qWeight += noise() * 0.25f
+            1.0f += noise() * 0.25f
 
 
         normalize()
@@ -12255,7 +11717,7 @@ class V3ActionEvaluator(
              */
             val learned =
                 q[action.ordinal] *
-                        genome.qWeight +
+                        genome.1.0f +
 
                         brain[action.ordinal] *
                         genome.brainWeight
@@ -13747,8 +13209,8 @@ class AIEngineV3(
         child.genome.explorationBias =
             g.explorationBias
 
-        child.genome.qWeight =
-            g.qWeight
+        child.genome.1.0f =
+            g.1.0f
 
         child.genome.brainWeight =
             g.brainWeight
@@ -14062,8 +13524,8 @@ object V3EvolutionManager {
             child.genome.explorationBias =
                 genome.explorationBias
 
-            child.genome.qWeight =
-                genome.qWeight
+            child.genome.1.0f =
+                genome.1.0f
 
             child.genome.brainWeight =
                 genome.brainWeight
@@ -14251,3 +13713,5 @@ class SnakeAIV3Adapter(
  *
  * ============================================================
  */
+
+}
