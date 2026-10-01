@@ -133,6 +133,45 @@ class SnakeView @JvmOverloads constructor(
     private var running = false
 
     private var aiMode = 1
+
+    // ===== AI V3 =====
+    private val v3Engine = AIEngineV3()
+    private var v3PrevState: V3State? = null
+    private var v3PrevScore: Int = 0
+    private var v3Enabled = true
+
+    private fun toV3State(): V3State {
+        val bodyArr = IntArray(snake.size)
+        for (i in snake.indices) {
+            val p = snake.elementAt(i)
+            bodyArr[i] = p.y * cols + p.x
+        }
+        val dirV3 = when {
+            dir.x == 1 -> V3Action.RIGHT
+            dir.x == -1 -> V3Action.LEFT
+            dir.y == -1 -> V3Action.UP
+            else -> V3Action.DOWN
+        }
+        return V3State(
+            width = cols,
+            height = rows,
+            body = bodyArr,
+            food = food.y * cols + food.x,
+            direction = dirV3,
+            score = score,
+            steps = steps,
+            stepsSinceFood = hunger,
+            hunger = hunger.toFloat(),
+            gameOver = gameOver
+        )
+    }
+
+    private fun v3ActionToDir(a: V3Action): P = when(a) {
+        V3Action.UP -> P(0, -1)
+        V3Action.RIGHT -> P(1, 0)
+        V3Action.DOWN -> P(0, 1)
+        V3Action.LEFT -> P(-1, 0)
+    }
     private var forcedStrategy = -1
 
     private var gameSpeed = 220L
@@ -1457,6 +1496,8 @@ class SnakeView @JvmOverloads constructor(
 
         placeFood()
         lastFreeRegion = freeRegion(snake).toFloat()
+        v3PrevState = null
+        v3PrevScore = 0
 
         onScoreChanged?.invoke(score)
 
@@ -2123,6 +2164,24 @@ class SnakeView @JvmOverloads constructor(
      */
 
     private fun chooseMove(): P {
+        // AI V3 路径
+        if (v3Enabled && aiMode == 1) {
+            return try {
+                val state = toV3State()
+                val ateFood = score > v3PrevScore
+                v3PrevState?.let { prev ->
+                    v3Engine.feedback(nextState = state, ateFood = ateFood, died = gameOver)
+                }
+                v3PrevScore = score
+                val action = v3Engine.act(state)
+                v3PrevState = state
+                v3ActionToDir(action)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                dir
+            }
+        }
+
         aiStepStartNs =
             System.nanoTime()
 
@@ -6782,7 +6841,8 @@ class SnakeView @JvmOverloads constructor(
 
     private inner class TrainGame(
         seed: Long,
-        private val runId: Long
+        private val runId: Long,
+        val v3: AIEngineV3 = AIEngineV3()
     ) {
         val rng =
             Random(seed)
@@ -6929,6 +6989,8 @@ class SnakeView @JvmOverloads constructor(
                     it == mv
                 }.coerceAtLeast(0)
 
+            val prevScore = gScore
+
             if (
                 !gIsReverse(
                     mv,
@@ -6946,6 +7008,33 @@ class SnakeView @JvmOverloads constructor(
                         gDir.y
                 )
 
+            fun v3Feedback(died: Boolean) {
+                try {
+                    val bodyArr = IntArray(gSnake.size)
+                    for (i in gSnake.indices) {
+                        val p = gSnake.elementAt(i)
+                        bodyArr[i] = p.y * cols + p.x
+                    }
+                    val dirV3 = when {
+                        gDir.x == 1 -> V3Action.RIGHT
+                        gDir.x == -1 -> V3Action.LEFT
+                        gDir.y == -1 -> V3Action.UP
+                        else -> V3Action.DOWN
+                    }
+                    val next = V3State(
+                        width = cols, height = rows,
+                        body = bodyArr,
+                        food = gFood.y * cols + gFood.x,
+                        direction = dirV3,
+                        score = gScore, steps = gSteps,
+                        stepsSinceFood = gHunger,
+                        hunger = gHunger.toFloat(),
+                        gameOver = gOver
+                    )
+                    v3.feedback(nextState = next, ateFood = gScore > prevScore, died = died)
+                } catch (e: Exception) {}
+            }
+
             if (!gInside(nh)) {
                 gTerminal(
                     state,
@@ -6957,6 +7046,7 @@ class SnakeView @JvmOverloads constructor(
                     "WALL"
 
                 gOver = true
+                v3Feedback(true)
                 return
             }
 
@@ -7016,6 +7106,7 @@ class SnakeView @JvmOverloads constructor(
                     cause
 
                 gOver = true
+                v3Feedback(true)
                 return
             }
 
@@ -7095,6 +7186,7 @@ class SnakeView @JvmOverloads constructor(
                     "HUNGER"
 
                 gOver = true
+                v3Feedback(true)
                 return
             }
 
@@ -7103,6 +7195,8 @@ class SnakeView @JvmOverloads constructor(
 
             val nextMask =
                 gLegalMask()
+
+            v3Feedback(false)
 
             qUpdate(
                 state,
@@ -7141,6 +7235,40 @@ class SnakeView @JvmOverloads constructor(
         fun gChooseMove(
             state: Int
         ): P {
+            // V3 决策路径
+            try {
+                val bodyArr = IntArray(gSnake.size)
+                for (i in gSnake.indices) {
+                    val p = gSnake.elementAt(i)
+                    bodyArr[i] = p.y * cols + p.x
+                }
+                val dirV3 = when {
+                    gDir.x == 1 -> V3Action.RIGHT
+                    gDir.x == -1 -> V3Action.LEFT
+                    gDir.y == -1 -> V3Action.UP
+                    else -> V3Action.DOWN
+                }
+                val v3state = V3State(
+                    width = cols, height = rows,
+                    body = bodyArr,
+                    food = gFood.y * cols + gFood.x,
+                    direction = dirV3,
+                    score = gScore,
+                    steps = gSteps,
+                    stepsSinceFood = gHunger,
+                    hunger = gHunger.toFloat(),
+                    gameOver = gOver
+                )
+                v3.setTrainingEnabled(true)
+                val a = v3.act(v3state)
+                return when(a) {
+                    V3Action.UP -> P(0, -1)
+                    V3Action.RIGHT -> P(1, 0)
+                    V3Action.DOWN -> P(0, 1)
+                    V3Action.LEFT -> P(-1, 0)
+                }
+            } catch (e: Exception) {}
+
             val cands =
                 dirs.map {
                     gEvaluate(it)
@@ -8854,3 +8982,5201 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 }
+
+﻿package com.example.snake
+
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.tanh
+import kotlin.random.Random
+import java.util.ArrayDeque
+import java.util.LinkedHashMap
+
+/*
+ * ============================================================
+ *                         AI V3
+ * ============================================================
+ *
+ * 核心：
+ *
+ *   State
+ *      ↓
+ *   Goal
+ *      ↓
+ *   Q + Brain + Environment
+ *      ↓
+ *   Counterfactual
+ *      ↓
+ *   Action
+ *      ↓
+ *   Game Result
+ *      ↓
+ *   Reward
+ *      ↓
+ *   Death Analysis
+ *      ↓
+ *   Failure Memory
+ *      ↓
+ *   Self Adjustment
+ *      ↓
+ *   Genetic Evolution
+ *
+ * AI 不直接修改 SnakeView 的游戏世界。
+ *
+ * SnakeView：
+ *   负责游戏
+ *
+ * AI V3：
+ *   只负责观察、学习、判断和返回动作。
+ *
+ * ============================================================
+ */
+
+
+/* ============================================================
+ * 1. ACTION
+ * ============================================================
+ */
+
+enum class V3Action {
+    UP,
+    RIGHT,
+    DOWN,
+    LEFT
+}
+
+
+/* ============================================================
+ * 2. CURRENT GOAL
+ * ============================================================
+ */
+
+enum class V3Goal {
+
+    GET_FOOD,
+
+    PRESERVE_SPACE,
+
+    REACH_TAIL,
+
+    ESCAPE_DANGER,
+
+    BREAK_LOOP,
+
+    SURVIVE
+}
+
+
+/* ============================================================
+ * 3. DEATH REASON
+ * ============================================================
+ */
+
+enum class V3DeathReason {
+
+    HIT_WALL,
+
+    HIT_SELF,
+
+    TRAPPED,
+
+    DEAD_END,
+
+    LOOP,
+
+    SPACE_COLLAPSE,
+
+    TAIL_CUTOFF,
+
+    HUNGER,
+
+    UNKNOWN
+}
+
+
+/* ============================================================
+ * 4. STATE
+ * ============================================================
+ *
+ * body:
+ *   head first
+ *   tail last
+ *
+ * cell = y * width + x
+ *
+ */
+
+data class V3State(
+
+    val width: Int,
+
+    val height: Int,
+
+    val body: IntArray,
+
+    val food: Int,
+
+    val direction: V3Action,
+
+    val score: Int = 0,
+
+    val steps: Int = 0,
+
+    val stepsSinceFood: Int = 0,
+
+    val hunger: Float = 0f,
+
+    val gameOver: Boolean = false,
+
+    val recentHashes: LongArray = longArrayOf()
+) {
+
+    val cells: Int
+        get() = width * height
+
+    val head: Int
+        get() = if (body.isNotEmpty()) body[0] else 0
+
+    val tail: Int
+        get() = if (body.isNotEmpty()) body[body.size - 1] else head
+
+    fun copyDeep(): V3State {
+        return copy(
+            body = body.clone(),
+            recentHashes = recentHashes.clone()
+        )
+    }
+}
+
+
+/* ============================================================
+ * 5. ENCODED STATE
+ * ============================================================
+ */
+
+data class V3EncodedState(
+
+    val values: FloatArray,
+
+    val hash: Long
+)
+
+
+/* ============================================================
+ * 6. ACTION EVALUATION
+ * ============================================================
+ */
+
+data class V3ActionEvaluation(
+
+    val action: V3Action,
+
+    val qValue: Float,
+
+    val brainValue: Float,
+
+    val foodValue: Float,
+
+    val spaceValue: Float,
+
+    val tailValue: Float,
+
+    val dangerValue: Float,
+
+    val loopValue: Float,
+
+    val counterfactualValue: Float,
+
+    val memoryPenalty: Float,
+
+    val finalValue: Float,
+
+    val immediateDeath: Boolean
+)
+
+
+/* ============================================================
+ * 7. DECISION TRACE
+ * ============================================================
+ */
+
+data class V3Decision(
+
+    val action: V3Action,
+
+    val goal: V3Goal,
+
+    val evaluations: List<V3ActionEvaluation>,
+
+    val explored: Boolean
+)
+
+
+/* ============================================================
+ * 8. EXPERIENCE
+ * ============================================================
+ */
+
+data class V3Experience(
+
+    val state: V3EncodedState,
+
+    val action: V3Action,
+
+    val reward: Float,
+
+    val nextState: V3EncodedState?,
+
+    val done: Boolean,
+
+    val deathReason: V3DeathReason? = null,
+
+    val priority: Float = 1f
+)
+
+
+/* ============================================================
+ * 9. DEATH REPORT
+ * ============================================================
+ */
+
+data class V3DeathReport(
+
+    val reason: V3DeathReason,
+
+    val action: V3Action?,
+
+    val stateHash: Long,
+
+    val avoidable: Boolean,
+
+    val bestAlternative: V3Action?,
+
+    val regret: Float,
+
+    val freeSpace: Int,
+
+    val safeActions: Int,
+
+    val tailReachable: Boolean,
+
+    val foodDistance: Int,
+
+    val repeatedFailure: Int
+)
+
+
+/* ============================================================
+ * 10. LESSON
+ * ============================================================
+ */
+
+data class V3Lesson(
+
+    val contextHash: Long,
+
+    val badAction: V3Action,
+
+    val reason: V3DeathReason,
+
+    var penalty: Float,
+
+    var confidence: Float,
+
+    var occurrences: Int = 1,
+
+    var alternative: V3Action? = null
+)
+
+
+/* ============================================================
+ * 11. STRATEGY GENOME
+ * ============================================================
+ *
+ * 每个 AI 都有自己的“行为性格”。
+ *
+ */
+
+data class V3StrategyGenome(
+
+    var foodPriority: Float = 1.00f,
+
+    var spacePriority: Float = 1.25f,
+
+    var tailPriority: Float = 0.90f,
+
+    var dangerAversion: Float = 1.40f,
+
+    var loopAversion: Float = 0.80f,
+
+    var hungerUrgency: Float = 0.80f,
+
+    var explorationBias: Float = 1.00f,
+
+    var qWeight: Float = 0.70f,
+
+    var brainWeight: Float = 0.30f,
+
+    var mutationRate: Float = 0.08f,
+
+    var mutationSigma: Float = 0.12f,
+
+    var lookaheadDepth: Int = 2
+) {
+
+    fun deepCopy(): V3StrategyGenome {
+
+        return copy()
+    }
+
+
+    fun normalize() {
+
+        foodPriority =
+            foodPriority.coerceIn(0.1f, 3f)
+
+        spacePriority =
+            spacePriority.coerceIn(0.1f, 3f)
+
+        tailPriority =
+            tailPriority.coerceIn(0.1f, 3f)
+
+        dangerAversion =
+            dangerAversion.coerceIn(0.1f, 3f)
+
+        loopAversion =
+            loopAversion.coerceIn(0.1f, 3f)
+
+        hungerUrgency =
+            hungerUrgency.coerceIn(0.1f, 3f)
+
+        explorationBias =
+            explorationBias.coerceIn(0.2f, 2f)
+
+        qWeight =
+            qWeight.coerceIn(0.05f, 0.95f)
+
+        brainWeight =
+            1f - qWeight
+
+        mutationRate =
+            mutationRate.coerceIn(0.005f, 0.35f)
+
+        mutationSigma =
+            mutationSigma.coerceIn(0.01f, 0.5f)
+
+        lookaheadDepth =
+            lookaheadDepth.coerceIn(1, 3)
+    }
+
+
+    /*
+     * AI 根据自己的死亡原因调整策略。
+     */
+    fun selfAdjust(
+
+        reason: V3DeathReason,
+
+        repeated: Boolean,
+
+        avoidable: Boolean
+
+    ) {
+
+        val amount =
+            if (repeated) 0.08f
+            else 0.035f
+
+        when (reason) {
+
+            V3DeathReason.HIT_WALL,
+            V3DeathReason.HIT_SELF -> {
+
+                dangerAversion += amount
+            }
+
+            V3DeathReason.TRAPPED,
+            V3DeathReason.DEAD_END,
+            V3DeathReason.SPACE_COLLAPSE -> {
+
+                spacePriority += amount
+            }
+
+            V3DeathReason.TAIL_CUTOFF -> {
+
+                tailPriority += amount
+            }
+
+            V3DeathReason.LOOP -> {
+
+                loopAversion += amount
+            }
+
+            V3DeathReason.HUNGER -> {
+
+                hungerUrgency += amount
+            }
+
+            V3DeathReason.UNKNOWN -> {
+
+                dangerAversion += amount * 0.25f
+            }
+        }
+
+
+        if (avoidable) {
+
+            explorationBias -= 0.01f
+        }
+
+
+        normalize()
+    }
+
+
+    /*
+     * 两个优秀 Agent 的策略交叉。
+     */
+    fun crossover(
+        other: V3StrategyGenome
+    ): V3StrategyGenome {
+
+        fun pick(
+            a: Float,
+            b: Float
+        ): Float {
+
+            return if (Random.nextBoolean()) a else b
+        }
+
+        return V3StrategyGenome(
+
+            foodPriority =
+                pick(foodPriority, other.foodPriority),
+
+            spacePriority =
+                pick(spacePriority, other.spacePriority),
+
+            tailPriority =
+                pick(tailPriority, other.tailPriority),
+
+            dangerAversion =
+                pick(dangerAversion, other.dangerAversion),
+
+            loopAversion =
+                pick(loopAversion, other.loopAversion),
+
+            hungerUrgency =
+                pick(hungerUrgency, other.hungerUrgency),
+
+            explorationBias =
+                pick(explorationBias, other.explorationBias),
+
+            qWeight =
+                pick(qWeight, other.qWeight),
+
+            brainWeight = 0f,
+
+            mutationRate =
+                pick(mutationRate, other.mutationRate),
+
+            mutationSigma =
+                pick(mutationSigma, other.mutationSigma),
+
+            lookaheadDepth =
+                max(
+                    lookaheadDepth,
+                    other.lookaheadDepth
+                )
+        ).also {
+
+            it.normalize()
+        }
+    }
+
+
+    /*
+     * 基因突变。
+     */
+    fun mutate(
+        scale: Float = 1f
+    ) {
+
+        fun noise(): Float {
+
+            return (
+                    Random.nextFloat() * 2f - 1f
+                    ) *
+                    mutationSigma *
+                    scale
+        }
+
+
+        if (Random.nextFloat() < mutationRate)
+            foodPriority += noise()
+
+        if (Random.nextFloat() < mutationRate)
+            spacePriority += noise()
+
+        if (Random.nextFloat() < mutationRate)
+            tailPriority += noise()
+
+        if (Random.nextFloat() < mutationRate)
+            dangerAversion += noise()
+
+        if (Random.nextFloat() < mutationRate)
+            loopAversion += noise()
+
+        if (Random.nextFloat() < mutationRate)
+            hungerUrgency += noise()
+
+        if (Random.nextFloat() < mutationRate)
+            explorationBias += noise()
+
+        if (Random.nextFloat() < mutationRate)
+            qWeight += noise() * 0.25f
+
+
+        normalize()
+    }
+}
+
+
+/* ============================================================
+ * 12. BOARD TOOLS
+ * ============================================================
+ */
+
+object V3Board {
+
+
+    private fun point(
+        state: V3State,
+        cell: Int
+    ): Pair<Int, Int> {
+
+        return Pair(
+            cell % state.width,
+            cell / state.width
+        )
+    }
+
+
+    fun step(
+        state: V3State,
+        cell: Int,
+        action: V3Action
+    ): Int {
+
+        val p = point(state, cell)
+
+        val x = p.first
+
+        val y = p.second
+
+
+        val nx: Int
+
+        val ny: Int
+
+
+        when (action) {
+
+            V3Action.UP -> {
+
+                nx = x
+                ny = y - 1
+            }
+
+            V3Action.RIGHT -> {
+
+                nx = x + 1
+                ny = y
+            }
+
+            V3Action.DOWN -> {
+
+                nx = x
+                ny = y + 1
+            }
+
+            V3Action.LEFT -> {
+
+                nx = x - 1
+                ny = y
+            }
+        }
+
+
+        if (
+            nx < 0 ||
+            nx >= state.width ||
+            ny < 0 ||
+            ny >= state.height
+        ) {
+
+            return -1
+        }
+
+
+        return ny * state.width + nx
+    }
+
+
+    fun opposite(
+        action: V3Action
+    ): V3Action {
+
+        return when (action) {
+
+            V3Action.UP ->
+                V3Action.DOWN
+
+            V3Action.RIGHT ->
+                V3Action.LEFT
+
+            V3Action.DOWN ->
+                V3Action.UP
+
+            V3Action.LEFT ->
+                V3Action.RIGHT
+        }
+    }
+
+
+    fun left(
+        action: V3Action
+    ): V3Action {
+
+        return when (action) {
+
+            V3Action.UP ->
+                V3Action.LEFT
+
+            V3Action.LEFT ->
+                V3Action.DOWN
+
+            V3Action.DOWN ->
+                V3Action.RIGHT
+
+            V3Action.RIGHT ->
+                V3Action.UP
+        }
+    }
+
+
+    fun right(
+        action: V3Action
+    ): V3Action {
+
+        return when (action) {
+
+            V3Action.UP ->
+                V3Action.RIGHT
+
+            V3Action.RIGHT ->
+                V3Action.DOWN
+
+            V3Action.DOWN ->
+                V3Action.LEFT
+
+            V3Action.LEFT ->
+                V3Action.UP
+        }
+    }
+
+
+    fun occupied(
+        state: V3State
+    ): BooleanArray {
+
+        val result =
+            BooleanArray(state.cells)
+
+
+        for (cell in state.body) {
+
+            if (cell in result.indices) {
+
+                result[cell] = true
+            }
+        }
+
+
+        return result
+    }
+
+
+    /*
+     * 判断动作是不是立即死亡。
+     */
+    fun immediateDeath(
+        state: V3State,
+        action: V3Action
+    ): Boolean {
+
+        if (
+            action == opposite(state.direction) &&
+            state.body.size > 1
+        ) {
+
+            return true
+        }
+
+
+        val next =
+            step(
+                state,
+                state.head,
+                action
+            )
+
+
+        if (next < 0) {
+
+            return true
+        }
+
+
+        val occupied =
+            occupied(state)
+
+
+        if (!occupied[next]) {
+
+            return false
+        }
+
+
+        /*
+         * 尾巴本步通常会移动。
+         */
+        if (next == state.tail) {
+
+            return false
+        }
+
+
+        return true
+    }
+
+
+    fun legalActions(
+        state: V3State
+    ): List<V3Action> {
+
+        return V3Action.values()
+            .filter {
+                !immediateDeath(
+                    state,
+                    it
+                )
+            }
+    }
+
+
+    /*
+     * 抽象模拟。
+     *
+     * 注意：
+     * 不修改真实 SnakeView。
+     */
+    fun simulate(
+        state: V3State,
+        action: V3Action
+    ): V3State? {
+
+        if (
+            immediateDeath(
+                state,
+                action
+            )
+        ) {
+
+            return null
+        }
+
+
+        val next =
+            step(
+                state,
+                state.head,
+                action
+            )
+
+
+        if (next < 0) {
+
+            return null
+        }
+
+
+        val ate =
+            next == state.food
+
+
+        val newSize =
+            if (ate)
+                state.body.size + 1
+            else
+                state.body.size
+
+
+        val newBody =
+            IntArray(newSize)
+
+
+        newBody[0] = next
+
+
+        for (i in 1 until newSize) {
+
+            newBody[i] =
+                state.body[i - 1]
+        }
+
+
+        return state.copy(
+
+            body = newBody,
+
+            direction = action,
+
+            food =
+                if (ate)
+                    -1
+                else
+                    state.food,
+
+            steps =
+                state.steps + 1,
+
+            stepsSinceFood =
+                if (ate)
+                    0
+                else
+                    state.stepsSinceFood + 1,
+
+            hunger =
+                if (ate)
+                    0f
+                else
+                    min(
+                        1f,
+                        state.hunger + 0.002f
+                    )
+        )
+    }
+
+
+    /*
+     * BFS 计算自由空间。
+     */
+    fun freeSpace(
+        state: V3State
+    ): Int {
+
+        val blocked =
+            occupied(state)
+
+        val seen =
+            BooleanArray(state.cells)
+
+        val queue =
+            ArrayDeque<Int>()
+
+
+        queue.add(state.head)
+
+        seen[state.head] = true
+
+
+        var count = 0
+
+
+        while (queue.isNotEmpty()) {
+
+            val cell =
+                queue.removeFirst()
+
+            count++
+
+
+            val x =
+                cell % state.width
+
+            val y =
+                cell / state.width
+
+
+            val neighbours =
+                intArrayOf(
+
+                    if (y > 0)
+                        cell - state.width
+                    else -1,
+
+                    if (x + 1 < state.width)
+                        cell + 1
+                    else -1,
+
+                    if (y + 1 < state.height)
+                        cell + state.width
+                    else -1,
+
+                    if (x > 0)
+                        cell - 1
+                    else -1
+                )
+
+
+            for (next in neighbours) {
+
+                if (
+                    next >= 0 &&
+                    !seen[next] &&
+                    (
+                            !blocked[next] ||
+                            next == state.tail
+                            )
+                ) {
+
+                    seen[next] = true
+
+                    queue.add(next)
+                }
+            }
+        }
+
+
+        return count
+    }
+
+
+    /*
+     * 判断蛇头能不能找到尾巴。
+     */
+    fun tailReachable(
+        state: V3State
+    ): Pair<Boolean, Int> {
+
+        val blocked =
+            occupied(state)
+
+        blocked[state.head] = false
+        blocked[state.tail] = false
+
+
+        val distance =
+            IntArray(state.cells) {
+                -1
+            }
+
+
+        val queue =
+            ArrayDeque<Int>()
+
+
+        queue.add(state.head)
+
+        distance[state.head] = 0
+
+
+        while (queue.isNotEmpty()) {
+
+            val cell =
+                queue.removeFirst()
+
+
+            if (cell == state.tail) {
+
+                return Pair(
+                    true,
+                    distance[cell]
+                )
+            }
+
+
+            val x =
+                cell % state.width
+
+            val y =
+                cell / state.width
+
+
+            val neighbours =
+                intArrayOf(
+
+                    if (y > 0)
+                        cell - state.width
+                    else -1,
+
+                    if (x + 1 < state.width)
+                        cell + 1
+                    else -1,
+
+                    if (y + 1 < state.height)
+                        cell + state.width
+                    else -1,
+
+                    if (x > 0)
+                        cell - 1
+                    else -1
+                )
+
+
+            for (next in neighbours) {
+
+                if (
+                    next >= 0 &&
+                    distance[next] < 0 &&
+                    !blocked[next]
+                ) {
+
+                    distance[next] =
+                        distance[cell] + 1
+
+                    queue.add(next)
+                }
+            }
+        }
+
+
+        return Pair(
+            false,
+            Int.MAX_VALUE
+        )
+    }
+}
+
+
+/* ============================================================
+ * 13. STATE ENCODER
+ * ============================================================
+ */
+
+class V3StateEncoder {
+
+
+    companion object {
+
+        /*
+         * 固定输入维度。
+         */
+        const val INPUTS = 64
+    }
+
+
+    fun encode(
+        state: V3State
+    ): V3EncodedState {
+
+        val values =
+            FloatArray(INPUTS)
+
+
+        var index = 0
+
+
+        fun put(
+            value: Float
+        ) {
+
+            if (
+                index < values.size
+            ) {
+
+                values[index++] =
+                    value.coerceIn(
+                        -1f,
+                        1f
+                    )
+            }
+        }
+
+
+        val hx =
+            state.head % state.width
+
+        val hy =
+            state.head / state.width
+
+
+        val fx =
+            if (state.food >= 0)
+                state.food % state.width
+            else
+                hx
+
+
+        val fy =
+            if (state.food >= 0)
+                state.food / state.width
+            else
+                hy
+
+
+        val scale =
+            max(
+                1,
+                state.width + state.height
+            ).toFloat()
+
+
+        /*
+         * 食物相对位置。
+         */
+        put(
+            (fx - hx) / scale
+        )
+
+        put(
+            (fy - hy) / scale
+        )
+
+        put(
+            abs(fx - hx) /
+                    max(
+                        1f,
+                        state.width.toFloat()
+                    )
+        )
+
+        put(
+            abs(fy - hy) /
+                    max(
+                        1f,
+                        state.height.toFloat()
+                    )
+        )
+
+
+        /*
+         * 当前方向 one-hot。
+         */
+        for (action in V3Action.values()) {
+
+            put(
+                if (
+                    action == state.direction
+                )
+                    1f
+                else
+                    0f
+            )
+        }
+
+
+        /*
+         * 四方向扫描。
+         */
+        val occupied =
+            V3Board.occupied(state)
+
+
+        for (action in V3Action.values()) {
+
+            var cell =
+                state.head
+
+            var distance = 0
+
+            var bodySeen = false
+
+            var foodSeen = false
+
+
+            repeat(
+                max(
+                    state.width,
+                    state.height
+                )
+            ) {
+
+                cell =
+                    V3Board.step(
+                        state,
+                        cell,
+                        action
+                    )
+
+
+                if (cell < 0) {
+
+                    return@repeat
+                }
+
+
+                distance++
+
+
+                if (occupied[cell]) {
+
+                    bodySeen = true
+
+                    return@repeat
+                }
+
+
+                if (
+                    cell == state.food
+                ) {
+
+                    foodSeen = true
+                }
+            }
+
+
+            put(
+                distance / scale
+            )
+
+            put(
+                if (bodySeen)
+                    1f
+                else
+                    0f
+            )
+
+            put(
+                if (foodSeen)
+                    1f
+                else
+                    0f
+            )
+        }
+
+
+        /*
+         * 当前四方向危险。
+         */
+        put(
+            if (
+                V3Board.immediateDeath(
+                    state,
+                    state.direction
+                )
+            )
+                1f
+            else
+                0f
+        )
+
+
+        put(
+            if (
+                V3Board.immediateDeath(
+                    state,
+                    V3Board.left(
+                        state.direction
+                    )
+                )
+            )
+                1f
+            else
+                0f
+        )
+
+
+        put(
+            if (
+                V3Board.immediateDeath(
+                    state,
+                    V3Board.right(
+                        state.direction
+                    )
+                )
+            )
+                1f
+            else
+                0f
+        )
+
+
+        put(
+            if (
+                V3Board.immediateDeath(
+                    state,
+                    V3Board.opposite(
+                        state.direction
+                    )
+                )
+            )
+                1f
+            else
+                0f
+        )
+
+
+        /*
+         * 空间。
+         */
+        val free =
+            V3Board.freeSpace(state)
+
+
+        put(
+            free.toFloat() /
+                    max(
+                        1,
+                        state.cells
+                    )
+        )
+
+
+        /*
+         * 安全动作数量。
+         */
+        put(
+            V3Board.legalActions(state)
+                .size
+                .toFloat() /
+                    3f
+        )
+
+
+        /*
+         * 尾巴。
+         */
+        val tail =
+            V3Board.tailReachable(state)
+
+
+        put(
+            if (tail.first)
+                1f
+            else
+                0f
+        )
+
+
+        put(
+            if (
+                tail.second == Int.MAX_VALUE
+            )
+                1f
+            else
+                min(
+                    1f,
+                    tail.second / scale
+                )
+        )
+
+
+        /*
+         * Hunger。
+         */
+        put(state.hunger)
+
+
+        /*
+         * Snake 长度。
+         */
+        put(
+            state.body.size.toFloat() /
+                    max(
+                        1,
+                        state.cells
+                    )
+        )
+
+
+        /*
+         * 时间。
+         */
+        put(
+            min(
+                1f,
+                state.steps / 5000f
+            )
+        )
+
+
+        /*
+         * Loop risk。
+         */
+        put(
+            loopRisk(state)
+        )
+
+
+        /*
+         * Food 是否存在。
+         */
+        put(
+            if (state.food >= 0)
+                1f
+            else
+                0f
+        )
+
+
+        /*
+         * Score。
+         */
+        put(
+            min(
+                1f,
+                state.score / 1000f
+            )
+        )
+
+
+        /*
+         * Steps since food。
+         */
+        put(
+            min(
+                1f,
+                state.stepsSinceFood / 1000f
+            )
+        )
+
+
+        /*
+         * Body density。
+         */
+        put(
+            state.body.size.toFloat() /
+                    max(
+                        1,
+                        state.cells
+                    )
+        )
+
+
+        /*
+         * 再加入八方向局部感知。
+         */
+        val directions =
+            arrayOf(
+
+                V3Action.UP,
+
+                V3Action.RIGHT,
+
+                V3Action.DOWN,
+
+                V3Action.LEFT,
+
+                V3Board.left(V3Action.UP),
+
+                V3Board.right(V3Action.UP),
+
+                V3Board.left(V3Action.DOWN),
+
+                V3Board.right(V3Action.DOWN)
+            )
+
+
+        for (action in directions) {
+
+            var cell =
+                state.head
+
+            var distance = 0
+
+            var hitBody = 0
+
+            var hitFood = 0
+
+
+            repeat(4) {
+
+                cell =
+                    V3Board.step(
+                        state,
+                        cell,
+                        action
+                    )
+
+
+                if (cell < 0) {
+
+                    return@repeat
+                }
+
+
+                distance++
+
+
+                if (
+                    occupied[cell]
+                ) {
+
+                    hitBody = 1
+
+                    return@repeat
+                }
+
+
+                if (
+                    cell == state.food
+                ) {
+
+                    hitFood = 1
+                }
+            }
+
+
+            put(
+                distance / 4f
+            )
+
+            put(
+                hitBody.toFloat()
+            )
+
+            put(
+                hitFood.toFloat()
+            )
+        }
+
+
+        /*
+         * 没填满的全部补 0。
+         */
+        while (
+            index < values.size
+        ) {
+
+            values[index++] = 0f
+        }
+
+
+        /*
+         * 状态 Hash。
+         */
+        var hash =
+            -3750763034362895579L
+
+
+        for (value in values) {
+
+            hash =
+                (
+                        hash xor
+                                value.toBits().toLong()
+                        ) *
+                        1099511628211L
+        }
+
+
+        for (cell in state.body) {
+
+            hash =
+                (
+                        hash xor
+                                cell.toLong()
+                        ) *
+                        1099511628211L
+        }
+
+
+        hash =
+            (
+                    hash xor
+                            state.food.toLong()
+                    ) *
+                    1099511628211L
+
+
+        hash =
+            (
+                    hash xor
+                            state.direction.ordinal.toLong()
+                    ) *
+                    1099511628211L
+
+
+        return V3EncodedState(
+            values,
+            hash
+        )
+    }
+
+
+    private fun loopRisk(
+        state: V3State
+    ): Float {
+
+        if (
+            state.recentHashes.size < 6
+        ) {
+
+            return 0f
+        }
+
+
+        val last =
+            state.recentHashes
+                .takeLast(6)
+
+
+        val unique =
+            last.toSet().size
+
+
+        return (
+                1f -
+                        unique / 6f
+                )
+            .coerceIn(
+                0f,
+                1f
+            )
+    }
+}
+
+
+/* ============================================================
+ * 14. DOUBLE-Q LEARNER
+ * ============================================================
+ */
+
+class V3QLearner(
+
+    private val gamma: Float = 0.97f,
+
+    private val learningRate: Float = 0.003f,
+
+    private val maxStates: Int = 100000
+
+) {
+
+
+    private val online =
+        LinkedHashMap<Long, FloatArray>()
+
+
+    private val target =
+        HashMap<Long, FloatArray>()
+
+
+    var learningSteps: Long = 0
+        private set
+
+
+    var meanTdError: Float = 0f
+        private set
+
+
+    @Synchronized
+    private fun valuesInternal(
+        table: MutableMap<Long, FloatArray>,
+        hash: Long
+    ): FloatArray {
+
+        var q =
+            table[hash]
+
+
+        if (q == null) {
+
+            if (
+                table === online &&
+                online.size >= maxStates
+            ) {
+
+                val iterator =
+                    online.entries.iterator()
+
+
+                if (
+                    iterator.hasNext()
+                ) {
+
+                    iterator.next()
+
+                    iterator.remove()
+                }
+            }
+
+
+            q = FloatArray(4)
+
+            table[hash] = q
+        }
+
+
+        return q
+    }
+
+
+    @Synchronized
+    fun values(
+        hash: Long
+    ): FloatArray {
+
+        return valuesInternal(
+            online,
+            hash
+        ).clone()
+    }
+
+
+    /*
+     * Double-Q style：
+
+     * Online 决定下一动作。
+     *
+     * Target 估计下一动作。
+     */
+    @Synchronized
+    fun learn(
+        experience: V3Experience
+    ) {
+
+        val q =
+            valuesInternal(
+                online,
+                experience.state.hash
+            )
+
+
+        val action =
+            experience.action.ordinal
+
+
+        val targetValue: Float
+
+
+        if (
+            experience.done ||
+            experience.nextState == null
+        ) {
+
+            targetValue =
+                experience.reward
+
+        } else {
+
+            val nextOnline =
+                valuesInternal(
+                    online,
+                    experience.nextState.hash
+                )
+
+
+            var bestAction = 0
+
+
+            for (
+                i in 1 until nextOnline.size
+            ) {
+
+                if (
+                    nextOnline[i] >
+                    nextOnline[bestAction]
+                ) {
+
+                    bestAction = i
+                }
+            }
+
+
+            val targetQ =
+                valuesInternal(
+                    target,
+                    experience.nextState.hash
+                )
+
+
+            targetValue =
+                experience.reward +
+                        gamma *
+                        targetQ[bestAction]
+        }
+
+
+        val clipped =
+            targetValue.coerceIn(
+                -20f,
+                20f
+            )
+
+
+        val td =
+            clipped - q[action]
+
+
+        q[action] =
+            (
+                    q[action] +
+                            learningRate *
+                            td
+                    )
+                .coerceIn(
+                    -20f,
+                    20f
+                )
+
+
+        learningSteps++
+
+
+        meanTdError =
+            meanTdError * 0.995f +
+                    abs(td) * 0.005f
+    }
+
+
+    @Synchronized
+    fun syncTarget() {
+
+        target.clear()
+
+
+        for (
+            entry in online
+        ) {
+
+            target[
+                entry.key
+            ] =
+                entry.value.clone()
+        }
+    }
+
+
+    @Synchronized
+    fun clear() {
+
+        online.clear()
+
+        target.clear()
+
+        learningSteps = 0
+
+        meanTdError = 0f
+    }
+}
+
+
+/* ============================================================
+ * 15. TINY BRAIN
+ * ============================================================
+ *
+ * 一个不依赖 TensorFlow / PyTorch 的轻量神经网络。
+ *
+ * 64
+ *  ↓
+ * 64
+ *  ↓
+ * 32
+ *  ↓
+ * 4
+ *
+ */
+
+class V3TinyBrain(
+
+    private val inputSize: Int =
+        V3StateEncoder.INPUTS,
+
+    private val hidden1Size: Int = 64,
+
+    private val hidden2Size: Int = 32,
+
+    private val outputSize: Int = 4,
+
+    private var learningRate: Float = 0.001f
+
+) {
+
+
+    private val w1 =
+        Array(hidden1Size) {
+
+            FloatArray(inputSize) {
+
+                Random.nextFloat() *
+                        0.08f -
+                        0.04f
+            }
+        }
+
+
+    private val b1 =
+        FloatArray(hidden1Size)
+
+
+    private val w2 =
+        Array(hidden2Size) {
+
+            FloatArray(hidden1Size) {
+
+                Random.nextFloat() *
+                        0.08f -
+                        0.04f
+            }
+        }
+
+
+    private val b2 =
+        FloatArray(hidden2Size)
+
+
+    private val w3 =
+        Array(outputSize) {
+
+            FloatArray(hidden2Size) {
+
+                Random.nextFloat() *
+                        0.08f -
+                        0.04f
+            }
+        }
+
+
+    private val b3 =
+        FloatArray(outputSize)
+
+
+    fun forward(
+        input: FloatArray
+    ): FloatArray {
+
+        val h1 =
+            FloatArray(hidden1Size)
+
+
+        for (i in 0 until hidden1Size) {
+
+            var value =
+                b1[i]
+
+
+            for (
+                j in input.indices
+            ) {
+
+                value +=
+                    w1[i][j] *
+                            input[j]
+            }
+
+
+            h1[i] =
+                tanh(value)
+                    .toFloat()
+        }
+
+
+        val h2 =
+            FloatArray(hidden2Size)
+
+
+        for (i in 0 until hidden2Size) {
+
+            var value =
+                b2[i]
+
+
+            for (
+                j in 0 until hidden1Size
+            ) {
+
+                value +=
+                    w2[i][j] *
+                            h1[j]
+            }
+
+
+            h2[i] =
+                tanh(value)
+                    .toFloat()
+        }
+
+
+        return FloatArray(
+            outputSize
+        ) { action ->
+
+            var value =
+                b3[action]
+
+
+            for (
+                j in 0 until hidden2Size
+            ) {
+
+                value +=
+                    w3[action][j] *
+                            h2[j]
+            }
+
+
+            value.coerceIn(
+                -20f,
+                20f
+            )
+        }
+    }
+
+
+    /*
+     * 对指定 action 做一次梯度更新。
+     */
+    fun train(
+        input: FloatArray,
+        action: Int,
+        target: Float
+    ) {
+
+        val h1 =
+            FloatArray(hidden1Size)
+
+
+        for (i in 0 until hidden1Size) {
+
+            var value =
+                b1[i]
+
+
+            for (
+                j in input.indices
+            ) {
+
+                value +=
+                    w1[i][j] *
+                            input[j]
+            }
+
+
+            h1[i] =
+                tanh(value)
+                    .toFloat()
+        }
+
+
+        val h2 =
+            FloatArray(hidden2Size)
+
+
+        for (i in 0 until hidden2Size) {
+
+            var value =
+                b2[i]
+
+
+            for (
+                j in 0 until hidden1Size
+            ) {
+
+                value +=
+                    w2[i][j] *
+                            h1[j]
+            }
+
+
+            h2[i] =
+                tanh(value)
+                    .toFloat()
+        }
+
+
+        var output =
+            b3[action]
+
+
+        for (
+            j in 0 until hidden2Size
+        ) {
+
+            output +=
+                w3[action][j] *
+                        h2[j]
+        }
+
+
+        val error =
+            (
+                    target -
+                            output
+                    )
+                .coerceIn(
+                    -2f,
+                    2f
+                )
+
+
+        val gradH2 =
+            FloatArray(hidden2Size)
+
+
+        for (
+            j in 0 until hidden2Size
+        ) {
+
+            gradH2[j] =
+                error *
+                        w3[action][j] *
+                        (
+                                1f -
+                                        h2[j] *
+                                        h2[j]
+                                )
+
+
+            w3[action][j] +=
+                learningRate *
+                        error *
+                        h2[j]
+        }
+
+
+        b3[action] +=
+            learningRate *
+                    error
+
+
+        val gradH1 =
+            FloatArray(hidden1Size)
+
+
+        for (
+            i in 0 until hidden1Size
+        ) {
+
+            var gradient =
+                0f
+
+
+            for (
+                j in 0 until hidden2Size
+            ) {
+
+                gradient +=
+                    gradH2[j] *
+                            w2[j][i]
+
+
+                w2[j][i] +=
+                    learningRate *
+                            gradH2[j] *
+                            h1[i]
+            }
+
+
+            gradH1[i] =
+                gradient *
+                        (
+                                1f -
+                                        h1[i] *
+                                        h1[i]
+                                )
+
+
+            for (
+                j in input.indices
+            ) {
+
+                w1[i][j] +=
+                    learningRate *
+                            gradH1[i] *
+                            input[j]
+            }
+
+
+            b1[i] +=
+                learningRate *
+                        gradH1[i]
+        }
+    }
+
+
+    fun deepCopy(): V3TinyBrain {
+
+        val result =
+            V3TinyBrain(
+                inputSize,
+                hidden1Size,
+                hidden2Size,
+                outputSize,
+                learningRate
+            )
+
+
+        for (i in 0 until hidden1Size) {
+
+            result.b1[i] =
+                b1[i]
+
+            for (
+                j in 0 until inputSize
+            ) {
+
+                result.w1[i][j] =
+                    w1[i][j]
+            }
+        }
+
+
+        for (i in 0 until hidden2Size) {
+
+            result.b2[i] =
+                b2[i]
+
+            for (
+                j in 0 until hidden1Size
+            ) {
+
+                result.w2[i][j] =
+                    w2[i][j]
+            }
+        }
+
+
+        for (i in 0 until outputSize) {
+
+            result.b3[i] =
+                b3[i]
+
+            for (
+                j in 0 until hidden2Size
+            ) {
+
+                result.w3[i][j] =
+                    w3[i][j]
+            }
+        }
+
+
+        return result
+    }
+
+
+    /*
+     * 将另一个 Brain 完整复制到当前 Brain。
+     */
+    fun copyFrom(
+        other: V3TinyBrain
+    ) {
+
+        for (i in 0 until hidden1Size) {
+
+            b1[i] =
+                other.b1[i]
+
+            for (
+                j in 0 until inputSize
+            ) {
+
+                w1[i][j] =
+                    other.w1[i][j]
+            }
+        }
+
+
+        for (i in 0 until hidden2Size) {
+
+            b2[i] =
+                other.b2[i]
+
+            for (
+                j in 0 until hidden1Size
+            ) {
+
+                w2[i][j] =
+                    other.w2[i][j]
+            }
+        }
+
+
+        for (i in 0 until outputSize) {
+
+            b3[i] =
+                other.b3[i]
+
+            for (
+                j in 0 until hidden2Size
+            ) {
+
+                w3[i][j] =
+                    other.w3[i][j]
+            }
+        }
+    }
+
+
+    /*
+     * Brain 遗传突变。
+     */
+    fun mutate(
+        sigma: Float
+    ) {
+
+        fun noise(): Float {
+
+            return (
+                    Random.nextFloat() *
+                            2f -
+                            1f
+                    ) *
+                    sigma
+        }
+
+
+        for (
+            i in 0 until hidden1Size
+        ) {
+
+            for (
+                j in 0 until inputSize
+            ) {
+
+                w1[i][j] +=
+                    noise()
+            }
+
+
+            b1[i] +=
+                noise()
+        }
+
+
+        for (
+            i in 0 until hidden2Size
+        ) {
+
+            for (
+                j in 0 until hidden1Size
+            ) {
+
+                w2[i][j] +=
+                    noise()
+            }
+
+
+            b2[i] +=
+                noise()
+        }
+
+
+        for (
+            i in 0 until outputSize
+        ) {
+
+            for (
+                j in 0 until hidden2Size
+            ) {
+
+                w3[i][j] +=
+                    noise()
+            }
+
+
+            b3[i] +=
+                noise()
+        }
+    }
+}
+
+
+/* ============================================================
+ * 16. REPLAY BUFFER
+ * ============================================================
+ */
+
+class V3ReplayBuffer(
+
+    private val capacity: Int = 20000
+
+) {
+
+
+    private val data =
+        ArrayList<V3Experience>()
+
+
+    @Synchronized
+    fun add(
+        experience: V3Experience
+    ) {
+
+        if (
+            data.size >= capacity
+        ) {
+
+            data.removeAt(0)
+        }
+
+
+        data.add(
+            experience
+        )
+    }
+
+
+    @Synchronized
+    fun sample(
+        count: Int
+    ): List<V3Experience> {
+
+        if (
+            data.isEmpty()
+        ) {
+
+            return emptyList()
+        }
+
+
+        return List(
+            min(
+                count,
+                data.size
+            )
+        ) {
+
+            /*
+             * 当前版本先使用稳定的
+             * weighted sampling。
+             */
+            val total =
+                data.sumOf {
+                    max(
+                        0.01,
+                        it.priority.toDouble()
+                    )
+                }
+
+
+            var r =
+                Random.nextDouble() *
+                        total
+
+
+            var selected =
+                data.last()
+
+
+            for (item in data) {
+
+                r -=
+                    max(
+                        0.01,
+                        item.priority.toDouble()
+                    )
+
+
+                if (r <= 0.0) {
+
+                    selected = item
+
+                    break
+                }
+            }
+
+
+            selected
+        }
+    }
+
+
+    @Synchronized
+    fun size(): Int {
+
+        return data.size
+    }
+
+
+    @Synchronized
+    fun clear() {
+
+        data.clear()
+    }
+}
+
+
+/* ============================================================
+ * 17. FAILURE MEMORY
+ * ============================================================
+ */
+
+class V3FailureMemory(
+
+    private val capacity: Int = 50000
+
+) {
+
+
+    private val memory =
+        LinkedHashMap<Long, V3Lesson>()
+
+
+    @Synchronized
+    fun remember(
+
+        contextHash: Long,
+
+        action: V3Action,
+
+        reason: V3DeathReason,
+
+        penalty: Float,
+
+        alternative: V3Action?
+
+    ): V3Lesson {
+
+        val old =
+            memory[contextHash]
+
+
+        if (old == null) {
+
+            val lesson =
+                V3Lesson(
+
+                    contextHash =
+                        contextHash,
+
+                    badAction =
+                        action,
+
+                    reason =
+                        reason,
+
+                    penalty =
+                        penalty.coerceIn(
+                            0f,
+                            10f
+                        ),
+
+                    confidence =
+                        0.8f,
+
+                    occurrences =
+                        1,
+
+                    alternative =
+                        alternative
+                )
+
+
+            if (
+                memory.size >=
+                capacity
+            ) {
+
+                val iterator =
+                    memory.entries.iterator()
+
+
+                if (
+                    iterator.hasNext()
+                ) {
+
+                    iterator.next()
+
+                    iterator.remove()
+                }
+            }
+
+
+            memory[
+                contextHash
+            ] =
+                lesson
+
+
+            return lesson
+        }
+
+
+        old.occurrences++
+
+
+        old.penalty =
+            (
+                    old.penalty *
+                            0.8f +
+                            penalty *
+                            0.2f
+                    )
+                .coerceIn(
+                    0f,
+                    10f
+                )
+
+
+        old.confidence =
+            (
+                    old.confidence +
+                            0.03f
+                    )
+                .coerceIn(
+                    0f,
+                    1f
+                )
+
+
+        if (
+            alternative != null
+        ) {
+
+            old.alternative =
+                alternative
+        }
+
+
+        return old
+    }
+
+
+    @Synchronized
+    fun actionPenalty(
+        contextHash: Long,
+        action: V3Action
+    ): Float {
+
+        val lesson =
+            memory[
+                contextHash
+            ]
+                ?: return 0f
+
+
+        if (
+            lesson.badAction !=
+            action
+        ) {
+
+            return 0f
+        }
+
+
+        return lesson.penalty *
+                lesson.confidence
+    }
+
+
+    @Synchronized
+    fun occurrences(
+        contextHash: Long
+    ): Int {
+
+        return memory[
+            contextHash
+        ]?.occurrences ?: 0
+    }
+
+
+    @Synchronized
+    fun size(): Int {
+
+        return memory.size
+    }
+
+
+    @Synchronized
+    fun clear() {
+
+        memory.clear()
+    }
+}
+
+
+/* ============================================================
+ * 18. GOAL SELECTOR
+ * ============================================================
+ */
+
+class V3GoalSelector {
+
+
+    fun select(
+        state: V3State
+    ): V3Goal {
+
+        val legal =
+            V3Board.legalActions(
+                state
+            )
+
+
+        if (
+            legal.isEmpty()
+        ) {
+
+            return V3Goal.ESCAPE_DANGER
+        }
+
+
+        /*
+         * 检查循环。
+         */
+        val loop =
+            state.recentHashes.size >= 6 &&
+                    state.recentHashes
+                        .takeLast(6)
+                        .toSet()
+                        .size <= 2
+
+
+        if (loop) {
+
+            return V3Goal.BREAK_LOOP
+        }
+
+
+        val spaceRatio =
+            V3Board.freeSpace(
+                state
+            ).toFloat() /
+                    max(
+                        1,
+                        state.cells
+                    )
+
+
+        /*
+         * 空间太小。
+         */
+        if (
+            spaceRatio < 0.25f ||
+            legal.size == 1
+        ) {
+
+            return V3Goal.PRESERVE_SPACE
+        }
+
+
+        /*
+         * 饥饿。
+         */
+        if (
+            state.hunger > 0.75f &&
+            state.food >= 0
+        ) {
+
+            return V3Goal.GET_FOOD
+        }
+
+
+        /*
+         * 空间开始紧张，但尾巴可达。
+         */
+        if (
+            spaceRatio < 0.45f &&
+            V3Board.tailReachable(
+                state
+            ).first
+        ) {
+
+            return V3Goal.REACH_TAIL
+        }
+
+
+        /*
+         * 正常情况下仍然追求食物。
+         */
+        if (
+            state.food >= 0
+        ) {
+
+            return V3Goal.GET_FOOD
+        }
+
+
+        return V3Goal.SURVIVE
+    }
+}
+
+
+/* ============================================================
+ * 19. ACTION EVALUATOR
+ * ============================================================
+ */
+
+class V3ActionEvaluator(
+
+    private val qLearner: V3QLearner,
+
+    private val brain: V3TinyBrain,
+
+    private val encoder: V3StateEncoder,
+
+    private val memory: V3FailureMemory
+
+) {
+
+
+    private fun normalize(
+        values: FloatArray
+    ): FloatArray {
+
+        val maxAbs =
+            max(
+                1f,
+                values.maxOfOrNull {
+                    abs(it)
+                } ?: 1f
+            )
+
+
+        return FloatArray(
+            values.size
+        ) {
+
+            (
+                    values[it] /
+                            maxAbs
+                    )
+                .coerceIn(
+                    -1f,
+                    1f
+                )
+        }
+    }
+
+
+    fun evaluate(
+        state: V3State,
+
+        genome: V3StrategyGenome,
+
+        goal: V3Goal
+
+    ): List<V3ActionEvaluation> {
+
+
+        val encoded =
+            encoder.encode(
+                state
+            )
+
+
+        val q =
+            normalize(
+                qLearner.values(
+                    encoded.hash
+                )
+            )
+
+
+        val brain =
+            normalize(
+                brain.forward(
+                    encoded.values
+                )
+            )
+
+
+        val currentSpace =
+            V3Board.freeSpace(
+                state
+            ).toFloat() /
+                    max(
+                        1,
+                        state.cells
+                    )
+
+
+        val currentTail =
+            V3Board.tailReachable(
+                state
+            ).first
+
+
+        return V3Action.values().map {
+
+            action ->
+
+
+            val immediateDeath =
+                V3Board.immediateDeath(
+                    state,
+                    action
+                )
+
+
+            val next =
+                if (
+                    immediateDeath
+                )
+                    null
+                else
+                    V3Board.simulate(
+                        state,
+                        action
+                    )
+
+
+            /*
+             * 空间价值。
+             */
+            val nextSpace =
+                next?.let {
+
+                    V3Board.freeSpace(
+                        it
+                    ).toFloat() /
+                            max(
+                                1,
+                                it.cells
+                            )
+
+                } ?: 0f
+
+
+            val spaceValue =
+                (
+                        nextSpace -
+                                currentSpace
+                        )
+                    .coerceIn(
+                        -1f,
+                        1f
+                    )
+
+
+            /*
+             * 尾巴价值。
+             */
+            val nextTail =
+                next?.let {
+
+                    V3Board.tailReachable(
+                        it
+                    ).first
+
+                } ?: false
+
+
+            val tailValue =
+                when {
+
+                    nextTail &&
+                            !currentTail ->
+                        0.25f
+
+                    nextTail ->
+                        0.10f
+
+                    currentTail &&
+                            !nextTail ->
+                        -0.35f
+
+                    else ->
+                        -0.05f
+                }
+
+
+            /*
+             * 食物价值。
+             */
+            val foodValue =
+                if (
+                    state.food >= 0 &&
+                    next != null
+                ) {
+
+                    val hx =
+                        state.head %
+                                state.width
+
+                    val hy =
+                        state.head /
+                                state.width
+
+                    val fx =
+                        state.food %
+                                state.width
+
+                    val fy =
+                        state.food /
+                                state.width
+
+                    val nx =
+                        next.head %
+                                next.width
+
+                    val ny =
+                        next.head /
+                                next.width
+
+
+                    val before =
+                        abs(
+                            hx - fx
+                        ) +
+                                abs(
+                                    hy - fy
+                                )
+
+
+                    val after =
+                        abs(
+                            nx - fx
+                        ) +
+                                abs(
+                                    ny - fy
+                                )
+
+
+                    (
+                            (
+                                    before -
+                                            after
+                                    ) *
+                                    0.12f
+                            )
+                        .coerceIn(
+                            -1f,
+                            1f
+                        )
+
+                } else {
+
+                    0f
+                }
+
+
+            /*
+             * 危险价值。
+             */
+            val dangerValue =
+                when {
+
+                    immediateDeath ->
+                        1f
+
+                    next == null ->
+                        1f
+
+                    V3Board.legalActions(
+                        next
+                    ).isEmpty() ->
+                        1f
+
+                    V3Board.legalActions(
+                        next
+                    ).size <= 1 ->
+                        0.65f
+
+                    V3Board.legalActions(
+                        next
+                    ).size == 2 ->
+                        0.25f
+
+                    else ->
+                        0f
+                }
+
+
+            /*
+             * Loop。
+             */
+            val loopValue =
+                if (
+                    state.recentHashes.size >= 4 &&
+                    state.recentHashes
+                        .takeLast(4)
+                        .toSet()
+                        .size <= 2
+                )
+                    0.7f
+                else
+                    0f
+
+
+            /*
+             * Counterfactual。
+             *
+             * 如果走了这个动作，
+             * 下一步还有没有好的选择？
+             */
+            val counterfactualValue =
+                if (
+                    next == null
+                ) {
+
+                    -1f
+
+                } else {
+
+                    val future =
+                        V3Board.legalActions(
+                            next
+                        )
+
+
+                    if (
+                        future.isEmpty()
+                    ) {
+
+                        -1f
+
+                    } else {
+
+                        val bestFuture =
+                            future.maxOf {
+
+                                val futureState =
+                                    V3Board.simulate(
+                                        next,
+                                        it
+                                    )
+
+
+                                if (
+                                    futureState == null
+                                ) {
+
+                                    -1f
+
+                                } else {
+
+                                    V3Board.freeSpace(
+                                        futureState
+                                    ).toFloat() /
+                                            max(
+                                                1,
+                                                futureState.cells
+                                            )
+                                }
+                            }
+
+
+                        (
+                                bestFuture * 2f -
+                                        1f
+                                )
+                    }
+                }
+
+
+            /*
+             * 长期失败记忆。
+             */
+            val memoryPenalty =
+                memory.actionPenalty(
+                    encoded.hash,
+                    action
+                )
+
+
+            /*
+             * 当前目标额外价值。
+             */
+            val goalBonus =
+                when (goal) {
+
+                    V3Goal.GET_FOOD ->
+                        foodValue * 0.35f
+
+                    V3Goal.PRESERVE_SPACE ->
+                        spaceValue * 0.45f
+
+                    V3Goal.REACH_TAIL ->
+                        tailValue * 0.45f
+
+                    V3Goal.ESCAPE_DANGER ->
+                        -dangerValue * 0.45f +
+                                spaceValue * 0.25f
+
+                    V3Goal.BREAK_LOOP ->
+                        -loopValue * 0.45f +
+                                spaceValue * 0.15f
+
+                    V3Goal.SURVIVE ->
+                        spaceValue * 0.15f -
+                                dangerValue * 0.15f
+                }
+
+
+            /*
+             * 学习价值。
+             */
+            val learned =
+                q[action.ordinal] *
+                        genome.qWeight +
+
+                        brain[action.ordinal] *
+                        genome.brainWeight
+
+
+            /*
+             * 最终价值。
+             *
+             * 注意：
+             *
+             * 没有：
+             *
+             * if food -> force food
+             *
+             * if danger -> force tail
+             *
+             * 所有东西都统一进入价值函数。
+             */
+            val finalValue =
+                learned +
+
+                        genome.foodPriority *
+                        foodValue +
+
+                        genome.spacePriority *
+                        spaceValue +
+
+                        genome.tailPriority *
+                        tailValue +
+
+                        if (
+                            state.hunger > 0.7f
+                        )
+                            genome.hungerUrgency *
+                                    foodValue *
+                                    0.3f
+                        else
+                            0f +
+
+                        goalBonus +
+
+                        counterfactualValue *
+                        0.35f -
+
+                        genome.dangerAversion *
+                        dangerValue -
+
+                        genome.loopAversion *
+                        loopValue -
+
+                        memoryPenalty
+
+
+            V3ActionEvaluation(
+
+                action = action,
+
+                qValue =
+                    q[action.ordinal],
+
+                brainValue =
+                    brain[action.ordinal],
+
+                foodValue =
+                    foodValue,
+
+                spaceValue =
+                    spaceValue,
+
+                tailValue =
+                    tailValue,
+
+                dangerValue =
+                    dangerValue,
+
+                loopValue =
+                    loopValue,
+
+                counterfactualValue =
+                    counterfactualValue,
+
+                memoryPenalty =
+                    memoryPenalty,
+
+                finalValue =
+                    if (
+                        immediateDeath
+                    )
+                        -Float.MAX_VALUE
+                    else
+                        finalValue,
+
+                immediateDeath =
+                    immediateDeath
+            )
+        }
+    }
+}
+
+
+/* ============================================================
+ * 20. REWARD ENGINE
+ * ============================================================
+ */
+
+class V3RewardEngine {
+
+
+    fun reward(
+
+        before: V3State?,
+
+        after: V3State,
+
+        ateFood: Boolean,
+
+        died: Boolean
+
+    ): Float {
+
+
+        if (died) {
+
+            return -15f
+        }
+
+
+        if (ateFood) {
+
+            return 10f
+        }
+
+
+        if (before == null) {
+
+            return 0.005f
+        }
+
+
+        var reward =
+            0.005f
+
+
+        /*
+         * 食物进度。
+         */
+        if (
+            before.food >= 0 &&
+            after.food >= 0
+        ) {
+
+            val bx =
+                before.head %
+                        before.width
+
+            val by =
+                before.head /
+                        before.width
+
+
+            val ax =
+                after.head %
+                        after.width
+
+            val ay =
+                after.head /
+                        after.width
+
+
+            val fx =
+                before.food %
+                        before.width
+
+            val fy =
+                before.food /
+                        before.width
+
+
+            val oldDistance =
+                abs(
+                    bx - fx
+                ) +
+                        abs(
+                            by - fy
+                        )
+
+
+            val newDistance =
+                abs(
+                    ax - fx
+                ) +
+                        abs(
+                            ay - fy
+                        )
+
+
+            reward +=
+                (
+                        (
+                                oldDistance -
+                                        newDistance
+                                ) *
+                                0.08f
+                        )
+                    .coerceIn(
+                        -0.2f,
+                        0.2f
+                    )
+        }
+
+
+        /*
+         * 空间奖励必须使用 Delta。
+         */
+        val oldSpace =
+            V3Board.freeSpace(
+                before
+            )
+
+
+        val newSpace =
+            V3Board.freeSpace(
+                after
+            )
+
+
+        reward +=
+            (
+                    (
+                            newSpace -
+                                    oldSpace
+                            ) *
+                            0.015f
+                    )
+                .coerceIn(
+                    -0.15f,
+                    0.15f
+                )
+
+
+        /*
+         * 尾巴可达性。
+         */
+        val oldTail =
+            V3Board.tailReachable(
+                before
+            ).first
+
+
+        val newTail =
+            V3Board.tailReachable(
+                after
+            ).first
+
+
+        if (
+            !oldTail &&
+            newTail
+        ) {
+
+            reward +=
+                0.12f
+        }
+
+
+        if (
+            oldTail &&
+            !newTail
+        ) {
+
+            reward -=
+                0.12f
+        }
+
+
+        /*
+         * 未来选择变少。
+         */
+        if (
+            V3Board.legalActions(
+                after
+            ).size <= 1
+        ) {
+
+            reward -=
+                0.08f
+        }
+
+
+        /*
+         * Hunger。
+         */
+        reward -=
+            min(
+                0.15f,
+                after.hunger *
+                        after.hunger *
+                        0.001f
+            )
+
+
+        return reward.coerceIn(
+            -2f,
+            10f
+        )
+    }
+}
+
+
+/* ============================================================
+ * 21. DEATH ANALYZER
+ * ============================================================
+ */
+
+class V3DeathAnalyzer(
+
+    private val encoder: V3StateEncoder
+
+) {
+
+
+    fun analyze(
+
+        before: V3State,
+
+        action: V3Action,
+
+        chosenValue: Float,
+
+        evaluations:
+            List<V3ActionEvaluation>
+
+    ): V3DeathReport {
+
+
+        val legal =
+            V3Board.legalActions(
+                before
+            )
+
+
+        val foodDistance =
+            if (
+                before.food >= 0
+            ) {
+
+                val hx =
+                    before.head %
+                            before.width
+
+                val hy =
+                    before.head /
+                            before.width
+
+
+                val fx =
+                    before.food %
+                            before.width
+
+                val fy =
+                    before.food /
+                            before.width
+
+
+                abs(
+                    hx - fx
+                ) +
+                        abs(
+                            hy - fy
+                        )
+
+            } else {
+
+                0
+            }
+
+
+        /*
+         * 先判断最直接的死亡原因。
+         */
+        val reason =
+            when {
+
+                V3Board.step(
+                    before,
+                    before.head,
+                    action
+                ) < 0 -> {
+
+                    V3DeathReason.HIT_WALL
+                }
+
+
+                V3Board.immediateDeath(
+                    before,
+                    action
+                ) -> {
+
+                    val next =
+                        V3Board.step(
+                            before,
+                            before.head,
+                            action
+                        )
+
+
+                    if (
+                        next == before.tail
+                    )
+                        V3DeathReason.DEAD_END
+                    else
+                        V3DeathReason.HIT_SELF
+                }
+
+
+                legal.isEmpty() -> {
+
+                    V3DeathReason.TRAPPED
+                }
+
+
+                else -> {
+
+                    val space =
+                        V3Board.freeSpace(
+                            before
+                        )
+
+
+                    val tail =
+                        V3Board.tailReachable(
+                            before
+                        ).first
+
+
+                    val loop =
+                        before.recentHashes.size >= 6 &&
+                                before.recentHashes
+                                    .takeLast(6)
+                                    .toSet()
+                                    .size <= 2
+
+
+                    when {
+
+                        loop ->
+                            V3DeathReason.LOOP
+
+                        space <
+                                before.body.size * 2 ->
+                            V3DeathReason.SPACE_COLLAPSE
+
+                        !tail &&
+                                before.body.size > 8 ->
+                            V3DeathReason.TAIL_CUTOFF
+
+                        before.hunger > 0.85f ->
+                            V3DeathReason.HUNGER
+
+                        else ->
+                            V3DeathReason.UNKNOWN
+                    }
+                }
+            }
+
+
+        /*
+         * Counterfactual：
+         *
+         * 如果当时选别的动作，
+         * 有没有活路？
+         */
+        val alternatives =
+            evaluations
+                .filter {
+                    !it.immediateDeath &&
+                            it.action != action
+                }
+                .sortedByDescending {
+                    it.finalValue
+                }
+
+
+        val best =
+            alternatives.firstOrNull()
+
+
+        val regret =
+            if (
+                best != null
+            ) {
+
+                max(
+                    0f,
+                    best.finalValue -
+                            chosenValue
+                )
+
+            } else {
+
+                0f
+            }
+
+
+        return V3DeathReport(
+
+            reason =
+                reason,
+
+            action =
+                action,
+
+            stateHash =
+                encoder.encode(
+                    before
+                ).hash,
+
+            avoidable =
+                best != null,
+
+            bestAlternative =
+                best?.action,
+
+            regret =
+                regret,
+
+            freeSpace =
+                V3Board.freeSpace(
+                    before
+                ),
+
+            safeActions =
+                legal.size,
+
+            tailReachable =
+                V3Board.tailReachable(
+                    before
+                ).first,
+
+            foodDistance =
+                foodDistance,
+
+            repeatedFailure =
+                0
+        )
+    }
+}
+
+
+/* ============================================================
+ * 22. TRAINING STATS
+ * ============================================================
+ */
+
+data class V3TrainingStats(
+
+    var generation: Int = 0,
+
+    var agent: Int = 0,
+
+    var score: Int = 0,
+
+    var bestScore: Int = 0,
+
+    var averageScore: Float = 0f,
+
+    var fitness: Float = 0f,
+
+    var epsilon: Float = 1f,
+
+    var replaySize: Int = 0,
+
+    var memorySize: Int = 0,
+
+    var learningSteps: Long = 0,
+
+    var meanTdError: Float = 0f,
+
+    var lessonsLearned: Long = 0,
+
+    var avoidableDeaths: Long = 0,
+
+    var lastDeathReason:
+        V3DeathReason? = null,
+
+    var lastGoal:
+        V3Goal = V3Goal.SURVIVE
+)
+
+
+/* ============================================================
+ * 23. SHARED LEARNING
+ * ============================================================
+ *
+ * 50 Agent 可以共享：
+ *
+ * Q
+ * Replay
+ *
+ * 每个 Agent 自己拥有：
+ *
+ * Brain
+ * Genome
+ * FailureMemory
+ *
+ */
+
+class V3SharedLearning(
+
+    val qLearner:
+        V3QLearner = V3QLearner(),
+
+    val replay:
+        V3ReplayBuffer =
+            V3ReplayBuffer()
+
+)
+
+
+/* ============================================================
+ * 24. MAIN AI ENGINE
+ * ============================================================
+ */
+
+class AIEngineV3(
+
+    val shared:
+        V3SharedLearning =
+            V3SharedLearning()
+
+) {
+
+
+    /*
+     * AI 的核心组件。
+     */
+    val encoder =
+        V3StateEncoder()
+
+
+    val brain =
+        V3TinyBrain()
+
+
+    val genome =
+        V3StrategyGenome()
+
+
+    val failureMemory =
+        V3FailureMemory()
+
+
+    val stats =
+        V3TrainingStats()
+
+
+    private val rewardEngine =
+        V3RewardEngine()
+
+
+    private val goalSelector =
+        V3GoalSelector()
+
+
+    private val evaluator =
+        V3ActionEvaluator(
+
+            shared.qLearner,
+
+            brain,
+
+            encoder,
+
+            failureMemory
+        )
+
+
+    private val deathAnalyzer =
+        V3DeathAnalyzer(
+            encoder
+        )
+
+
+    /*
+     * 当前 episode 的 pending state。
+     */
+    private var previousState:
+        V3State? = null
+
+
+    private var lastAction:
+        V3Action? = null
+
+
+    private var lastDecision:
+        V3Decision? = null
+
+
+    private var lastChosenValue:
+        Float = 0f
+
+
+    /*
+     * 最近决策。
+     *
+     * 用来做因果责任追踪。
+     */
+    private val decisionHistory =
+        ArrayDeque<Pair<Long, V3Action>>()
+
+
+    /*
+     * 训练模式。
+     */
+    var trainingEnabled =
+        false
+        private set
+
+
+    /*
+     * Exploration。
+     */
+    var epsilon =
+        1f
+        private set
+
+
+    /*
+     * --------------------------------------------------------
+     * RESET
+     * --------------------------------------------------------
+     */
+
+    fun resetEpisode() {
+
+        previousState =
+            null
+
+        lastAction =
+            null
+
+        lastDecision =
+            null
+
+        lastChosenValue =
+            0f
+
+        decisionHistory.clear()
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * ACT
+     * --------------------------------------------------------
+     *
+     * SnakeView 调用：
+     *
+     * val action = ai.act(state)
+     *
+     */
+
+    fun act(
+        state: V3State
+    ): V3Action {
+
+
+        /*
+         * 1.
+         * 判断当前目标。
+         */
+        val goal =
+            goalSelector.select(
+                state
+            )
+
+
+        /*
+         * 2.
+         * 评价所有动作。
+         */
+        val evaluations =
+            evaluator.evaluate(
+                state,
+                genome,
+                goal
+            )
+
+
+        /*
+         * 3.
+         * Safety：
+         *
+         * 只有马上死亡的动作被过滤。
+         */
+        val safe =
+            evaluations.filter {
+                !it.immediateDeath
+            }
+
+
+        val candidates =
+            if (
+                safe.isNotEmpty()
+            )
+                safe
+            else
+                evaluations
+
+
+        /*
+         * 4.
+         * Exploration。
+         *
+         * 不是完全随机。
+         *
+         * 从当前最好的前三个安全动作里探索。
+         */
+        val explorationProbability =
+            (
+                    epsilon *
+                            genome.explorationBias
+                    )
+                .coerceIn(
+                    0.01f,
+                    0.9f
+                )
+
+
+        val explored =
+            trainingEnabled &&
+                    Random.nextFloat() <
+                    explorationProbability
+
+
+        val selected =
+            if (
+                explored
+            ) {
+
+                val top =
+                    candidates
+                        .sortedByDescending {
+                            it.finalValue
+                        }
+                        .take(
+                            min(
+                                3,
+                                candidates.size
+                            )
+                        )
+
+
+                top.random()
+
+            } else {
+
+                candidates.maxByOrNull {
+                    it.finalValue
+                }!!
+            }
+
+
+        /*
+         * 5.
+         * 保存本次决策。
+         */
+        lastAction =
+            selected.action
+
+
+        lastChosenValue =
+            selected.finalValue
+
+
+        previousState =
+            state
+
+
+        lastDecision =
+            V3Decision(
+
+                action =
+                    selected.action,
+
+                goal =
+                    goal,
+
+                evaluations =
+                    evaluations,
+
+                explored =
+                    explored
+            )
+
+
+        /*
+         * 6.
+         * 记录最近行为。
+         */
+        decisionHistory.addLast(
+
+            Pair(
+                encoder.encode(
+                    state
+                ).hash,
+
+                selected.action
+            )
+        )
+
+
+        while (
+            decisionHistory.size > 12
+        ) {
+
+            decisionHistory.removeFirst()
+        }
+
+
+        stats.lastGoal =
+            goal
+
+
+        return selected.action
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * FEEDBACK
+     * --------------------------------------------------------
+     *
+     * 游戏执行动作之后：
+     *
+     * ai.feedback(
+     *     nextState,
+     *     ateFood,
+     *     gameOver
+     * )
+     *
+     */
+
+    fun feedback(
+
+        nextState: V3State,
+
+        ateFood: Boolean = false,
+
+        died: Boolean =
+            nextState.gameOver
+
+    ) {
+
+
+        val action =
+            lastAction
+                ?: return
+
+
+        val before =
+            previousState
+
+
+        /*
+         * Reward。
+         */
+        val reward =
+            rewardEngine.reward(
+
+                before,
+
+                nextState,
+
+                ateFood,
+
+                died
+            )
+
+
+        /*
+         * State Encoding。
+         */
+        val beforeEncoded =
+            encoder.encode(
+                before ?: nextState
+            )
+
+
+        val afterEncoded =
+            if (died)
+                null
+            else
+                encoder.encode(
+                    nextState
+                )
+
+
+        /*
+         * 死亡分析。
+         */
+        var deathReason:
+            V3DeathReason? =
+            null
+
+
+        if (
+            died &&
+            before != null
+        ) {
+
+
+            val report =
+                deathAnalyzer.analyze(
+
+                    before,
+
+                    action,
+
+                    lastChosenValue,
+
+                    lastDecision?.evaluations
+                        ?: emptyList()
+                )
+
+
+            deathReason =
+                report.reason
+
+
+            /*
+             * 真正学习：
+             *
+             * 为什么死？
+             */
+            learnFromDeath(
+                report
+            )
+
+
+            /*
+             * 因果责任：
+             *
+             * 最近几步也受到处罚。
+             */
+            applyCausalCredit(
+                report
+            )
+        }
+
+
+        /*
+         * 经验。
+         */
+        val experience =
+            V3Experience(
+
+                state =
+                    beforeEncoded,
+
+                action =
+                    action,
+
+                reward =
+                    reward,
+
+                nextState =
+                    afterEncoded,
+
+                done =
+                    died,
+
+                deathReason =
+                    deathReason,
+
+                priority =
+                    if (died)
+                        8f
+                    else
+                        1f
+            )
+
+
+        /*
+         * Training。
+         */
+        if (
+            trainingEnabled
+        ) {
+
+
+            /*
+             * Replay。
+             */
+            shared.replay.add(
+                experience
+            )
+
+
+            /*
+             * 当前经验立即学习。
+             */
+            shared.qLearner.learn(
+                experience
+            )
+
+
+            /*
+             * Replay 学习。
+             */
+            val batch =
+                shared.replay.sample(
+                    8
+                )
+
+
+            for (
+                item in batch
+            ) {
+
+                shared.qLearner.learn(
+                    item
+                )
+            }
+
+
+            /*
+             * Brain 更新。
+             */
+            val target =
+                reward.coerceIn(
+                    -10f,
+                    10f
+                )
+
+
+            brain.train(
+
+                beforeEncoded.values,
+
+                action.ordinal,
+
+                target
+            )
+
+
+            stats.learningSteps =
+                shared.qLearner.learningSteps
+
+
+            stats.meanTdError =
+                shared.qLearner.meanTdError
+
+
+            stats.replaySize =
+                shared.replay.size()
+        }
+
+
+        /*
+         * Exploration 逐渐降低。
+         */
+        if (
+            trainingEnabled
+        ) {
+
+            epsilon =
+                max(
+                    0.03f,
+                    epsilon * 0.9995f
+                )
+
+
+            stats.epsilon =
+                epsilon
+        }
+
+
+        /*
+         * Target Network 定期同步。
+         */
+        if (
+            shared.qLearner.learningSteps > 0 &&
+            shared.qLearner.learningSteps %
+            2000L == 0L
+        ) {
+
+            shared.qLearner.syncTarget()
+        }
+
+
+        stats.lastDeathReason =
+            deathReason
+
+
+        stats.memorySize =
+            failureMemory.size()
+
+
+        /*
+         * Episode 结束。
+         */
+        if (died) {
+
+            previousState =
+                null
+
+            lastAction =
+                null
+
+        } else {
+
+            previousState =
+                nextState
+        }
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * LEARN FROM DEATH
+     * --------------------------------------------------------
+     */
+
+    private fun learnFromDeath(
+
+        report:
+            V3DeathReport
+
+    ) {
+
+
+        val action =
+            report.action
+                ?: return
+
+
+        /*
+         * 判断是不是重复错误。
+         */
+        val repeated =
+            failureMemory.occurrences(
+                report.stateHash
+            ) > 0
+
+
+        /*
+         * 不同死亡原因，
+         * 有不同的长期惩罚。
+         */
+        val basePenalty =
+            when (
+                report.reason
+            ) {
+
+                V3DeathReason.HIT_WALL,
+                V3DeathReason.HIT_SELF ->
+                    4f
+
+                V3DeathReason.TRAPPED ->
+                    3f
+
+                V3DeathReason.DEAD_END ->
+                    2.5f
+
+                V3DeathReason.SPACE_COLLAPSE ->
+                    3f
+
+                V3DeathReason.TAIL_CUTOFF ->
+                    2.5f
+
+                V3DeathReason.LOOP ->
+                    1.5f
+
+                V3DeathReason.HUNGER ->
+                    1.5f
+
+                V3DeathReason.UNKNOWN ->
+                    0.5f
+            }
+
+
+        /*
+         * 如果存在更好的反事实动作，
+         * 增加 regret 惩罚。
+         */
+        val penalty =
+            basePenalty +
+                    min(
+                        2f,
+                        report.regret
+                    )
+
+
+        /*
+         * 长期记忆。
+         */
+        failureMemory.remember(
+
+            contextHash =
+                report.stateHash,
+
+            action =
+                action,
+
+            reason =
+                report.reason,
+
+            penalty =
+                penalty,
+
+            alternative =
+                report.bestAlternative
+        )
+
+
+        /*
+         * 策略自调整。
+         */
+        genome.selfAdjust(
+
+            reason =
+                report.reason,
+
+            repeated =
+                repeated,
+
+            avoidable =
+                report.avoidable
+        )
+
+
+        if (
+            report.avoidable
+        ) {
+
+            stats.avoidableDeaths++
+        }
+
+
+        stats.lessonsLearned++
+
+
+        stats.memorySize =
+            failureMemory.size()
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * CAUSAL CREDIT
+     * --------------------------------------------------------
+     *
+     * 不只处罚最后一步。
+     *
+     * 越接近死亡：
+     *   责任越大。
+     *
+     */
+
+    private fun applyCausalCredit(
+
+        report:
+            V3DeathReport
+
+    ) {
+
+
+        var weight =
+            1f
+
+
+        /*
+         * 当前实现把因果责任
+         * 转换为长期记忆。
+         *
+         * 未来相同上下文出现时，
+         * 该动作会得到额外惩罚。
+         */
+        val history =
+            decisionHistory.toList()
+
+
+        for (
+            i in history.indices.reversed()
+        ) {
+
+
+            val record =
+                history[i]
+
+
+            val contextHash =
+                record.first
+
+
+            val action =
+                record.second
+
+
+            failureMemory.remember(
+
+                contextHash =
+                    contextHash,
+
+                action =
+                    action,
+
+                reason =
+                    report.reason,
+
+                penalty =
+                    when {
+
+                        weight > 0.7f ->
+                            0.8f
+
+                        weight > 0.45f ->
+                            0.5f
+
+                        weight > 0.25f ->
+                            0.25f
+
+                        else ->
+                            0.1f
+                    },
+
+                alternative =
+                    report.bestAlternative
+            )
+
+
+            weight *=
+                0.70f
+        }
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * EVOLUTION HELPERS
+     * --------------------------------------------------------
+     */
+
+    fun copyForEvolution():
+            AIEngineV3 {
+
+
+        val child =
+            AIEngineV3(
+                shared
+            )
+
+
+        /*
+         * Genome 深拷贝。
+         */
+        val g =
+            genome.deepCopy()
+
+
+        child.genome.foodPriority =
+            g.foodPriority
+
+        child.genome.spacePriority =
+            g.spacePriority
+
+        child.genome.tailPriority =
+            g.tailPriority
+
+        child.genome.dangerAversion =
+            g.dangerAversion
+
+        child.genome.loopAversion =
+            g.loopAversion
+
+        child.genome.hungerUrgency =
+            g.hungerUrgency
+
+        child.genome.explorationBias =
+            g.explorationBias
+
+        child.genome.qWeight =
+            g.qWeight
+
+        child.genome.brainWeight =
+            g.brainWeight
+
+        child.genome.mutationRate =
+            g.mutationRate
+
+        child.genome.mutationSigma =
+            g.mutationSigma
+
+        child.genome.lookaheadDepth =
+            g.lookaheadDepth
+
+
+        /*
+         * Brain 深拷贝。
+         */
+        child.brain.copyFrom(
+            brain
+        )
+
+
+        child.trainingEnabled =
+            trainingEnabled
+
+
+        child.epsilon =
+            epsilon
+
+
+        child.resetEpisode()
+
+
+        return child
+    }
+
+
+    /*
+     * 对自身进行基因 + Brain 突变。
+     */
+    fun mutate(
+        strength: Float = 1f
+    ) {
+
+        genome.mutate(
+            strength
+        )
+
+
+        brain.mutate(
+            genome.mutationSigma *
+                    strength
+        )
+    }
+
+
+    fun setTraining(
+        enabled: Boolean
+    ) {
+
+        trainingEnabled =
+            enabled
+    }
+
+
+    fun setGeneration(
+        generation: Int
+    ) {
+
+        stats.generation =
+            generation
+    }
+
+
+    fun lastDecision():
+            V3Decision? {
+
+        return lastDecision
+    }
+
+
+    fun lastDeathReason():
+            V3DeathReason? {
+
+        return stats.lastDeathReason
+    }
+}
+
+
+/* ============================================================
+ * 25. EVOLUTION RESULT
+ * ============================================================
+ */
+
+data class V3AgentResult(
+
+    val agent: AIEngineV3,
+
+    val fitness: Float,
+
+    val score: Int,
+
+    val food: Int,
+
+    val survivalSteps: Int,
+
+    val deathReason:
+        V3DeathReason?
+
+)
+
+
+/* ============================================================
+ * 26. EVOLUTION MANAGER
+ * ============================================================
+ */
+
+object V3EvolutionManager {
+
+
+    /*
+     * Fitness。
+     */
+    fun fitness(
+
+        score: Int,
+
+        food: Int,
+
+        survivalSteps: Int,
+
+        length: Int,
+
+        deathReason:
+            V3DeathReason?
+
+    ): Float {
+
+
+        val deathPenalty =
+            when (
+                deathReason
+            ) {
+
+                V3DeathReason.HIT_WALL,
+                V3DeathReason.HIT_SELF ->
+                    8f
+
+                V3DeathReason.TRAPPED,
+                V3DeathReason.SPACE_COLLAPSE ->
+                    6f
+
+                V3DeathReason.DEAD_END,
+                V3DeathReason.TAIL_CUTOFF ->
+                    5f
+
+                V3DeathReason.LOOP ->
+                    3f
+
+                V3DeathReason.HUNGER ->
+                    2f
+
+                V3DeathReason.UNKNOWN,
+                null ->
+                    1f
+            }
+
+
+        return score * 1f +
+
+                food * 2f +
+
+                survivalSteps *
+                0.01f +
+
+                length *
+                0.2f -
+
+                deathPenalty
+    }
+
+
+    /*
+     * 一代进化。
+     *
+     * 例如 50 Agent：
+     *
+     * 5 Elite
+     * 45 新 Agent
+     */
+    fun evolve(
+
+        population:
+            List<V3AgentResult>,
+
+        generation: Int,
+
+        eliteCount: Int = 5
+
+    ): List<AIEngineV3> {
+
+
+        require(
+            population.isNotEmpty()
+        )
+
+
+        /*
+         * 内部按照 fitness 选择父代。
+         */
+        val sorted =
+            population.sortedByDescending {
+                it.fitness
+            }
+
+
+        val elites =
+            sorted
+                .take(
+                    min(
+                        eliteCount,
+                        sorted.size
+                    )
+                )
+                .map {
+                    it.agent.copyForEvolution()
+                }
+
+
+        val shared =
+            elites.firstOrNull()?.shared
+                ?: V3SharedLearning()
+
+
+        val next =
+            ArrayList<AIEngineV3>()
+
+
+        /*
+         * Elite 原样继承。
+         */
+        for (
+            elite in elites
+        ) {
+
+            elite.setGeneration(
+                generation + 1
+            )
+
+            elite.setTraining(
+                true
+            )
+
+            next.add(
+                elite
+            )
+        }
+
+
+        /*
+         * 产生孩子。
+         */
+        while (
+            next.size <
+            population.size
+        ) {
+
+
+            val parentA =
+                elites.random()
+
+
+            val parentB =
+                elites.random()
+
+
+            val child =
+                AIEngineV3(
+                    shared
+                )
+
+
+            /*
+             * Genome crossover。
+             */
+            val genome =
+                parentA.genome
+                    .crossover(
+                        parentB.genome
+                    )
+
+
+            child.genome.foodPriority =
+                genome.foodPriority
+
+            child.genome.spacePriority =
+                genome.spacePriority
+
+            child.genome.tailPriority =
+                genome.tailPriority
+
+            child.genome.dangerAversion =
+                genome.dangerAversion
+
+            child.genome.loopAversion =
+                genome.loopAversion
+
+            child.genome.hungerUrgency =
+                genome.hungerUrgency
+
+            child.genome.explorationBias =
+                genome.explorationBias
+
+            child.genome.qWeight =
+                genome.qWeight
+
+            child.genome.brainWeight =
+                genome.brainWeight
+
+            child.genome.mutationRate =
+                genome.mutationRate
+
+            child.genome.mutationSigma =
+                genome.mutationSigma
+
+            child.genome.lookaheadDepth =
+                genome.lookaheadDepth
+
+
+            /*
+             * Brain crossover：
+             *
+             * 当前版本随机继承一个父代 Brain，
+             * 再进行 mutation。
+             */
+            val selectedBrain =
+                if (
+                    Random.nextBoolean()
+                )
+                    parentA.brain
+                else
+                    parentB.brain
+
+
+            child.brain.copyFrom(
+                selectedBrain
+            )
+
+
+            /*
+             * 20% 的孩子使用更大的突变，
+             * 保持种群多样性。
+             */
+            val mutationScale =
+                if (
+                    Random.nextFloat() <
+                    0.20f
+                )
+                    1.8f
+                else
+                    1f
+
+
+            child.mutate(
+                mutationScale
+            )
+
+
+            child.setGeneration(
+                generation + 1
+            )
+
+
+            child.setTraining(
+                true
+            )
+
+
+            next.add(
+                child
+            )
+        }
+
+
+        return next
+    }
+}
+
+
+/* ============================================================
+ * 27. SIMPLE ADAPTER
+ * ============================================================
+ *
+ * 这个 Adapter 是给 SnakeView 嵌套用的。
+ *
+ * 不要让 AI 修改 SnakeView。
+ *
+ * SnakeView 只需要：
+ *
+ * 1. 把自己的游戏状态转换成 V3State
+ * 2. 调用 decide()
+ * 3. 执行返回动作
+ * 4. 把结果再反馈给 AI
+ *
+ */
+
+class SnakeAIV3Adapter(
+
+    val ai:
+        AIEngineV3
+
+) {
+
+
+    fun decide(
+        state: V3State
+    ): V3Action {
+
+        return ai.act(
+            state
+        )
+    }
+
+
+    fun feedback(
+
+        nextState:
+            V3State,
+
+        ateFood: Boolean,
+
+        gameOver: Boolean
+
+    ) {
+
+        ai.feedback(
+
+            nextState =
+                nextState,
+
+            ateFood =
+                ateFood,
+
+            died =
+                gameOver
+        )
+    }
+
+
+    fun reset() {
+
+        ai.resetEpisode()
+    }
+}
+
+
+/* ============================================================
+ * 28. END
+ * ============================================================
+ *
+ * AI V3 的核心闭环：
+ *
+ *   观察
+ *     ↓
+ *   Goal
+ *     ↓
+ *   Q
+ *     +
+ *   Brain
+ *     +
+ *   Food
+ *     +
+ *   Space
+ *     +
+ *   Tail
+ *     +
+ *   Counterfactual
+ *     -
+ *   Danger
+ *     -
+ *   Loop
+ *     -
+ *   Failure Memory
+ *     ↓
+ *   Action
+ *     ↓
+ *   游戏执行
+ *     ↓
+ *   Reward
+ *     ↓
+ *   Death Analyzer
+ *     ↓
+ *   Lesson
+ *     ↓
+ *   Memory
+ *     ↓
+ *   Genome Self Adjustment
+ *     ↓
+ *   Evolution
+ *
+ * ============================================================
+ */
