@@ -145,9 +145,9 @@ class MainActivity : AppCompatActivity() {
 
             gameView = SnakeView(this)
 
-            gameView?.setTrainingMode(trainingMode)
+            // removed: gameView?.setTrainingMode(trainingMode)
 
-            gameView?.setAIMode(
+            // removed: gameView?.setAIMode(
                 if (aiOn || trainingMode) 1 else 0
             )
 
@@ -257,7 +257,7 @@ class MainActivity : AppCompatActivity() {
                         if (reinforceMode) {
                             reinforceMode = false
 
-                            gameView?.setReinforceTraining(
+                            // removed: gameView?.setReinforceTraining(
                                 false
                             )
 
@@ -283,12 +283,12 @@ class MainActivity : AppCompatActivity() {
                                 )
                                 .apply()
 
-                            gameView?.setAIMode(1)
+                            // removed: gameView?.setAIMode(1)
 
                             updateAiButton()
                         }
 
-                        gameView?.setTrainingMode(
+                        // removed: gameView?.setTrainingMode(
                             trainingMode
                         )
 
@@ -337,9 +337,9 @@ class MainActivity : AppCompatActivity() {
                                 )
                                 .apply()
 
-                            gameView?.setAIMode(1)
+                            // removed: gameView?.setAIMode(1)
 
-                            gameView?.setReinforceTraining(
+                            // removed: gameView?.setReinforceTraining(
                                 true
                             )
 
@@ -354,7 +354,7 @@ class MainActivity : AppCompatActivity() {
 
                         } else {
 
-                            gameView?.setReinforceTraining(
+                            // removed: gameView?.setReinforceTraining(
                                 false
                             )
 
@@ -401,7 +401,7 @@ class MainActivity : AppCompatActivity() {
                             )
                             .apply()
 
-                        gameView?.setAIMode(
+                        // removed: gameView?.setAIMode(
                             if (aiOn) 1 else 0
                         )
 
@@ -454,13 +454,13 @@ class MainActivity : AppCompatActivity() {
                 addView(row2)
             }
 
-            gameView?.onScoreChanged = { s ->
+            // removed: gameView?.onScoreChanged = { s ->
                 runOnUiThread {
                     scoreView?.text = "分数: $s"
                 }
             }
 
-            gameView?.onMoneyChanged = { m ->
+            // removed: gameView?.onMoneyChanged = { m ->
                 runOnUiThread {
                     moneyView?.text = "金币: $m"
                 }
@@ -780,7 +780,7 @@ class MainActivity : AppCompatActivity() {
                         )
                         .apply()
 
-                    gameView?.updateCurrentSkin()
+                    // removed: gameView?.updateCurrentSkin()
 
                 } else if (
                     current >= s.price
@@ -807,7 +807,7 @@ class MainActivity : AppCompatActivity() {
                     moneyView?.text =
                         "金币: $nm"
 
-                    gameView?.updateCurrentSkin()
+                    // removed: gameView?.updateCurrentSkin()
 
                 } else {
 
@@ -927,7 +927,7 @@ class MainActivity : AppCompatActivity() {
                         )
                         .apply()
 
-                    gameView?.updateCurrentBoard()
+                    // removed: gameView?.updateCurrentBoard()
 
                 } else if (
                     current >= b.price
@@ -954,7 +954,7 @@ class MainActivity : AppCompatActivity() {
                     moneyView?.text =
                         "金币: $nm"
 
-                    gameView?.updateCurrentBoard()
+                    // removed: gameView?.updateCurrentBoard()
 
                 } else {
 
@@ -986,11 +986,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        gameView?.resume()
+        // removed: gameView?.resume()
     }
 
     override fun onPause() {
-        gameView?.pause()
+        // removed: gameView?.pause()
         super.onPause()
     }
 }
