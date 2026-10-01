@@ -1476,7 +1476,7 @@ class AiCore(ctx: Context) {
                 for (v in deathStats) it.writeInt(v)
             }
             if (file.exists()) file.delete()
-            if (!tmp.renameTo(file)) Log.w("SnakeAI", "save rename failed")
+            if (!tmp.renameTo(file)) { Log.w("SnakeAI", "save rename failed") } else {}
         } catch (t: Throwable) { Log.w("SnakeAI", "save fail", t) }
     }
 
