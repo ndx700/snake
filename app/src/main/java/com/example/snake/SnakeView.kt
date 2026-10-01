@@ -292,6 +292,10 @@ class SnakeView @JvmOverloads constructor(
         return qLocks[index and (V2_LOCKS - 1)]
     }
 
+    private fun qStateLock(state: Int): Any {
+        return qLocks[state and (V2_LOCKS - 1)]
+    }
+
     private fun qRead(state: Int, action: Int): Float {
         if (state !in 0 until V2_STATE_COUNT) return 0f
         if (action !in 0 until V2_ACTIONS) return 0f
@@ -350,68 +354,61 @@ class SnakeView @JvmOverloads constructor(
         if (state !in 0 until V2_STATE_COUNT) return
         if (action !in 0 until V2_ACTIONS) return
 
-        val isNewState = !visitedStates.contains(state)
-        visitedStates.add(state)
-
-        // 好奇心：新状态给额外小奖励，鼓励探索
+        val isNewState = visitedStates.add(state)
         val curiosityBonus = if (isNewState) 0.02f else 0f
         val effectiveReward = reward + curiosityBonus
-
         val idx = qIndex(state, action)
 
-        // 计算TD误差用于优先经验回放
-        val tdErr = if (terminal) effectiveReward else (effectiveReward + GAMMA * qMax(nextState, nextMask) - qV2[idx])
-        // 存入经验回放buffer
+        // 先算nextBest，不持锁
+        val nextBest = if (terminal) 0f else qMax(nextState, nextMask)
+
+        // 读旧值
+        val oldValue = synchronized(qStateLock(state)) { qV2[idx] }
+
+        val tdErr = if (terminal) effectiveReward - oldValue
+                    else effectiveReward + GAMMA * nextBest - oldValue
+
+        // 存经验
         synchronized(replayBuffer) {
             replayBuffer.add(Experience(state, action, effectiveReward, nextState, nextMask, terminal, tdErr))
             if (replayBuffer.size > REPLAY_CAPACITY) replayBuffer.removeAt(0)
         }
 
-        synchronized(qLock(idx)) {
+        // 更新Q表，只锁当前state
+        synchronized(qStateLock(state)) {
             val visits = nV2[idx]
             val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
-
-            val nextBest =
-                if (terminal) 0f
-                else qMax(nextState, nextMask)
-
-            val target =
-                if (terminal) effectiveReward
-                else effectiveReward + GAMMA * nextBest
-
+            val target = if (terminal) effectiveReward else effectiveReward + GAMMA * nextBest
             val old = qV2[idx]
             val updated = old + alpha * (target - old)
-
             qV2[idx] = updated.coerceIn(-10f, 10f)
             nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
         }
 
-        // 经验回放：优先采样TD误差大的经验
-        run {
-            synchronized(replayBuffer) {
-                if (replayBuffer.isNotEmpty()) {
-                    // 随机抽5条，选TD误差最大的1条学
-                    var bestE = replayBuffer[Random.nextInt(replayBuffer.size)]
-                    repeat(4) {
-                        val candidate = replayBuffer[Random.nextInt(replayBuffer.size)]
-                        if (abs(candidate.tdError) > abs(bestE.tdError)) bestE = candidate
-                    }
-                    val e = bestE
-                    val eidx = qIndex(e.state, e.action)
-                    synchronized(qLock(eidx)) {
-                        evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
-                    }
+        // 经验回放：先选好再学，不嵌套锁
+        val replay = synchronized(replayBuffer) {
+            if (replayBuffer.isEmpty()) null
+            else {
+                var best = replayBuffer[Random.nextInt(replayBuffer.size)]
+                repeat(4) {
+                    val candidate = replayBuffer[Random.nextInt(replayBuffer.size)]
+                    if (abs(candidate.tdError) > abs(best.tdError)) best = candidate
                 }
+                best
             }
+        }
+        if (replay != null) {
+            evoUpdate(replay.state, replay.action, replay.reward, replay.nextState, replay.nextMask, replay.terminal)
         }
 
         v2LearningSteps++
 
-        // 每2000步同步一次target网络
-        targetUpdateCounter++
-        if (targetUpdateCounter >= 2000) {
-            targetUpdateCounter = 0
-            System.arraycopy(qV2, 0, qTarget, 0, qV2.size)
+        synchronized(sharedLock) {
+            targetUpdateCounter++
+            if (targetUpdateCounter >= 2000) {
+                targetUpdateCounter = 0
+                System.arraycopy(qV2, 0, qTarget, 0, qV2.size)
+            }
         }
     }
 
@@ -419,14 +416,17 @@ class SnakeView @JvmOverloads constructor(
         if (state !in 0 until V2_STATE_COUNT) return
         if (action !in 0 until V2_ACTIONS) return
         val idx = qIndex(state, action)
-        val visits = nV2[idx]
-        val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
+        // 先算nextBest，不持锁
         val nextBest = if (terminal) 0f else qMax(nextState, nextMask)
-        val target = if (terminal) reward else reward + GAMMA * nextBest
-        val old = qV2[idx]
-        val updated = old + alpha * (target - old)
-        qV2[idx] = updated.coerceIn(-10f, 10f)
-        nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
+        synchronized(qStateLock(state)) {
+            val visits = nV2[idx]
+            val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
+            val target = if (terminal) reward else reward + GAMMA * nextBest
+            val old = qV2[idx]
+            val updated = old + alpha * (target - old)
+            qV2[idx] = updated.coerceIn(-10f, 10f)
+            nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
+        }
     }
 
     private fun currentEpsilon(): Float {
@@ -693,20 +693,10 @@ class SnakeView @JvmOverloads constructor(
                 if (!reinforceTraining) continue
                 val now = System.currentTimeMillis()
                 if (now - lastHeartbeat > 4000) {
-                    // 卡死了，重启训练
                     watchdogRestartCount++
-                    post {
-                        try {
-                            // 停掉旧线程
-                            for (t in trainThreads) {
-                                try { t.interrupt() } catch (_: Exception) {}
-                            }
-                            trainThreads.clear()
-                            Thread.sleep(200)
-                            // 重启
-                            startReinforceTrainingInternal()
-                        } catch (_: Exception) {}
-                    }
+                    try {
+                        restartTrainingSafely()
+                    } catch (_: Exception) {}
                     try { Thread.sleep(3000) } catch (_: Exception) {}
                 }
             }
@@ -1117,6 +1107,22 @@ class SnakeView @JvmOverloads constructor(
         } catch (_: Exception) {}
     }
 
+    private fun restartTrainingSafely() {
+        synchronized(sharedLock) {
+            trainActive = false
+            reinforceTraining = false
+        }
+        val oldThreads = synchronized(trainThreads) { trainThreads.toList() }
+        for (t in oldThreads) { try { t.interrupt() } catch (_: Throwable) {} }
+        for (t in oldThreads) {
+            try { t.join(500) } catch (_: InterruptedException) { break }
+        }
+        synchronized(trainThreads) { trainThreads.clear() }
+        Thread.sleep(200)
+        synchronized(sharedLock) { reinforceTraining = true }
+        startParallelTraining()
+    }
+
     private fun startParallelTraining() {
         if (trainActive) return
 
@@ -1147,8 +1153,12 @@ class SnakeView @JvmOverloads constructor(
                                     i * 999983L
                         )
 
-                    while (trainActive) {
-                        if (evolving) { Thread.yield(); continue }
+                    while (trainActive && !Thread.currentThread().isInterrupted) {
+                        if (evolving) {
+                            if (Thread.currentThread().isInterrupted) break
+                            Thread.yield()
+                            continue
+                        }
                         var agentId = -1
                         
                         // 获取当前需要训练的个体 ID
@@ -1172,6 +1182,9 @@ class SnakeView @JvmOverloads constructor(
                         // 让游戏用这个个体去跑，并记录得分
                         try {
                             game.playOneGame(agentId)
+                        } catch (e: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            break
                         } catch (e: Exception) {
                             e.printStackTrace()
                         }
@@ -1200,6 +1213,7 @@ class SnakeView @JvmOverloads constructor(
 
         for (t in trainThreads) {
             try {
+                t.interrupt()
                 val remain =
                     deadline -
                         System.currentTimeMillis()
