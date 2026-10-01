@@ -667,14 +667,14 @@ class AiCore(ctx: Context) {
             }
             // 死亡记忆回避
             val nc = e.nextCell(d)
-            if (nc != null && memory.danger(nc.first, nc.second, d) > 0.5) {
+            if (nc != null && memory.danger(nc.first, nc.second, d) > 0.5f) {
                 for (a in 0 until 4) {
-                    if (a == d || a == (e.dir + 2) % 4 && len > 1) continue
+                    if (a == d || (a == (e.dir + 2) % 4 && len > 1)) continue
                     val c2 = e.nextCell(a) ?: continue
                     if (e.occupied(c2.first, c2.second)) continue
                     val s3 = sim.copy()
                     if (s3.stepAuto(a) && s3.flood(s3.head) >= len &&
-                        memory.danger(c2.first, c2.second, a) < 0.3
+                        memory.danger(c2.first, c2.second, a) < 0.3f
                     ) { d = a; mark(B_MEMORY); break }
                 }
             }
@@ -879,14 +879,15 @@ class SnakeView @JvmOverloads constructor(
 
     private fun drawGame(c: Canvas) {
         c.drawColor(Color.BLACK)
-        val cell = min(width, height * 0.7f) / 15f
-        val ox = (width - cell * 15) / 2f
+        val cell = min(width.toFloat(), height * 0.7f) / 15f
+        val ox = (width - cell * 15f) / 2f
         val oy = dp(30f)
         // 网格
         line.style = Paint.Style.STROKE; line.strokeWidth = 1f; line.color = Color.rgb(40, 40, 45)
         for (i in 0..15) {
-            c.drawLine(ox + i * cell, oy, ox + i * cell, oy + 15 * cell, line)
-            c.drawLine(ox, oy + i * cell, ox + 15 * cell, oy + i * cell, line)
+            val fi = i.toFloat()
+            c.drawLine(ox + fi * cell, oy, ox + fi * cell, oy + 15f * cell, line)
+            c.drawLine(ox, oy + fi * cell, ox + 15f * cell, oy + fi * cell, line)
         }
         // 食物
         p.color = Color.RED
@@ -1087,7 +1088,7 @@ class SnakeView @JvmOverloads constructor(
             p.color = Color.rgb(45, 45, 52)
             c.drawRoundRect(barX + dp(44f), y, barX + barW, y + dp(7f), dp(2f), dp(2f), p)
             p.color = Color.rgb(120, 255, 180)
-            val r = (params[i].second / params[i].third).coerceIn(0f..1f.toDouble()).toFloat()
+            val r = (params[i].second / params[i].third).toFloat().coerceIn(0f, 1f)
             if (r > 0.01f) c.drawRoundRect(barX + dp(44f), y, barX + dp(44f) + (barW - dp(44f)) * r, y + dp(7f), dp(2f), dp(2f), p)
         }
     }
