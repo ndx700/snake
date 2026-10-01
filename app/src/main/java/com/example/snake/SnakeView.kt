@@ -351,16 +351,15 @@ class SnakeView @JvmOverloads constructor(
         val curiosityBonus = if (isNewState) 0.02f else 0f
         val effectiveReward = reward + curiosityBonus
 
+        val idx = qIndex(state, action)
+
         // 计算TD误差用于优先经验回放
         val tdErr = if (terminal) effectiveReward else (effectiveReward + GAMMA * qMax(nextState, nextMask) - qV2[idx])
-        val tdErr = if (terminal) reward else (reward + GAMMA * qMax(nextState, nextMask) - qV2[idx])
         // 存入经验回放buffer
         synchronized(replayBuffer) {
-            replayBuffer.add(Experience(state, action, reward, nextState, nextMask, terminal, tdErr))
+            replayBuffer.add(Experience(state, action, effectiveReward, nextState, nextMask, terminal, tdErr))
             if (replayBuffer.size > REPLAY_CAPACITY) replayBuffer.removeAt(0)
         }
-
-        val idx = qIndex(state, action)
 
         synchronized(qLock(idx)) {
             val visits = nV2[idx]
