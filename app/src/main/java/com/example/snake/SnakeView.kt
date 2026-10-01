@@ -140,6 +140,13 @@ class SnakeView @JvmOverloads constructor(
     private var v3PrevScore: Int = 0
     private var v3Enabled = true
 
+    // V3 50 Agent 训练
+    private val v3PopulationLock = Any()
+    private var v3Population: List<AIEngineV3> = List(POPULATION_SIZE) { AIEngineV3() }
+    private val v3AgentResults = arrayOfNulls<V3AgentResult>(POPULATION_SIZE)
+    private val v3EvolveLock = Any()
+    @Volatile private var v3Evolving = false
+
     private fun toV3State(): V3State {
         val bodyArr = IntArray(snake.size)
         for (i in snake.indices) {
@@ -556,6 +563,34 @@ class SnakeView @JvmOverloads constructor(
             for (i in child.w1.indices) child.w1[i] += (Random.nextFloat() - 0.5f) * mut
             for (i in child.w2.indices) child.w2[i] += (Random.nextFloat() - 0.5f) * mut
             for (i in child.w3.indices) child.w3[i] += (Random.nextFloat() - 0.5f) * mut
+        }
+    }
+
+    private fun performV3Evolution(runId: Long) {
+        synchronized(v3EvolveLock) {
+            if (!isTrainingRunActive(runId)) return
+            if (v3Evolving) return
+            v3Evolving = true
+            try {
+                val results = synchronized(v3PopulationLock) {
+                    v3AgentResults.filterNotNull()
+                }
+                if (results.size < POPULATION_SIZE) return
+                val next = V3EvolutionManager.evolve(results, generation, 5)
+                if (!isTrainingRunActive(runId)) return
+                synchronized(v3PopulationLock) {
+                    v3Population = next
+                    java.util.Arrays.fill(v3AgentResults, null)
+                }
+                synchronized(sharedLock) {
+                    generation++
+                    completedAgents = 0
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                v3Evolving = false
+            }
         }
     }
 
@@ -1200,17 +1235,11 @@ class SnakeView @JvmOverloads constructor(
                 currentScores[i] = 0f
             }
 
-            for (i in 0 until TRAIN_THREADS) {
+                    for (i in 0 until TRAIN_THREADS) {
                 val t = Thread(
                     {
-                        val game = TrainGame(
-                            seed = System.nanoTime() + i * 999983L,
-                            runId = myRunId
-                        )
-
                         while (isTrainingRunActive(myRunId) && !Thread.currentThread().isInterrupted) {
-                            if (evolving) {
-                                if (Thread.currentThread().isInterrupted) break
+                            if (v3Evolving) {
                                 Thread.yield()
                                 continue
                             }
@@ -1220,28 +1249,41 @@ class SnakeView @JvmOverloads constructor(
                                     agentId = currentAgentIndex++
                                 }
                             }
+                            if (agentId < 0) {
+                                Thread.yield()
+                                continue
+                            }
+                            val agent = synchronized(v3PopulationLock) { v3Population[agentId] }
+                            val game = TrainGame(
+                                seed = System.nanoTime() + agentId * 999983L,
+                                runId = myRunId,
+                                v3 = agent
+                            )
 
                             if (agentId == -1) {
                                 Thread.yield()
                                 continue
                             }
 
+                            var result: V3AgentResult? = null
                             try {
-                                game.playOneGame(agentId)
+                                result = game.playOneGameV3(agentId)
                             } catch (e: InterruptedException) {
                                 Thread.currentThread().interrupt()
                                 break
-                            } catch (e: Exception) {
+                            } catch (e: Throwable) {
                                 e.printStackTrace()
-                            } finally {
+                                result = V3AgentResult(agent = agent, fitness = -1000f, score = 0, food = 0, survivalSteps = 0, deathReason = V3DeathReason.UNKNOWN)
+                            }
+                            if (isTrainingRunActive(myRunId)) {
+                                val finalResult = result ?: V3AgentResult(agent = agent, fitness = -1000f, score = 0, food = 0, survivalSteps = 0, deathReason = V3DeathReason.UNKNOWN)
+                                synchronized(v3PopulationLock) { v3AgentResults[agentId] = finalResult }
+                                var shouldEvolve = false
                                 synchronized(sharedLock) {
                                     completedAgents++
-                                    if (completedAgents >= POPULATION_SIZE) {
-                                        evolveNextGeneration()
-                                        currentAgentIndex = 0
-                                        completedAgents = 0
-                                    }
+                                    if (completedAgents >= POPULATION_SIZE) shouldEvolve = true
                                 }
+                                if (shouldEvolve) performV3Evolution(myRunId)
                             }
                         }
                     },
@@ -6842,10 +6884,13 @@ class SnakeView @JvmOverloads constructor(
     private inner class TrainGame(
         seed: Long,
         private val runId: Long,
-        val v3: AIEngineV3 = AIEngineV3()
+        val v3: AIEngineV3
     ) {
         val rng =
             Random(seed)
+
+        var v3Active = false
+        var gFoodEaten = 0
 
         val gSnake =
             ArrayDeque<P>()
@@ -6916,6 +6961,7 @@ class SnakeView @JvmOverloads constructor(
                 P(1, 0)
 
             gScore = 0
+            gFoodEaten = 0
             gHunger = 0
             gCombo = 0
             gSteps = 0
@@ -6946,6 +6992,23 @@ class SnakeView @JvmOverloads constructor(
             } else if (gOver && isTrainingRunActive(runId)) {
                 gDie(lastDeathCause)
             }
+        }
+
+        fun playOneGameV3(agentId: Int): V3AgentResult {
+            playOneGame(agentId)
+            val reason = when (lastDeathCause) {
+                "WALL" -> V3DeathReason.HIT_WALL
+                "SELF" -> V3DeathReason.HIT_SELF
+                "TRAP" -> V3DeathReason.TRAPPED
+                "HUNGER" -> V3DeathReason.HUNGER
+                "TIMEOUT" -> V3DeathReason.LOOP
+                else -> V3DeathReason.UNKNOWN
+            }
+            val fit = V3EvolutionManager.fitness(
+                score = gScore, food = gFoodEaten,
+                survivalSteps = gSteps, length = gSnake.size, deathReason = reason
+            )
+            return V3AgentResult(agent = v3, fitness = fit, score = gScore, food = gFoodEaten, survivalSteps = gSteps, deathReason = reason)
         }
 
         fun gPlaceFood() {
@@ -7116,6 +7179,7 @@ class SnakeView @JvmOverloads constructor(
                 REWARD_STEP
 
             if (ate) {
+                gFoodEaten++
                 gScore +=
                     10 +
                         min(
@@ -7198,14 +7262,16 @@ class SnakeView @JvmOverloads constructor(
 
             v3Feedback(false)
 
-            qUpdate(
-                state,
-                action,
-                reward,
-                nextState,
-                nextMask,
-                false
-            )
+            if (!v3Active) {
+                qUpdate(
+                    state,
+                    action,
+                    reward,
+                    nextState,
+                    nextMask,
+                    false
+                )
+            }
 
             prevState =
                 nextState
@@ -7219,14 +7285,16 @@ class SnakeView @JvmOverloads constructor(
             action: Int,
             reward: Float
         ) {
-            qUpdate(
-                state,
-                action,
-                reward,
-                state,
-                0,
-                true
-            )
+            if (!v3Active) {
+                qUpdate(
+                    state,
+                    action,
+                    reward,
+                    state,
+                    0,
+                    true
+                )
+            }
 
             prevState = -1
             prevAction = -1
@@ -7235,6 +7303,7 @@ class SnakeView @JvmOverloads constructor(
         fun gChooseMove(
             state: Int
         ): P {
+            v3Active = false
             // V3 决策路径
             try {
                 val bodyArr = IntArray(gSnake.size)
@@ -7261,6 +7330,7 @@ class SnakeView @JvmOverloads constructor(
                 )
                 v3.setTrainingEnabled(true)
                 val a = v3.act(v3state)
+                v3Active = true
                 return when(a) {
                     V3Action.UP -> P(0, -1)
                     V3Action.RIGHT -> P(1, 0)
