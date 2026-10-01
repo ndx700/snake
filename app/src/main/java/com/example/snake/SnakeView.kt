@@ -144,6 +144,7 @@ class SnakeView @JvmOverloads constructor(
     private var v3Enabled = true
 
     // V3 50 Agent 训练
+    private val POPULATION_SIZE = 50
     private val v3PopulationLock = Any()
     private val v3TrainingShared = V3SharedLearning()
     private var v3Population: List<AIEngineV3> = List(POPULATION_SIZE) { AIEngineV3(v3TrainingShared) }
@@ -175,7 +176,7 @@ class SnakeView @JvmOverloads constructor(
             food = food.y * cols + food.x,
             direction = dirV3,
             score = score,
-            steps = steps,
+            steps = 0,
             stepsSinceFood = hunger,
             hunger = hunger.toFloat(),
             gameOver = gameOver,
