@@ -445,8 +445,10 @@ class SnakeView @JvmOverloads constructor(
 
         v2LearningSteps++
 
-        // === Target 网络软更新（Polyak）：每步缓慢同步，比硬拷贝更稳定 ===
-        synchronized(qLocks) {
+        // === Target 网络软更新（Polyak）：每 50 步批量同步一次，避免每步遍历 20 万元素 ===
+        targetUpdateCounter++
+        if (targetUpdateCounter >= 50) {
+            targetUpdateCounter = 0
             for (i in qTarget.indices) {
                 qTarget[i] = qTarget[i] + POLYAK_TAU * (qV2[i] - qTarget[i])
             }
