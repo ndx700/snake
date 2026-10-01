@@ -168,6 +168,8 @@ class SnakeView @JvmOverloads constructor(
     @Volatile
     private var bestScoreAllTime = 0f
     @Volatile private var deadEndPredicted = false
+    @Volatile private var rolloutActive = false
+    @Volatile private var rolloutSteps = 0
     @Volatile private var foodSpaceRatio = 1f
     @Volatile private var evolving = false
     private val visitedStates = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
@@ -2371,7 +2373,16 @@ class SnakeView @JvmOverloads constructor(
         var deadEndPenalty = 0f
         if (de.first) deadEndPenalty = -5f
 
-        val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f + deadEndPenalty
+        // 按需启用前瞻模拟：蛇长>20才启用，越长模拟越多步
+        val rSteps = when {
+            snake.size > 60 -> 5
+            snake.size > 25 -> 3
+            else -> 0
+        }
+        rolloutActive = rSteps > 0
+        rolloutSteps = rSteps
+        val rolloutScore = if (rSteps > 0) rolloutN(candidate.d, rSteps) else 0f
+        val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f + deadEndPenalty + rolloutScore * 0.5f
             if (mixed > bestValue) {
                 bestValue = mixed
                 best = candidate.copy(qValue = q)
@@ -3702,6 +3713,42 @@ class SnakeView @JvmOverloads constructor(
         )
     }
 
+    // N步前瞻模拟：给定方向，模拟走n步，返回评分
+    private fun rolloutN(startDir: P, maxSteps: Int): Float {
+        var body = ArrayDeque(snake)
+        var dir = startDir
+        var score = 0f
+        val dirs = listOf(P(0,-1), P(0,1), P(-1,0), P(1,0))
+        for (step in 0 until maxSteps) {
+            // 找这个方向上最安全的下一步
+            var bestNext: P? = null
+            var bestSpace = -1
+            for (d in dirs) {
+                val nh = P(body.first().x + d.x, body.first().y + d.y)
+                if (!inside(nh)) continue
+                val isTail = nh == body.last()
+                if (body.contains(nh) && !isTail) continue
+                // 数周围空间
+                var space = 0
+                for (sd in dirs) {
+                    val sx = nh.x + sd.x
+                    val sy = nh.y + sd.y
+                    if (sx in 0 until cols && sy in 0 until rows) {
+                        if (!body.any { it.x == sx && it.y == sy }) space++
+                    }
+                }
+                if (space > bestSpace) { bestSpace = space; bestNext = d }
+            }
+            if (bestNext == null) return -50f + step * -10f // 死了
+            val sim = simulateOn(body, bestNext)
+            body = sim.body
+            score += 5f // 每活一步+5
+            if (sim.ate) score += 15f // 吃到食物额外+15
+            dir = bestNext
+        }
+        return score
+    }
+
     private fun simulateForBody(
         src: ArrayDeque<P>,
         d: P,
@@ -3753,6 +3800,42 @@ class SnakeView @JvmOverloads constructor(
             b,
             ate
         )
+    }
+
+    // N步前瞻模拟：给定方向，模拟走n步，返回评分
+    private fun rolloutN(startDir: P, maxSteps: Int): Float {
+        var body = ArrayDeque(snake)
+        var dir = startDir
+        var score = 0f
+        val dirs = listOf(P(0,-1), P(0,1), P(-1,0), P(1,0))
+        for (step in 0 until maxSteps) {
+            // 找这个方向上最安全的下一步
+            var bestNext: P? = null
+            var bestSpace = -1
+            for (d in dirs) {
+                val nh = P(body.first().x + d.x, body.first().y + d.y)
+                if (!inside(nh)) continue
+                val isTail = nh == body.last()
+                if (body.contains(nh) && !isTail) continue
+                // 数周围空间
+                var space = 0
+                for (sd in dirs) {
+                    val sx = nh.x + sd.x
+                    val sy = nh.y + sd.y
+                    if (sx in 0 until cols && sy in 0 until rows) {
+                        if (!body.any { it.x == sx && it.y == sy }) space++
+                    }
+                }
+                if (space > bestSpace) { bestSpace = space; bestNext = d }
+            }
+            if (bestNext == null) return -50f + step * -10f // 死了
+            val sim = simulateOn(body, bestNext)
+            body = sim.body
+            score += 5f // 每活一步+5
+            if (sim.ate) score += 15f // 吃到食物额外+15
+            dir = bestNext
+        }
+        return score
     }
 
     private fun canSim(
@@ -6286,6 +6369,8 @@ class SnakeView @JvmOverloads constructor(
                 text.color = Color.rgb(80, 200, 120)
                 c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 78f, text)
             }
+            text.color = if (rolloutActive) Color.rgb(180, 180, 255) else Color.rgb(100, 100, 120)
+            c.drawText(if (rolloutActive) "🔮 前瞻模拟${rolloutSteps}步（蛇长${snake.size}）" else "🔮 前瞻模拟：蛇短不启用", left + 16f, infoY + 96f, text)
             text.isFakeBoldText = false
             text.color = Color.WHITE
             text.textSize = 14f
@@ -7265,7 +7350,16 @@ class SnakeView @JvmOverloads constructor(
         var deadEndPenalty = 0f
         if (de.first) deadEndPenalty = -5f
 
-        val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f + deadEndPenalty
+        // 按需启用前瞻模拟：蛇长>20才启用，越长模拟越多步
+        val rSteps = when {
+            snake.size > 60 -> 5
+            snake.size > 25 -> 3
+            else -> 0
+        }
+        rolloutActive = rSteps > 0
+        rolloutSteps = rSteps
+        val rolloutScore = if (rSteps > 0) rolloutN(candidate.d, rSteps) else 0f
+        val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f + deadEndPenalty + rolloutScore * 0.5f
 
                 if (
                     mixed >
