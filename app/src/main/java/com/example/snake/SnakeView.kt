@@ -5519,11 +5519,11 @@ class SnakeView @JvmOverloads constructor(
 
         val w =
             min(
-                width * 0.94f,
-                680f
+                width * 0.97f,
+                720f
             )
 
-        val h = 780f
+        val h = 760f
 
         val left =
             (width - w) / 2f
@@ -5553,18 +5553,33 @@ class SnakeView @JvmOverloads constructor(
         )
 
         border.color =
-            Color.argb(
-                60,
-                46,
-                204,
-                113
-            )
+            when (ai.danger) {
+                1 -> Color.GREEN
+                2 ->
+                    Color.rgb(
+                        150,
+                        255,
+                        80
+                    )
+
+                3 -> Color.YELLOW
+
+                4 ->
+                    Color.rgb(
+                        255,
+                        150,
+                        0
+                    )
+
+                else ->
+                    Color.RED
+            }
 
         border.style =
             Paint.Style.STROKE
 
         border.strokeWidth =
-            2f
+            5f
 
         c.drawRoundRect(
             left,
@@ -5583,10 +5598,10 @@ class SnakeView @JvmOverloads constructor(
             true
 
         text.textSize =
-            22f
+            26f
 
         text.color =
-            Color.rgb(46, 204, 113)
+            Color.WHITE
 
         c.drawText(
             if (reinforceTraining)
@@ -5624,46 +5639,48 @@ class SnakeView @JvmOverloads constructor(
         val gaugeCY =
             top + 116f
 
-        if (reinforceTraining) {
-            // 训练模式：圆环显示进化进度
-            val progRatio = currentAgentIndex.toFloat() / POPULATION_SIZE
-            val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-            arcPaint.style = Paint.Style.STROKE
-            arcPaint.strokeWidth = 16f
-            arcPaint.strokeCap = Paint.Cap.ROUND
-            val oval = RectF(gaugeCX - 60f, gaugeCY - 60f, gaugeCX + 60f, gaugeCY + 60f)
-            arcPaint.color = Color.rgb(50, 50, 50)
-            c.drawArc(oval, -90f, 360f, false, arcPaint)
-            arcPaint.color = Color.rgb(46, 204, 113)
-            c.drawArc(oval, -90f, 360f * progRatio, false, arcPaint)
+        drawDangerGauge(
+            c,
+            gaugeCX,
+            gaugeCY,
+            42f,
+            ai.danger
+        )
 
-            text.textAlign = Paint.Align.CENTER
-            text.isFakeBoldText = true
-            text.textSize = 32f
-            text.color = Color.WHITE
-            c.drawText("$currentAgentIndex", gaugeCX, gaugeCY + 8f, text)
-            text.isFakeBoldText = false
-            text.textSize = 16f
-            text.color = Color.LTGRAY
-            c.drawText("进度", gaugeCX, gaugeCY + 28f, text)
-        } else {
-            drawDangerGauge(
-                c,
-                gaugeCX,
-                gaugeCY,
-                42f,
-                ai.danger
-            )
-            text.textAlign = Paint.Align.CENTER
-            text.isFakeBoldText = true
-            text.textSize = 38f
-            text.color = Color.WHITE
-            c.drawText("${ai.danger}", gaugeCX, gaugeCY + 12f, text)
-            text.isFakeBoldText = false
-            text.textSize = 17f
-            text.color = Color.LTGRAY
-            c.drawText("进度", gaugeCX, gaugeCY + 42f, text)
-        }
+        text.textAlign =
+            Paint.Align.CENTER
+
+        text.isFakeBoldText =
+            true
+
+        text.textSize =
+            26f
+
+        text.color =
+            Color.WHITE
+
+        c.drawText(
+            "${ai.danger}",
+            gaugeCX,
+            gaugeCY + 9f,
+            text
+        )
+
+        text.isFakeBoldText =
+            false
+
+        text.textSize =
+            12f
+
+        text.color =
+            Color.LTGRAY
+
+        c.drawText(
+            "危险",
+            gaugeCX,
+            gaugeCY + 28f,
+            text
+        )
 
         text.textAlign =
             Paint.Align.LEFT
@@ -5676,7 +5693,7 @@ class SnakeView @JvmOverloads constructor(
 
         c.drawText(
             "局数 $totalGames",
-            left + 155f,
+            left + 118f,
             top + 86f,
             text
         )
@@ -5694,7 +5711,7 @@ class SnakeView @JvmOverloads constructor(
             "近50均分 ${
                 "%.0f".format(avg)
             }   最佳 $bestRecentScore",
-            left + 155f,
+            left + 118f,
             top + 110f,
             text
         )
@@ -5707,61 +5724,14 @@ class SnakeView @JvmOverloads constructor(
             }
 
         c.drawText(
-            "模式 $threadInfo   主蛇长 ${snake.size}   Q覆盖${visitedStates.size}",
-            left + 155f,
+            "模式 $threadInfo   主蛇长 ${snake.size}",
+            left + 118f,
             top + 134f,
             text
         )
 
-        // 训练数据条（Q覆盖/回放/ε/Q-NN权重）
-        if (reinforceTraining) {
-            barPaint.style = Paint.Style.FILL
-            var meterY = top + 190f
-            val meterW = w - 32f
-
-            // Q覆盖条
-            text.textSize = 13f
-            text.color = Color.rgb(180, 140, 255)
-            c.drawText("Q覆盖 ${visitedStates.size}/$V2_STATE_COUNT", left + 16f, meterY + 12f, text)
-            barPaint.color = Color.rgb(30, 30, 40)
-            c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW, meterY + 28f, 3f, 3f, barPaint)
-            barPaint.color = Color.rgb(150, 220, 255)
-            val qCovR = (visitedStates.size.toFloat() / V2_STATE_COUNT).coerceIn(0f, 1f)
-            c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW * qCovR, meterY + 28f, 3f, 3f, barPaint)
-            meterY += 32f
-
-            // 经验回放条
-            text.color = Color.rgb(100, 220, 255)
-            c.drawText("回放 ${replayBuffer.size}/$REPLAY_CAPACITY", left + 16f, meterY + 12f, text)
-            barPaint.color = Color.rgb(30, 30, 40)
-            c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW, meterY + 28f, 3f, 3f, barPaint)
-            barPaint.color = Color.rgb(100, 200, 255)
-            val rpR = replayBuffer.size.toFloat() / REPLAY_CAPACITY
-            c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW * rpR, meterY + 28f, 3f, 3f, barPaint)
-            meterY += 32f
-
-            // 探索率ε条
-            text.color = Color.rgb(241, 196, 15)
-            c.drawText("ε ${"%.2f".format(v2Epsilon)}", left + 16f, meterY + 12f, text)
-            barPaint.color = Color.rgb(30, 30, 40)
-            c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW, meterY + 28f, 3f, 3f, barPaint)
-            barPaint.color = Color.rgb(241, 196, 15)
-            c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW * v2Epsilon, meterY + 28f, 3f, 3f, barPaint)
-            meterY += 32f
-
-            // Q/NN权重条
-            text.color = Color.rgb(200, 200, 200)
-            c.drawText("Q ${"%.2f".format(qWeight)} / NN ${"%.2f".format(nnWeight)}", left + 16f, meterY + 12f, text)
-            barPaint.color = Color.rgb(30, 30, 40)
-            c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW, meterY + 28f, 3f, 3f, barPaint)
-            barPaint.color = Color.rgb(46, 204, 113)
-            c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW * qWeight, meterY + 28f, 3f, 3f, barPaint)
-            barPaint.color = Color.rgb(46, 204, 113)
-            c.drawRoundRect(left + 16f + meterW * qWeight, meterY + 16f, left + 16f + meterW, meterY + 28f, 3f, 3f, barPaint)
-        }
-
         val wbY =
-            top + 340f
+            top + 175f
 
         text.isFakeBoldText =
             true
@@ -5825,7 +5795,7 @@ class SnakeView @JvmOverloads constructor(
 
         c.drawText(
             "$deathCause -> $lastLearnAction",
-            left + 155f,
+            left + 118f,
             learnY,
             text
         )
@@ -5840,7 +5810,7 @@ class SnakeView @JvmOverloads constructor(
             barEndX - barStartX
 
         var barY =
-            top + 380f
+            top + 318f
 
         if (!reinforceTraining) {
             text.isFakeBoldText =
@@ -6047,7 +6017,7 @@ class SnakeView @JvmOverloads constructor(
             barY + 20f
 
         val chartH =
-            100f
+            72f
 
         val curveX =
             left + 16f
@@ -6206,16 +6176,16 @@ class SnakeView @JvmOverloads constructor(
         drawQHeatmap(
             c,
             left + 16f,
-            heatY + 12f,
+            heatY + 8f,
             w - 32f,
-            80f
+            66f
         )
 
         val infoY =
             heatY +
-                12f +
-                80f +
-                28f
+                8f +
+                66f +
+                22f
 
         var visited =
             0
@@ -6273,7 +6243,7 @@ class SnakeView @JvmOverloads constructor(
 
         if (reinforceTraining) {
             c.drawText(
-                "世代 $generation   当前个体 $currentAgentIndex/$POPULATION_SIZE   Q覆盖${visitedStates.size}",
+                "世代 $generation   当前个体 $currentAgentIndex/$POPULATION_SIZE",
                 left + 16f,
                 infoY,
                 text
@@ -6281,47 +6251,15 @@ class SnakeView @JvmOverloads constructor(
             c.drawText(
                 "本代最佳 ${"%.0f".format(bestScoreThisGen)}   历史最佳 ${"%.0f".format(bestScoreAllTime)}",
                 left + 16f,
-                infoY + 18f,
+                infoY + 20f,
                 text
             )
             c.drawText(
                 "Q表权重 ${"%.2f".format(qWeight)}   神经网络权重 ${"%.2f".format(nnWeight)}",
                 left + 16f,
-                infoY + 36f,
+                infoY + 40f,
                 text
             )
-            c.drawText(
-                "回放${replayBuffer.size}/${REPLAY_CAPACITY}   ε${"%.2f".format(v2Epsilon)}   步${v2LearningSteps}",
-                left + 16f,
-                infoY + 54f,
-                text
-            )
-            val learnStatus = when {
-                generation < 3 -> "🧬 初始化种群，随机试错中..."
-                v2Epsilon > 0.15f -> "🔍 探索阶段：尝试新策略"
-                v2Epsilon < 0.05f && nnWeight > 0.5f -> "🧠 收敛阶段：神经网络主导"
-                bestScoreThisGen > bestScoreAllTime * 0.95f && bestScoreAllTime > 0 -> "🚀 突破中！分数上升"
-                bestScoreThisGen < bestScoreAllTime * 0.3f && bestScoreAllTime > 1000 -> "⚡ 瓶颈期，等待变异突破"
-                else -> "📊 正常进化中..."
-            }
-            text.textSize = 18f
-            text.isFakeBoldText = true
-            text.color = Color.rgb(100, 220, 255)
-            c.drawText(learnStatus, left + 16f, infoY + 74f, text)
-
-            // 死局预判指示器
-            if (deadEndPredicted) {
-                text.color = Color.rgb(231, 76, 60)
-                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
-            } else {
-                text.color = Color.rgb(46, 204, 113)
-                c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
-            }
-            text.color = if (rolloutActive) Color.rgb(180, 180, 255) else Color.rgb(100, 100, 120)
-            c.drawText(if (rolloutActive) "🔮 前瞻模拟${rolloutSteps}步（蛇长${snake.size}）" else "🔮 前瞻模拟：蛇短不启用", left + 16f, infoY + 112f, text)
-            text.isFakeBoldText = false
-            text.color = Color.WHITE
-            text.textSize = 19f
         } else {
             c.drawText(
                 "局数 $totalGames   近50均分 ${
@@ -6341,7 +6279,7 @@ class SnakeView @JvmOverloads constructor(
                     v2LearningSteps
                 }",
                 left + 16f,
-                infoY + 18f,
+                infoY + 20f,
                 text
             )
 
@@ -6360,7 +6298,7 @@ class SnakeView @JvmOverloads constructor(
                     )
                 }",
                 left + 16f,
-                infoY + 36f,
+                infoY + 40f,
                 text
             )
         }
