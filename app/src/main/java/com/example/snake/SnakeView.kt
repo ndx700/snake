@@ -147,7 +147,7 @@ class SnakeView @JvmOverloads constructor(
     private val v3PopulationLock = Any()
     private val v3TrainingShared = V3SharedLearning()
     private var v3Population: List<AIEngineV3> = emptyList()
-    private val v3AgentResults = arrayOfNulls<V3AgentResult>(POPULATION_SIZE)
+    private var v3AgentResults: Array<V3AgentResult?> = arrayOfNulls(0)
     private val v3EvolveLock = Any()
     @Volatile private var v3Evolving = false
     private val completedAgentIds = HashSet<Int>()
@@ -214,6 +214,7 @@ class SnakeView @JvmOverloads constructor(
     private val POPULATION_SIZE = 50
     init {
         v3Population = List(POPULATION_SIZE) { AIEngineV3(v3TrainingShared) }
+        v3AgentResults = arrayOfNulls(POPULATION_SIZE)
     }
     @Volatile
     private var generation = 0
