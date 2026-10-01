@@ -144,6 +144,7 @@ class SnakeView @JvmOverloads constructor(
 
     private var combo = 0
     private var hunger = 0
+    private var lastFreeRegion = 0f
 
     private var deathCause = "无"
     private var lastDeathInfo = ""
@@ -160,6 +161,7 @@ class SnakeView @JvmOverloads constructor(
     private val population = MutableList(POPULATION_SIZE) { TinyBrain() }
     @Volatile
     private var currentAgentIndex = 0
+    private var completedAgents = 0
     private val currentScores = FloatArray(POPULATION_SIZE)
     @Volatile
     private var qWeight = 1.0f
@@ -252,12 +254,13 @@ class SnakeView @JvmOverloads constructor(
         const val EPS_START = 0.22f
         const val EPS_MIN = 0.015f
 
-        const val REWARD_STEP = -0.005f
-        const val REWARD_FOOD = 8.0f
+        const val REWARD_STEP = -0.02f
+        const val REWARD_FOOD = 10.0f
         const val REWARD_SPACE = 0.035f
         const val REWARD_TAIL = 0.55f
         const val REWARD_DANGER = -0.30f
         const val REWARD_HUNGER = -0.025f
+        const val REWARD_SPACE_DELTA = 0.08f
 
         const val DEATH_WALL = -14.0f
         const val DEATH_SELF = -18.0f
@@ -387,28 +390,24 @@ class SnakeView @JvmOverloads constructor(
             nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
         }
 
-        // 经验回放：先选好再学，不嵌套锁
-        val replay = synchronized(replayBuffer) {
-            if (replayBuffer.isEmpty()) null
-            else {
-                var best = replayBuffer[Random.nextInt(replayBuffer.size)]
-                repeat(4) {
-                    val candidate = replayBuffer[Random.nextInt(replayBuffer.size)]
-                    if (abs(candidate.tdError) > abs(best.tdError)) best = candidate
+        // 经验回放：mini-batch 2条，减少重复强化
+        synchronized(replayBuffer) {
+            if (replayBuffer.size > 10) {
+                repeat(2) {
+                    val e = replayBuffer[Random.nextInt(replayBuffer.size)]
+                    evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
                 }
-                best
             }
-        }
-        if (replay != null) {
-            evoUpdate(replay.state, replay.action, replay.reward, replay.nextState, replay.nextMask, replay.terminal)
         }
 
         v2LearningSteps++
 
         val cnt = targetUpdateCounter.incrementAndGet()
-        if (cnt >= 2000 && targetUpdateCounter.compareAndSet(cnt, 0)) {
+        if (cnt >= 50 && targetUpdateCounter.compareAndSet(cnt, 0)) {
             synchronized(targetLock) {
-                System.arraycopy(qV2, 0, qTarget, 0, qV2.size)
+                for (i in qTarget.indices) {
+                    qTarget[i] = qTarget[i] + 0.01f * (qV2[i] - qTarget[i])
+                }
             }
         }
     }
@@ -454,6 +453,9 @@ class SnakeView @JvmOverloads constructor(
             v2Epsilon = EPS_START
             visitedStates.clear()
         }
+        synchronized(targetLock) {
+            java.util.Arrays.fill(qTarget, 0f)
+        }
     }
 
     /*
@@ -487,6 +489,12 @@ class SnakeView @JvmOverloads constructor(
                 outputs[i] = sum
             }
             return outputs
+        }
+
+        fun copyFrom(src: TinyBrain) {
+            System.arraycopy(src.w1, 0, w1, 0, w1.size)
+            System.arraycopy(src.w2, 0, w2, 0, w2.size)
+            System.arraycopy(src.w3, 0, w3, 0, w3.size)
         }
 
         fun breed(child: TinyBrain) {
@@ -540,7 +548,7 @@ class SnakeView @JvmOverloads constructor(
             for (i in 0 until POPULATION_SIZE) {
                 try {
                     when {
-                        i < bestBrains.size -> population[i] = bestBrains[i]
+                        i < bestBrains.size -> population[i].copyFrom(bestBrains[i])
                         i < 40 -> {
                             val p1 = bestBrains[Random.nextInt(bestBrains.size)]
                             var p2 = bestBrains[Random.nextInt(bestBrains.size)]
@@ -567,9 +575,11 @@ class SnakeView @JvmOverloads constructor(
                 }
             }
 
-            val nnRatio = (generation / 50f).coerceIn(0f, 0.8f)
-            nnWeight = nnRatio
-            qWeight = 1.0f - nnRatio
+            // 动态权重：世代越高+分数越好，NN权重越大
+            val baseRatio = (generation / 30f).coerceIn(0f, 0.7f)
+            val scoreBonus = (bestScoreThisGen / 25000f).coerceIn(0f, 0.15f)
+            nnWeight = (baseRatio + scoreBonus).coerceIn(0f, 0.8f)
+            qWeight = 1.0f - nnWeight
 
             Thread { try { saveTrainingState() } catch (_: Exception) {} }.apply {
                 isDaemon = true
@@ -1142,6 +1152,7 @@ class SnakeView @JvmOverloads constructor(
             trainThreads.clear()
 
             currentAgentIndex = 0
+            completedAgents = 0
             bestScoreThisGen = 0f
             for (i in 0 until POPULATION_SIZE) {
                 currentScores[i] = 0f
@@ -1170,9 +1181,10 @@ class SnakeView @JvmOverloads constructor(
 
                             if (agentId == -1) {
                                 synchronized(evolveLock) {
-                                    if (currentAgentIndex >= POPULATION_SIZE) {
+                                    if (completedAgents >= POPULATION_SIZE) {
                                         evolveNextGeneration()
                                         currentAgentIndex = 0
+                                        completedAgents = 0
                                     }
                                 }
                                 continue
@@ -1180,6 +1192,7 @@ class SnakeView @JvmOverloads constructor(
 
                             try {
                                 game.playOneGame(agentId)
+                                synchronized(sharedLock) { completedAgents++ }
                             } catch (e: InterruptedException) {
                                 Thread.currentThread().interrupt()
                                 break
@@ -1651,9 +1664,11 @@ class SnakeView @JvmOverloads constructor(
                     combo - 1
                 )
 
-            reward +=
-                freeRegion(snake) *
-                    REWARD_SPACE
+            // 空间奖励改成变化量：变大才奖，变小才罚
+            val curFree = freeRegion(snake)
+            val spaceDelta = curFree - lastFreeRegion
+            lastFreeRegion = curFree
+            reward += spaceDelta * REWARD_SPACE_DELTA
 
             if (tailReachable(snake)) {
                 reward += REWARD_TAIL
@@ -1663,9 +1678,9 @@ class SnakeView @JvmOverloads constructor(
                 reward += REWARD_DANGER
             }
 
-            reward +=
-                hunger *
-                    REWARD_HUNGER
+            // 饥饿惩罚递增：越饿罚越重
+            val hungerPenalty = -(hunger * hunger * 0.001f).coerceAtMost(0.15f)
+            reward += hungerPenalty
         }
 
         val nextState =
@@ -6781,6 +6796,8 @@ class SnakeView @JvmOverloads constructor(
         var gHunger =
             0
 
+        var gLastFreeRegion = 0f
+
         var gCombo =
             0
 
@@ -6840,6 +6857,7 @@ class SnakeView @JvmOverloads constructor(
 
             prevState = -1
             prevAction = -1
+            gLastFreeRegion = 0f
 
             gPlaceFood()
 
@@ -7029,11 +7047,11 @@ class SnakeView @JvmOverloads constructor(
                         gCombo - 1
                     )
 
-                reward +=
-                    gFreeRegion(
-                        gSnake
-                    ) *
-                        REWARD_SPACE
+                // 空间奖励改变化量
+                val gCurFree = gFreeRegion(gSnake)
+                val gSpaceDelta = gCurFree - gLastFreeRegion
+                gLastFreeRegion = gCurFree
+                reward += gSpaceDelta * REWARD_SPACE_DELTA
 
                 if (
                     gTailReachable(
@@ -7051,9 +7069,8 @@ class SnakeView @JvmOverloads constructor(
                         REWARD_DANGER
                 }
 
-                reward +=
-                    gHunger *
-                        REWARD_HUNGER
+                // hunger惩罚与主游戏统一：平方递增
+                reward += -(gHunger * gHunger * 0.001f).coerceAtMost(0.15f)
             }
 
             gSteps++
@@ -7133,7 +7150,7 @@ class SnakeView @JvmOverloads constructor(
             }
 
             if (
-                gSnake.size < 35
+                gSnake.size < 15
             ) {
                 val path =
                     gShortestPath(
