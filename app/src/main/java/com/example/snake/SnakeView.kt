@@ -9918,36 +9918,19 @@ object V3Board {
         }
 
 
-        return state.copy(
-
+        val newState = state.copy(
             body = newBody,
-
             direction = action,
-
-            food =
-                if (ate)
-                    -1
-                else
-                    state.food,
-
-            steps =
-                state.steps + 1,
-
-            stepsSinceFood =
-                if (ate)
-                    0
-                else
-                    state.stepsSinceFood + 1,
-
-            hunger =
-                if (ate)
-                    0f
-                else
-                    min(
-                        1f,
-                        state.hunger + 0.002f
-                    )
+            food = if (ate) -1 else state.food,
+            steps = state.steps + 1,
+            stepsSinceFood = if (ate) 0 else state.stepsSinceFood + 1,
+            hunger = if (ate) 0f else min(1f, state.hunger + 0.002f)
         )
+
+        val newHash = newBody.contentHashCode().toLong() * 31 + newState.food + newState.direction.ordinal
+        val newHashes = (state.recentHashes + newHash).takeLast(16).toLongArray()
+
+        return newState.copy(recentHashes = newHashes)
     }
 
 
@@ -13350,7 +13333,7 @@ class AIEngineV3(
                 nextLegalMask =
                     if (!died) {
                         BooleanArray(V3Action.values().size).also { mask ->
-                            for (a in V3Board.legalActions(afterEncoded)) {
+                            for (a in V3Board.legalActions(nextState)) {
                                 mask[a.ordinal] = true
                             }
                         }
