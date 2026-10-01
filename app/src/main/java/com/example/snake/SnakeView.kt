@@ -637,8 +637,8 @@ class SnakeView @JvmOverloads constructor(
 
     private var bgm: BgmPlayer? = null
 
-    private var bodyColor = Color.rgb(100, 180, 255)
-    private var headColor = Color.rgb(60, 120, 200)
+    private var bodyColor = Color.rgb(46, 204, 113)
+    private var headColor = Color.rgb(39, 174, 96)
     private var bgColor = Color.BLACK
     private var gridColor = Color.CYAN
     private var rainbowSkin = false
@@ -1197,7 +1197,7 @@ class SnakeView @JvmOverloads constructor(
 
             "red" ->
                 setSnakeColors(
-                    Color.rgb(100, 180, 255),
+                    Color.rgb(46, 204, 113),
                     Color.rgb(192, 57, 43),
                     false
                 )
@@ -1225,8 +1225,8 @@ class SnakeView @JvmOverloads constructor(
 
             else ->
                 setSnakeColors(
-                    Color.rgb(100, 180, 255),
-                    Color.rgb(60, 120, 200),
+                    Color.rgb(46, 204, 113),
+                    Color.rgb(39, 174, 96),
                     false
                 )
         }
@@ -4619,7 +4619,7 @@ class SnakeView @JvmOverloads constructor(
 
         if (reinforceTraining || trainingMode) {
             c.drawColor(
-                Color.rgb(15, 25, 45)
+                Color.BLACK
             )
             // 训练模式：全屏HUD，不画棋盘
 
@@ -5103,11 +5103,11 @@ class SnakeView @JvmOverloads constructor(
             barPaint.color =
                 when {
                     delta > 0.05f ->
-                        Color.rgb(100, 180, 255)  // 涨了=红
+                        Color.rgb(46, 204, 113)  // 涨了=红
                     delta < -0.05f ->
-                        Color.rgb(100, 180, 255)  // 跌了=绿
+                        Color.rgb(46, 204, 113)  // 跌了=绿
                     ratio > 1.3f ->
-                        Color.rgb(100, 180, 255)
+                        Color.rgb(46, 204, 113)
                     ratio > 1.1f ->
                         Color.rgb(241, 196, 15)
                     ratio < 0.8f ->
@@ -5523,20 +5523,23 @@ class SnakeView @JvmOverloads constructor(
                 680f
             )
 
-        val h = height * 0.78f
+        val h = 780f
 
         val left =
             (width - w) / 2f
 
         val top =
-            12f
+            max(
+                12f,
+                height - h - 12f
+            )
 
         panel.color =
             Color.argb(
-                60,
-                180,
-                220,
-                255
+                232,
+                0,
+                0,
+                0
             )
 
         c.drawRoundRect(
@@ -5551,10 +5554,10 @@ class SnakeView @JvmOverloads constructor(
 
         border.color =
             Color.argb(
-                150,
-                150,
-                220,
-                255
+                60,
+                46,
+                204,
+                113
             )
 
         border.style =
@@ -5583,7 +5586,7 @@ class SnakeView @JvmOverloads constructor(
             22f
 
         text.color =
-            Color.WHITE
+            Color.rgb(46, 204, 113)
 
         c.drawText(
             if (reinforceTraining)
@@ -5611,7 +5614,7 @@ class SnakeView @JvmOverloads constructor(
                 ai.reason
             },
             left + 16f,
-            top + 52f,
+            top + 58f,
             text
         )
 
@@ -5619,7 +5622,7 @@ class SnakeView @JvmOverloads constructor(
             left + 58f
 
         val gaugeCY =
-            top + 125f
+            top + 116f
 
         if (reinforceTraining) {
             // 训练模式：圆环显示进化进度
@@ -5631,7 +5634,7 @@ class SnakeView @JvmOverloads constructor(
             val oval = RectF(gaugeCX - 60f, gaugeCY - 60f, gaugeCX + 60f, gaugeCY + 60f)
             arcPaint.color = Color.rgb(50, 50, 50)
             c.drawArc(oval, -90f, 360f, false, arcPaint)
-            arcPaint.color = Color.rgb(150, 220, 255)
+            arcPaint.color = Color.rgb(46, 204, 113)
             c.drawArc(oval, -90f, 360f * progRatio, false, arcPaint)
 
             text.textAlign = Paint.Align.CENTER
@@ -5674,7 +5677,7 @@ class SnakeView @JvmOverloads constructor(
         c.drawText(
             "局数 $totalGames",
             left + 155f,
-            top + 95f,
+            top + 86f,
             text
         )
 
@@ -5692,7 +5695,7 @@ class SnakeView @JvmOverloads constructor(
                 "%.0f".format(avg)
             }   最佳 $bestRecentScore",
             left + 155f,
-            top + 120f,
+            top + 110f,
             text
         )
 
@@ -5706,14 +5709,14 @@ class SnakeView @JvmOverloads constructor(
         c.drawText(
             "模式 $threadInfo   主蛇长 ${snake.size}   Q覆盖${visitedStates.size}",
             left + 155f,
-            top + 145f,
+            top + 134f,
             text
         )
 
         // 训练数据条（Q覆盖/回放/ε/Q-NN权重）
         if (reinforceTraining) {
             barPaint.style = Paint.Style.FILL
-            var meterY = top + 205f
+            var meterY = top + 190f
             val meterW = w - 32f
 
             // Q覆盖条
@@ -5751,14 +5754,14 @@ class SnakeView @JvmOverloads constructor(
             c.drawText("Q ${"%.2f".format(qWeight)} / NN ${"%.2f".format(nnWeight)}", left + 16f, meterY + 12f, text)
             barPaint.color = Color.rgb(30, 30, 40)
             c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW, meterY + 28f, 3f, 3f, barPaint)
-            barPaint.color = Color.rgb(100, 180, 255)
+            barPaint.color = Color.rgb(46, 204, 113)
             c.drawRoundRect(left + 16f, meterY + 16f, left + 16f + meterW * qWeight, meterY + 28f, 3f, 3f, barPaint)
-            barPaint.color = Color.rgb(100, 180, 255)
+            barPaint.color = Color.rgb(46, 204, 113)
             c.drawRoundRect(left + 16f + meterW * qWeight, meterY + 16f, left + 16f + meterW, meterY + 28f, 3f, 3f, barPaint)
         }
 
         val wbY =
-            top + 370f
+            top + 340f
 
         text.isFakeBoldText =
             true
@@ -6308,10 +6311,10 @@ class SnakeView @JvmOverloads constructor(
 
             // 死局预判指示器
             if (deadEndPredicted) {
-                text.color = Color.rgb(255, 160, 60)
+                text.color = Color.rgb(231, 76, 60)
                 c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
             } else {
-                text.color = Color.rgb(100, 180, 255)
+                text.color = Color.rgb(46, 204, 113)
                 c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
             }
             text.color = if (rolloutActive) Color.rgb(180, 180, 255) else Color.rgb(100, 100, 120)
