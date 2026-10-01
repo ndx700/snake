@@ -24,7 +24,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /* ============================================================================
- * SNAKE PRO — 35项AI技术 + 商店皮肤/棋盘 + MainActivity 完整对接版（v3修正）
+ * SNAKE PRO v4 — 35项AI技术 + 商店皮肤/棋盘 + MainActivity 完整对接
  * ==========================================================================*/
 
 // ═══════════════════ 引擎 ═══════════════════
@@ -261,7 +261,6 @@ class Sim(val w: Int, val h: Int) {
         val art = BooleanArray(n); val maxComp = IntArray(n)
         var timer = 0
         val buf = IntArray(4)
-        // 修复：局部递归 fun（val lambda 无法自引用）
         fun dfs(u: Int, parent: Int): Unit {
             disc[u] = timer
             low[u] = timer
@@ -1610,7 +1609,6 @@ class SnakeView @JvmOverloads constructor(
     private var tick = 0L
     private var attached = false
 
-    // 修复：用 this 重新注册，不在初始化器里引用 frameCb 自身
     private val frameCb: Choreographer.FrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             onFrame(frameTimeNanos)
