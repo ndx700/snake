@@ -24,7 +24,8 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /* ============================================================================
- * SNAKE PRO v4 — 35项AI技术 + 商店皮肤/棋盘 + MainActivity 完整对接
+ * SNAKE PRO v5 — 35项AI技术 + 商店皮肤/棋盘 + MainActivity 完整对接
+ * 本次变更：仅修复 load() 的编译错误（label return + 大括号），其余未动
  * ==========================================================================*/
 
 // ═══════════════════ 引擎 ═══════════════════
@@ -1479,26 +1480,70 @@ class AiCore(ctx: Context) {
         } catch (t: Throwable) { Log.w("SnakeAI", "save fail", t) }
     }
 
+    // ═════ 本次唯一修改的函数：load() ═════
+    // 修复：裸 return 改为 label return；for/if 全部大括号化
     private fun load() = synchronized(lock) {
-        if (!file.exists()) return
+        if (!file.exists()) {
+            return@synchronized
+        }
+
         try {
-            DataInputStream(FileInputStream(file).buffered()).use {
-                if (it.readInt() != 0x534E4B50) return
-                eps = it.readDouble(); trainSteps = it.readLong(); bestScore = it.readInt()
-                beta = it.readDouble(); deathStreak = it.readInt()
-                val k = it.readInt().coerceIn(1, 8)
-                for (i in 0 until k) if (i < ensemble.size) Brain.read(it)?.let { b -> ensemble[i].copyFrom(b) }
-                predictor.read(it)
-                Genome.read(it)?.let { g -> genome.copyFrom(g) }
-                memory.read(it)
-                regret.read(it)
-                generation = it.readInt()
-                for (i in deathStats.indices) deathStats[i] = it.readInt()
-                for (i in ensemble.indices) targets[i].copyFrom(ensemble[i])
+            DataInputStream(FileInputStream(file).buffered()).use { input ->
+
+                val magic = input.readInt()
+
+                if (magic != 0x534E4B50) {
+                    return@use
+                }
+
+                eps = input.readDouble()
+                trainSteps = input.readLong()
+                bestScore = input.readInt()
+                beta = input.readDouble()
+                deathStreak = input.readInt()
+
+                val k = input.readInt().coerceIn(1, 8)
+
+                for (i in 0 until k) {
+                    if (i < ensemble.size) {
+                        val loadedBrain = Brain.read(input)
+                        if (loadedBrain != null) {
+                            ensemble[i].copyFrom(loadedBrain)
+                        }
+                    }
+                }
+
+                predictor.read(input)
+
+                val loadedGenome = Genome.read(input)
+                if (loadedGenome != null) {
+                    genome.copyFrom(loadedGenome)
+                }
+
+                memory.read(input)
+                regret.read(input)
+
+                generation = input.readInt()
+
+                for (i in deathStats.indices) {
+                    deathStats[i] = input.readInt()
+                }
+
+                for (i in ensemble.indices) {
+                    targets[i].copyFrom(ensemble[i])
+                }
             }
+
             info.personality = genome.personality()
-            Log.i("SnakeAI", "loaded best=$bestScore steps=$trainSteps gen=$generation")
-        } catch (t: Throwable) { Log.w("SnakeAI", "load fail", t) }
+
+            Log.i(
+                "SnakeAI",
+                "loaded best=$bestScore steps=$trainSteps gen=$generation"
+            )
+
+        } catch (t: Throwable) {
+            Log.w("SnakeAI", "load fail", t)
+        }
     }
 }
 
