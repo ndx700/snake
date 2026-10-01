@@ -897,9 +897,9 @@ class SnakeView @JvmOverloads constructor(
         }
 
         val safeAgent = agentId.coerceIn(0, POPULATION_SIZE - 1)
-        val brain = population[safeAgent]
+        // 修复 1：在对应 Agent 锁内部直接访问 population[safeAgent] 进行训练，不在此锁外提取引用
         synchronized(brainLocks[safeAgent]) {
-            brain.train(vector, action, target)
+            population[safeAgent].train(vector, action, target)
         }
 
         val batch = replayBuffer.sample(2, curGen)
@@ -1073,16 +1073,23 @@ class SnakeView @JvmOverloads constructor(
                     }
                 }
 
-                // STEP 10 & 11: 提交新代
+                // STEP 10 & 11: 提交新代 (修复 2：循环前及每个 Agent 提交前严格检查当前 runId 是否依然有效)
                 if (!isTrainingRunActive(runId)) {
                     return
                 }
 
                 for (i in 0 until POPULATION_SIZE) {
+                    if (!isTrainingRunActive(runId)) {
+                        return
+                    }
                     synchronized(brainLocks[i]) {
                         population[i].copyFrom(nextBrains[i])
                         populationGenomes[i].copyFrom(nextGenomes[i])
                     }
+                }
+
+                if (!isTrainingRunActive(runId)) {
+                    return
                 }
 
                 // STEP 12: 更新 Master 快照
@@ -3408,7 +3415,7 @@ class SnakeView @JvmOverloads constructor(
 
         text.isFakeBoldText = true
         text.textSize = 14f
-        text.color = Color.rgb(255, 150, 150)
+        text.color = Color.rgb(255, 150, 255)
         c.drawText("【死亡统计】", pieCX - 52f, chartY, text)
         text.isFakeBoldText = false
         drawDeathPie(c, pieCX, pieCY, pieR)
@@ -3861,7 +3868,7 @@ class SnakeView @JvmOverloads constructor(
                 gHunger++
                 gCombo = max(0, gCombo - 1)
                 val curFree = freeRegion(gSnake).toFloat()
-                val spaceDelta = (curFree - gLastFreeRegion).coerceIn(-8f, 8f)
+                val spaceDelta = (curFree - lastFreeRegion).coerceIn(-8f, 8f)
                 reward += spaceDelta * REWARD_SPACE_DELTA
                 gLastFreeRegion = curFree
 
