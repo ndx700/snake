@@ -1373,7 +1373,11 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    private fun playEatSound() {
+    playEatSound() {
+        try { toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 55) } catch (_: Throwable) {}
+    }
+
+    private fun playEatSoundFun() {
         try { toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 55) } catch (_: Throwable) {}
     }
 
@@ -1822,7 +1826,7 @@ class SnakeView @JvmOverloads constructor(
             gameSpeed = max(gameSpeedMin, gameSpeedStart - snake.size * 2L)
 
             vibrateEat()
-            playEatSound()
+            playEatSoundFun()
             spawnFoodEffect(nh)
             placeFood()
             reward += REWARD_FOOD + combo * 0.06f
@@ -2469,17 +2473,35 @@ class SnakeView @JvmOverloads constructor(
                 out.flush()
             }
 
-            if (tempFile.exists() && tempFile.length() > 0) {
+            if (tempFile.exists() && tempFile.length() > 0L) {
                 val renamed = tempFile.renameTo(file)
                 if (!renamed) {
+                    val backupTemp = context.getFileStreamPath("snake_training_v4.dat.copytmp")
                     try {
+                        if (backupTemp.exists()) {
+                            backupTemp.delete()
+                        }
                         FileInputStream(tempFile).use { src ->
-                            FileOutputStream(file).use { dst ->
+                            FileOutputStream(backupTemp).use { dst ->
                                 src.channel.transferTo(0, src.channel.size(), dst.channel)
+                                dst.flush()
                             }
                         }
-                        tempFile.delete()
-                    } catch (_: Exception) {}
+                        if (backupTemp.exists() && backupTemp.length() == tempFile.length() && backupTemp.length() > 0L) {
+                            val backupRenamed = backupTemp.renameTo(file)
+                            if (!backupRenamed) {
+                                backupTemp.delete()
+                            } else {
+                                try { tempFile.delete() } catch (_: Exception) {}
+                            }
+                        } else {
+                            backupTemp.delete()
+                        }
+                    } catch (_: Exception) {
+                        try {
+                            backupTemp.delete()
+                        } catch (_: Exception) {}
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -3540,7 +3562,7 @@ class SnakeView @JvmOverloads constructor(
 
             if (deadEndPredicted) {
                 text.color = Color.rgb(255, 80, 80)
-                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
+                c.drawText("⚠️️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
             } else {
                 text.color = Color.rgb(80, 200, 120)
                 c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
@@ -3956,7 +3978,7 @@ class SnakeView @JvmOverloads constructor(
                     reward += 0.20f
                 } else if (gLastTailReachable && curTail) {
                     reward += 0.02f
-                } else if (gLastTailReachable && !curTail) {
+                } else if (lastTailReachable && !curTail) {
                     reward -= 0.30f
                 }
                 gLastTailReachable = curTail
