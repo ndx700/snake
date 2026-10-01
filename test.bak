@@ -702,7 +702,7 @@ class SnakeView @JvmOverloads constructor(
         const val DEATH_TRAP = -20.0f
         const val DEATH_HUNGER = -12.0f
 
-        const val SAVE_VERSION = 1
+        const val SAVE_VERSION = 2
     }
 
     private val qV2 = FloatArray(V2_Q_SIZE)
@@ -1373,11 +1373,7 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    playEatSound() {
-        try { toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 55) } catch (_: Throwable) {}
-    }
-
-    private fun playEatSoundFun() {
+    private fun playEatSound() {
         try { toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 55) } catch (_: Throwable) {}
     }
 
@@ -1826,7 +1822,7 @@ class SnakeView @JvmOverloads constructor(
             gameSpeed = max(gameSpeedMin, gameSpeedStart - snake.size * 2L)
 
             vibrateEat()
-            playEatSoundFun()
+            playEatSound()
             spawnFoodEffect(nh)
             placeFood()
             reward += REWARD_FOOD + combo * 0.06f
@@ -2365,6 +2361,8 @@ class SnakeView @JvmOverloads constructor(
         try {
             val file = context.getFileStreamPath("snake_training_v4.dat")
             val tempFile = context.getFileStreamPath("snake_training_v4.dat.tmp")
+            val bakFile = context.getFileStreamPath("snake_training_v4.dat.bak")
+
             val genCopy: Int
             val scoreCopy: Float
             val qCopy = FloatArray(V2_Q_SIZE)
@@ -2373,10 +2371,16 @@ class SnakeView @JvmOverloads constructor(
             val genomesCopy: List<V4StrategyGenome>
             val championBrainCopy = DuelingBrain()
             val championGenomeCopy: V4StrategyGenome
+            val stepsCopy: Long
+            val episodesCopy: Long
+            val epsilonCopy: Float
 
             synchronized(sharedLock) {
                 genCopy = generation
                 scoreCopy = bestScoreAllTime
+                stepsCopy = v2LearningSteps
+                episodesCopy = v2Episodes
+                epsilonCopy = v2Epsilon
             }
 
             for (lockIdx in 0 until V2_LOCKS) {
@@ -2417,6 +2421,10 @@ class SnakeView @JvmOverloads constructor(
                 out.writeInt(SAVE_VERSION)
                 out.writeInt(genCopy)
                 out.writeFloat(scoreCopy)
+                out.writeLong(stepsCopy)
+                out.writeLong(episodesCopy)
+                out.writeFloat(epsilonCopy)
+
                 for (brain in popCopy) {
                     for (v in brain.w1) out.writeFloat(v)
                     for (v in brain.b1) out.writeFloat(v)
@@ -2474,35 +2482,32 @@ class SnakeView @JvmOverloads constructor(
             }
 
             if (tempFile.exists() && tempFile.length() > 0L) {
-                val renamed = tempFile.renameTo(file)
-                if (!renamed) {
-                    val backupTemp = context.getFileStreamPath("snake_training_v4.dat.copytmp")
-                    try {
-                        if (backupTemp.exists()) {
-                            backupTemp.delete()
-                        }
-                        FileInputStream(tempFile).use { src ->
-                            FileOutputStream(backupTemp).use { dst ->
-                                src.channel.transferTo(0, src.channel.size(), dst.channel)
-                                dst.flush()
-                            }
-                        }
-                        if (backupTemp.exists() && backupTemp.length() == tempFile.length() && backupTemp.length() > 0L) {
-                            val backupRenamed = backupTemp.renameTo(file)
-                            if (!backupRenamed) {
-                                backupTemp.delete()
-                            } else {
-                                try { tempFile.delete() } catch (_: Exception) {}
-                            }
-                        } else {
-                            backupTemp.delete()
-                        }
-                    } catch (_: Exception) {
-                        try {
-                            backupTemp.delete()
-                        } catch (_: Exception) {}
+                if (file.exists()) {
+                    if (bakFile.exists()) {
+                        bakFile.delete()
                     }
+                    val backedUp = file.renameTo(bakFile)
+                    if (backedUp) {
+                        val replaced = tempFile.renameTo(file)
+                        if (replaced) {
+                            try { bakFile.delete() } catch (_: Exception) {}
+                        } else {
+                            // 替换失败，回滚旧正式文件
+                            bakFile.renameTo(file)
+                            try { tempFile.delete() } catch (_: Exception) {}
+                        }
+                    } else {
+                        // renameTo(bakFile) 失败，尝试直接 rename tempFile -> file
+                        val replaced = tempFile.renameTo(file)
+                        if (!replaced) {
+                            try { tempFile.delete() } catch (_: Exception) {}
+                        }
+                    }
+                } else {
+                    tempFile.renameTo(file)
                 }
+            } else {
+                try { tempFile.delete() } catch (_: Exception) {}
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -2522,6 +2527,19 @@ class SnakeView @JvmOverloads constructor(
 
                 generation = input.readInt()
                 bestScoreAllTime = input.readFloat()
+
+                val loadedSteps = input.readLong()
+                val loadedEpisodes = input.readLong()
+                val loadedEpsilon = input.readFloat()
+
+                v2LearningSteps = if (loadedSteps >= 0L) loadedSteps else 0L
+                v2Episodes = if (loadedEpisodes >= 0L) loadedEpisodes else 0L
+                v2Epsilon = if (loadedEpsilon.isFinite()) {
+                    loadedEpsilon.coerceIn(EPS_MIN, EPS_START)
+                } else {
+                    EPS_START
+                }
+
                 for (i in 0 until POPULATION_SIZE) {
                     val brain = DuelingBrain()
                     for (j in brain.w1.indices) brain.w1[j] = input.readFloat()
@@ -2614,6 +2632,9 @@ class SnakeView @JvmOverloads constructor(
         } catch (_: Exception) {
             generation = 0
             bestScoreAllTime = 0f
+            v2LearningSteps = 0L
+            v2Episodes = 0L
+            v2Epsilon = EPS_START
             val freshBrain = DuelingBrain()
             val freshGenome = V4StrategyGenome()
             for (i in 0 until POPULATION_SIZE) {
@@ -2899,6 +2920,7 @@ class SnakeView @JvmOverloads constructor(
         }
 
         val startIndex = start.y * cols + start.x
+        val targetIndex = target.y * cols + target.x
         visited[startIndex] = true
         var head = 0
         var tail = 0
@@ -3562,7 +3584,7 @@ class SnakeView @JvmOverloads constructor(
 
             if (deadEndPredicted) {
                 text.color = Color.rgb(255, 80, 80)
-                c.drawText("⚠️️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
+                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
             } else {
                 text.color = Color.rgb(80, 200, 120)
                 c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
@@ -3953,7 +3975,7 @@ class SnakeView @JvmOverloads constructor(
                 return
             }
 
-            val ate = nh == gFood
+            val ate = nh == food
             gSnake.addFirst(nh)
             var reward = REWARD_STEP
 
@@ -3967,21 +3989,21 @@ class SnakeView @JvmOverloads constructor(
             } else {
                 gSnake.removeLast()
                 gHunger++
-                gCombo = max(0, gCombo - 1)
+                gCombo = max(0, combo - 1)
                 val curFree = freeRegion(gSnake).toFloat()
                 val spaceDelta = (curFree - lastFreeRegion).coerceIn(-8f, 8f)
                 reward += spaceDelta * REWARD_SPACE_DELTA
                 gLastFreeRegion = curFree
 
                 val curTail = tailReachable(gSnake)
-                if (!gLastTailReachable && curTail) {
+                if (!lastTailReachable && curTail) {
                     reward += 0.20f
-                } else if (gLastTailReachable && curTail) {
+                } else if (lastTailReachable && curTail) {
                     reward += 0.02f
                 } else if (lastTailReachable && !curTail) {
                     reward -= 0.30f
                 }
-                gLastTailReachable = curTail
+                lastTailReachable = curTail
 
                 reward -= (gHunger * gHunger * 0.001f).coerceAtMost(0.15f)
             }
