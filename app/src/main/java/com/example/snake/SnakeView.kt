@@ -2224,9 +2224,10 @@ class SnakeView @JvmOverloads constructor(
         if (safeFoodOk && closedFoodZone) safeFoodOk = false
 
         if (safeFoodOk) {
+            val safeFoodNonNull = safeFood!!
             val action =
                 dirs.indexOfFirst {
-                    it == safeFood
+                    it == safeFoodNonNull
                 }.coerceAtLeast(0)
 
             val q =
@@ -2256,7 +2257,7 @@ class SnakeView @JvmOverloads constructor(
                     foodReachable = true,
                     foodDistance = foodDistNow,
                     hunger = hunger,
-                    chosen = safeFood,
+                    chosen = safeFoodNonNull,
                     candidates = candidates,
                     depth = 2,
                     nodes = legal.size,
@@ -2275,7 +2276,7 @@ class SnakeView @JvmOverloads constructor(
                     safeFollowMode = false
                 )
 
-            return safeFood
+            return safeFoodNonNull
         }
 
         /*
