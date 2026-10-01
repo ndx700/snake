@@ -1453,7 +1453,7 @@ class SnakeView @JvmOverloads constructor(
             )
 
         placeFood()
-        lastFreeRegion = freeRegion(snake)
+        lastFreeRegion = freeRegion(snake).toFloat()
 
         onScoreChanged?.invoke(score)
 
@@ -1668,7 +1668,7 @@ class SnakeView @JvmOverloads constructor(
                 )
 
             // 空间奖励改成变化量：变大才奖，变小才罚
-            val curFree = freeRegion(snake)
+            val curFree = freeRegion(snake).toFloat()
             val spaceDelta = curFree - lastFreeRegion
             lastFreeRegion = curFree
             reward += spaceDelta * REWARD_SPACE_DELTA
@@ -6860,7 +6860,7 @@ class SnakeView @JvmOverloads constructor(
 
             prevState = -1
             prevAction = -1
-            gLastFreeRegion = gFreeRegion(gSnake)
+            gLastFreeRegion = gFreeRegion(gSnake).toFloat()
 
             gPlaceFood()
 
@@ -7051,7 +7051,7 @@ class SnakeView @JvmOverloads constructor(
                     )
 
                 // 空间奖励改变化量
-                val gCurFree = gFreeRegion(gSnake)
+                val gCurFree = gFreeRegion(gSnake).toFloat()
                 val gSpaceDelta = gCurFree - gLastFreeRegion
                 gLastFreeRegion = gCurFree
                 reward += gSpaceDelta * REWARD_SPACE_DELTA
