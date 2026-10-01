@@ -5808,7 +5808,7 @@ class SnakeView @JvmOverloads constructor(
 
         c.drawText(
             if (reinforceTraining)
-                "世代 $generation · ${ai.strategy}"
+                "世代 $generation · 训练中"
             else
                 ai.strategy,
             left + 16f,
@@ -6579,6 +6579,21 @@ class SnakeView @JvmOverloads constructor(
             }
             text.color = if (rolloutActive) Color.rgb(180, 180, 255) else Color.rgb(100, 100, 120)
             c.drawText(if (rolloutActive) "🔮 前瞻模拟${rolloutSteps}步（蛇长${snake.size}）" else "🔮 前瞻模拟：蛇短不启用", left + 16f, infoY + 112f, text)
+
+            // === V3 进化引擎状态 ===
+            text.textSize = 12f
+            val v3Mode = when {
+                ai.strategy.contains("PANIC") -> "🚨 紧急逃生"
+                closedFoodZone -> "🚫 食物封闭区"
+                else -> "🎯 正常觅食"
+            }
+            val v3Learn = when {
+                adaptiveAlphaBoost > 1.4f -> "🔥加速×${"%.1f".format(adaptiveAlphaBoost)}"
+                adaptiveAlphaBoost > 1.0f -> "⚡加速×${"%.1f".format(adaptiveAlphaBoost)}"
+                else -> "🌊稳定×${"%.1f".format(adaptiveAlphaBoost)}"
+            }
+            text.color = Color.rgb(180, 230, 180)
+            c.drawText("V3: $v3Mode  $v3Learn  N步[${nstepBuf.size}/$N_STEP]  近死$recentDeathCount", left + 16f, infoY + 130f, text)
             text.isFakeBoldText = false
             text.color = Color.WHITE
             text.textSize = 14f
