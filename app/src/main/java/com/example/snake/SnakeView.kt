@@ -167,6 +167,8 @@ class SnakeView @JvmOverloads constructor(
     private var bestScoreThisGen = 0f
     @Volatile
     private var bestScoreAllTime = 0f
+    @Volatile private var deadEndPredicted = false
+    @Volatile private var foodSpaceRatio = 1f
     @Volatile private var evolving = false
     private val visitedStates = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
     // =============================
@@ -381,7 +383,7 @@ class SnakeView @JvmOverloads constructor(
         }
 
         // 经验回放：优先采样TD误差大的经验
-        {
+        run {
             synchronized(replayBuffer) {
                 if (replayBuffer.isNotEmpty()) {
                     // 随机抽5条，选TD误差最大的1条学
@@ -2362,7 +2364,14 @@ class SnakeView @JvmOverloads constructor(
             val rule = candidate.score
 
             // 混合分数：Q表分数 * 权重 + 神经网络分数 * 权重 * 放大系数 + 规则分数微调
-            val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f
+            // 死局预判：如果食物周围空间不够，大幅降低吃食物的优先级
+        val de = checkFoodDeadEnd()
+        deadEndPredicted = de.first
+        foodSpaceRatio = de.second
+        var deadEndPenalty = 0f
+        if (de.first) deadEndPenalty = -5f
+
+        val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f + deadEndPenalty
             if (mixed > bestValue) {
                 bestValue = mixed
                 best = candidate.copy(qValue = q)
@@ -4321,6 +4330,35 @@ class SnakeView @JvmOverloads constructor(
             ) >= 0
         }
 
+    // 死局预判：从食物位置BFS算自由空间，如果空间不够蛇身长就是死局
+    private fun checkFoodDeadEnd(): Pair<Boolean, Float> {
+        if (snake.isEmpty()) return Pair(false, 10f)
+        val visited = Array(cols) { BooleanArray(rows) }
+        val queue = ArrayDeque<P>()
+        queue.addLast(food)
+        visited[food.x][food.y] = true
+        var space = 0
+        while (!queue.isEmpty()) {
+            val cur = queue.removeFirst()
+            space++
+            val dirs = listOf(P(0,-1), P(0,1), P(-1,0), P(1,0))
+            for (d in dirs) {
+                val nx = cur.x + d.x
+                val ny = cur.y + d.y
+                if (nx in 0 until cols && ny in 0 until rows && !visited[nx][ny]) {
+                    val isBody = snake.any { it.x == nx && it.y == ny }
+                    if (!isBody) {
+                        visited[nx][ny] = true
+                        queue.addLast(P(nx, ny))
+                    }
+                }
+            }
+        }
+        val ratio = space.toFloat() / snake.size
+        val deadEnd = ratio < 1.2f
+        return Pair(deadEnd, ratio)
+    }
+
     private fun calculateDanger(): Int {
         val region =
             freeRegion(snake)
@@ -6239,6 +6277,15 @@ class SnakeView @JvmOverloads constructor(
             text.isFakeBoldText = true
             text.color = Color.rgb(100, 220, 255)
             c.drawText(learnStatus, left + 16f, infoY + 60f, text)
+
+            // 死局预判指示器
+            if (deadEndPredicted) {
+                text.color = Color.rgb(255, 80, 80)
+                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 78f, text)
+            } else {
+                text.color = Color.rgb(80, 200, 120)
+                c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 78f, text)
+            }
             text.isFakeBoldText = false
             text.color = Color.WHITE
             text.textSize = 14f
@@ -7211,7 +7258,14 @@ class SnakeView @JvmOverloads constructor(
                 val nn = nnVals[a]
                 val rule = candidate.score
 
-                val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f
+                // 死局预判：如果食物周围空间不够，大幅降低吃食物的优先级
+        val de = checkFoodDeadEnd()
+        deadEndPredicted = de.first
+        foodSpaceRatio = de.second
+        var deadEndPenalty = 0f
+        if (de.first) deadEndPenalty = -5f
+
+        val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f + deadEndPenalty
 
                 if (
                     mixed >
