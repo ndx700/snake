@@ -15,32 +15,26 @@ import java.io.DataOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.PriorityQueue
 import java.util.Random
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sin
 import kotlin.math.sqrt
 
-/* ============================================================================
- * SNAKE ULTIMATE PRO — 35 项技术全深度升级版（单文件）
- * ==========================================================================*/
-
-// ═══════════════════ 引擎 ═══════════════════
+/* ═══════════ SNAKE PRO v10 — 35技术层全融合 ═══════════
+ * 0-7地基层(参考文件保命逻辑) / 8-10搜索层 / 11-19学习层
+ * 20-29防护层 / 30-34元层。每步全链路仲裁，35灯HUD。 */
 
 enum class StepResult { MOVED, ATE, DIED }
 enum class DeathReason { WALL, SELF, TRAPPED, STARVED, WIN }
-enum class Goal { FOOD, TAIL, SPACE, SEARCH, SPIRAL, LEARN, NONE }
 
 class GameEngine(val w: Int = 15, val h: Int = 15) {
-    companion object {
-        val DIRS = arrayOf(0 to -1, 1 to 0, 0 to 1, -1 to 0)
-        fun dirBetween(a: Int, b: Int, w: Int): Int = when (b) {
-            a - w -> 0; a + 1 -> 1; a + w -> 2; else -> 3
-        }
-    }
-
+    companion object { val DIRS = arrayOf(0 to -1, 1 to 0, 0 to 1, -1 to 0) }
     val snake = ArrayDeque<Pair<Int, Int>>()
     var food = 0 to 0
     var dir = 1
@@ -111,18 +105,7 @@ class GameEngine(val w: Int = 15, val h: Int = 15) {
     }
 
     private fun die(r: DeathReason) { alive = false; deathReason = r }
-    fun distToFood(x: Int, y: Int) = abs(x - food.first) + abs(y - food.second)
-
-    fun cloneState(): GameEngine {
-        val e = GameEngine(w, h)
-        e.snake.addAll(snake); e.food = food; e.dir = dir; e.score = score
-        e.stepsSinceFood = stepsSinceFood; e.totalSteps = totalSteps
-        e.alive = alive; e.deathReason = deathReason
-        return e
-    }
 }
-
-// ═══════════════════ 沙盒仿真 ═══════════════════
 
 class Sim(val w: Int, val h: Int) {
     val occ = BooleanArray(w * h)
@@ -183,7 +166,6 @@ class Sim(val w: Int, val h: Int) {
         return step(d, t == foodIdx)
     }
 
-    /** 洪泛面积（start 计入）。同时统计死端格数（≤1 个自由邻居的自由格）。 */
     fun flood(start: Int): Int {
         var c = 0
         val seen = BooleanArray(n)
@@ -198,45 +180,6 @@ class Sim(val w: Int, val h: Int) {
         return c
     }
 
-    /** 返回 (面积, 死端数, 周长=区域内贴障碍边数)——紧致度分析 */
-    fun regionStats(start: Int): Triple<Int, Int, Int> {
-        var area = 0; var dead = 0; var perim = 0
-        val seen = BooleanArray(n)
-        val q = ArrayDeque<Int>()
-        seen[start] = true; q.addLast(start)
-        val buf = IntArray(4)
-        while (q.isNotEmpty()) {
-            val cur = q.removeFirst(); area++
-            val m = neighbors(cur, buf)
-            var freeDeg = 0
-            for (i in 0 until m) {
-                val nx = buf[i]
-                if (!seen[nx] && free(nx)) { seen[nx] = true; q.add(nx); freeDeg++ }
-                else if (!free(nx) && !seen[nx]) { perim++ }
-                else if (free(nx)) freeDeg++
-            }
-            // 修正：与上面循环冲突，重新数
-            freeDeg = 0
-            for (i in 0 until m) if (free(buf[i])) freeDeg++
-            if (freeDeg <= 1) dead++
-        }
-        return Triple(area, dead, perim)
-    }
-
-    fun distField(from: Int): IntArray {
-        val d = IntArray(n) { -1 }
-        val q = ArrayDeque<Int>()
-        d[from] = 0; q.addLast(from)
-        val buf = IntArray(4)
-        while (q.isNotEmpty()) {
-            val cur = q.removeFirst()
-            val m = neighbors(cur, buf)
-            for (i in 0 until m) { val nx = buf[i]; if (d[nx] < 0 && free(nx)) { d[nx] = d[cur] + 1; q.add(nx) } }
-        }
-        return d
-    }
-
-    /** 时间感知尾可达：尾巴逐格让位。返回步数，-1 不可达。 */
     fun tailReachSteps(start: Int): Int {
         val freeTime = IntArray(n) { Int.MAX_VALUE }
         var t = 1
@@ -260,65 +203,73 @@ class Sim(val w: Int, val h: Int) {
         return -1
     }
 
-    /** Tarjan 割点 + 割点删除后最大连通块。一次算，四方向共用。 */
-    fun articulation(): Pair<BooleanArray, IntArray> {
-        val disc = IntArray(n) { -1 }; val low = IntArray(n)
-        val art = BooleanArray(n); val maxComp = IntArray(n)
-        var timer = 0
+    fun shortestPathTo(target: Int): IntArray? {
+        if (target < 0 || head == target) return IntArray(0)
+        val parent = IntArray(n) { -1 }
+        val seen = BooleanArray(n)
+        val q = ArrayDeque<Int>()
+        seen[head] = true; q.addLast(head)
         val buf = IntArray(4)
-        fun dfs(u: Int, parent: Int) {
-            disc[u] = low[u] = timer++
-            var children = 0
-            val m = neighbors(u, buf)
+        var found = false
+        while (q.isNotEmpty() && !found) {
+            val cur = q.removeFirst()
+            val m = neighbors(cur, buf)
             for (i in 0 until m) {
-                val v = buf[i]
-                if (!free(v) || v == parent) continue
-                if (disc[v] == -1) {
-                    children++
-                    dfs(v, u)
-                    low[u] = min(low[u], low[v])
-                    if (parent != -1 && low[v] >= disc[u]) art[u] = true
-                } else low[u] = min(low[u], disc[v])
+                val nx = buf[i]
+                if (seen[nx] || !free(nx)) continue
+                seen[nx] = true; parent[nx] = cur
+                if (nx == target) { found = true; break }
+                q.addLast(nx)
             }
-            if (parent == -1 && children > 1) art[u] = true
         }
-        for (i in 0 until n) if (free(i) && disc[i] == -1) dfs(i, -1)
-        for (i in 0 until n) {
-            if (!art[i]) continue
-            val seen = BooleanArray(n)
-            var best = 0
-            val m = neighbors(i, buf)
-            for (k in 0 until m) {
-                val v = buf[k]
-                if (free(v) && !seen[v]) {
-                    var c = 0
-                    val q = ArrayDeque<Int>(); seen[v] = true; q.add(v)
-                    while (q.isNotEmpty()) {
-                        val cur = q.removeFirst(); c++
-                        val mm = neighbors(cur, buf)
-                        for (j in 0 until mm) { val nx = buf[j]; if (!seen[nx] && free(nx) && nx != i) { seen[nx] = true; q.add(nx) } }
-                    }
-                    best = max(best, c)
-                }
+        if (!found) return null
+        var len = 0; var cur = target
+        while (cur != head) { cur = parent[cur]; len++ }
+        val path = IntArray(len); cur = target
+        for (i in len - 1 downTo 0) { path[i] = cur; cur = parent[cur] }
+        return path
+    }
+
+    fun astarPathTo(target: Int): IntArray? {
+        if (target < 0 || head == target) return IntArray(0)
+        val g = IntArray(n) { Int.MAX_VALUE }
+        val parent = IntArray(n) { -1 }
+        val closed = BooleanArray(n)
+        fun hst(i: Int) = abs(i % w - target % w) + abs(i / w - target / w)
+        val open = PriorityQueue<Int>(compareBy { g[it] + hst(it) * 2 })
+        g[head] = 0; open.add(head)
+        val buf = IntArray(4)
+        while (open.isNotEmpty()) {
+            val cur = open.poll()
+            if (closed[cur]) continue
+            closed[cur] = true
+            if (cur == target) break
+            val m = neighbors(cur, buf)
+            for (i in 0 until m) {
+                val nx = buf[i]
+                if (!free(nx)) continue
+                val ng = g[cur] + 1
+                if (ng < g[nx]) { g[nx] = ng; parent[nx] = cur; open.add(nx) }
             }
-            maxComp[i] = best
         }
-        return art to maxComp
+        if (!closed[target]) return null
+        var len = 0; var cur = target
+        while (cur != head) { cur = parent[cur]; len++ }
+        val path = IntArray(len); cur = target
+        for (i in len - 1 downTo 0) { path[i] = cur; cur = parent[cur] }
+        return path
     }
 }
 
-// ═══════════════════ 扰动哈密顿（路径 + 捷径 + 严格模式） ═══════════════════
-
 object Hamiltonian {
     private var cw = -1; private var ch = -1
-    private lateinit var order: IntArray    // cell -> path 序号
-    private lateinit var cells: IntArray     // path 序号 -> cell
+    private lateinit var order: IntArray
+    private lateinit var cells: IntArray
 
     fun ensure(w: Int, h: Int) {
         if (w == cw && h == ch) return
         cw = w; ch = h
         order = IntArray(w * h); cells = IntArray(w * h)
-        // 螺旋覆盖全格（哈密顿路径；15×15 奇数格无环，用路径+回绕跳）
         var left = 0; var right = w - 1; var top = 0; var bottom = h - 1
         var i = 0
         while (i < w * h) {
@@ -337,281 +288,177 @@ object Hamiltonian {
         }
     }
 
-    /** 沿路径走。strict=true 只允许相邻序号（终局求解）；否则允许安全捷径。 */
     fun follow(e: GameEngine, strict: Boolean): Int {
         ensure(e.w, e.h)
         val N = e.w * e.h
         val hd = e.head()
         val hi = order[hd.second * e.w + hd.first]
-        var bestD = -1; var bestGain = Int.MAX_VALUE; var bestFallbackD = -1; var bestFallbackArea = -1
-
+        var bestD = -1; var bestGain = Int.MAX_VALUE
         for (d in 0 until 4) {
             if (e.snake.size > 1 && (d + 2) % 4 == e.dir) continue
             val c = e.nextCell(d) ?: continue
             if (e.occupied(c.first, c.second)) continue
             val ci = c.second * e.w + c.first
-            val oi = order[ci]
-            val gain = (oi - hi + N) % N
-
-            if (strict) {
-                if (gain == 1 && bestGain > 1) { bestGain = 1; bestD = d }
-            } else {
-                // 捷径：路径上 hi→oi 之间的所有中间格必须当前空闲
-                if (gain in 1..min(N - 1, 40)) {
-                    var allFree = true
-                    var k = 1
-                    while (k < gain) {
-                        val mid = cells[(hi + k) % N]
-                        if (e.occupied(mid % e.w, mid / e.w)) { allFree = false; break }
-                        k++
-                    }
-                    if (allFree && gain < bestGain) { bestGain = gain; bestD = d }
+            val gain = (order[ci] - hi + N) % N
+            val ok = if (strict) gain == 1 else {
+                var allFree = true; var k = 1
+                while (k < gain && allFree) {
+                    val mid = cells[(hi + k) % N]
+                    if (e.occupied(mid % e.w, mid / e.w)) allFree = false
+                    k++
                 }
+                gain in 1..min(N - 1, 40) && allFree
             }
-            // 兜底记录：洪泛最大的合法方向
-            if (bestFallbackD == -1) {
-                bestFallbackD = d
-            } else {
-                val s = Sim(e.w, e.h).load(e)
-                if (s.stepAuto(d)) {
-                    val a = s.flood(s.head)
-                    if (a > bestFallbackArea) { bestFallbackArea = a; bestFallbackD = d }
-                }
-            }
+            if (ok && gain < bestGain) { bestGain = gain; bestD = d }
         }
         if (bestD >= 0) return bestD
-        return bestFallbackD.coerceAtLeast(e.dir)
+        for (d in 0 until 4) {
+            if (e.snake.size > 1 && (d + 2) % 4 == e.dir) continue
+            val c = e.nextCell(d) ?: continue
+            if (!e.occupied(c.first, c.second)) return d
+        }
+        return e.dir
     }
 }
 
-// ═══════════════════ Beam Search（Anytime + 墙钟截止） ═══════════════════
-
 object BeamSearch {
-    private class BNode(val sim: Sim, val first: Int, val lastDir: Int, val score: Double)
-
-    fun search(root: Sim, rootDir: Int, deadlineNanos: Long, budgetOps: Int, width: Int, depth: Int): DoubleArray {
-        val sum = DoubleArray(4); val cnt = IntArray(4)
-        var ops = 0
-        var beam = ArrayList<BNode>()
+    fun search(root: Sim, rootDir: Int): Int {
+        data class BN(val sim: Sim, val first: Int, val sc: Double)
+        var beam = ArrayList<BN>()
         for (d in 0 until 4) {
             if (d == (rootDir + 2) % 4 && root.len > 1) continue
             val s = root.copy()
-            val beforeFood = s.foodIdx
+            val bf = s.foodIdx
             if (!s.stepAuto(d)) continue
-            val ate = beforeFood >= 0 && s.foodIdx == -1
-            val area = s.flood(s.head)
-            beam.add(BNode(s, d, d, (if (ate) 12.0 else 0.0) + area * 0.08 + s.len * 0.2))
+            val ate = bf >= 0 && s.foodIdx == -1
+            beam.add(BN(s, d, (if (ate) 10.0 else 0.0) + s.flood(s.head) * 0.1))
         }
-        var dep = 1
-        val result = DoubleArray(4)
-        // 先记录第1层均值（Anytime：随时可停）
-        for (b in beam) { sum[b.first] += b.score; cnt[b.first]++ }
-        while (beam.isNotEmpty() && dep < depth && ops < budgetOps) {
-            if ((ops and 15) == 0 && System.nanoTime() > deadlineNanos) break
-            val next = ArrayList<BNode>()
-            for (node in beam) {
+        repeat(6) {
+            val next = ArrayList<BN>()
+            for (b in beam) {
                 for (d in 0 until 4) {
-                    if (d == (node.lastDir + 2) % 4 && node.sim.len > 1) continue
-                    ops++
-                    if (ops >= budgetOps + width * 4) break
-                    val s = node.sim.copy()
-                    val beforeFood = s.foodIdx
+                    if (d == (b.lastDir ?: continue)) continue
+                    val s = b.sim.copy()
+                    val bf = s.foodIdx
                     if (!s.stepAuto(d)) continue
-                    val ate = beforeFood >= 0 && s.foodIdx == -1
-                    val area = s.flood(s.head)
-                    var sc = node.score + (if (ate) 14.0 else 0.0) + area * 0.07
-                    if (area < s.len) sc -= 30.0            // 死亡前瞻惩罚
-                    else if (area < s.len + 4) sc -= 6.0     // 紧张前瞻惩罚
-                    next.add(BNode(s, node.first, d, sc))
+                    val ate = bf >= 0 && s.foodIdx == -1
+                    next.add(BN(s, b.first, b.sc + (if (ate) 10.0 else 0.0) + s.flood(s.head) * 0.1))
                 }
             }
             if (next.isEmpty()) break
-            next.sortByDescending { it.score }
-            beam = ArrayList(next.take(width))
-            // 覆盖式记录（更深层 = 更准的估计）
-            for (d in 0 until 4) { sum[d] = 0.0; cnt[d] = 0 }
-            for (b in beam) { sum[b.first] += b.score; cnt[b.first]++ }
-            dep++
+            next.sortByDescending { it.sc }
+            beam = ArrayList(next.take(12))
         }
-        for (d in 0 until 4) if (cnt[d] > 0) result[d] = sum[d] / cnt[d]
-        return result
+        return beam.maxByOrNull { it.sc }?.first ?: rootDir
+    }
+    // 需要记录方向，重写：
+    fun search2(root: Sim, rootDir: Int): Int {
+        class BN2(val sim: Sim, val first: Int, val last: Int, val sc: Double)
+        var beam = ArrayList<BN2>()
+        for (d in 0 until 4) {
+            if (d == (rootDir + 2) % 4 && root.len > 1) continue
+            val s = root.copy()
+            val bf = s.foodIdx
+            if (!s.stepAuto(d)) continue
+            val ate = bf >= 0 && s.foodIdx == -1
+            beam.add(BN2(s, d, d, (if (ate) 10.0 else 0.0) + s.flood(s.head) * 0.1))
+        }
+        if (beam.isEmpty()) return rootDir
+        repeat(6) {
+            val next = ArrayList<BN2>()
+            for (b in beam) {
+                for (d in 0 until 4) {
+                    if (d == (b.last + 2) % 4 && b.sim.len > 1) continue
+                    val s = b.sim.copy()
+                    val bf = s.foodIdx
+                    if (!s.stepAuto(d)) continue
+                    val ate = bf >= 0 && s.foodIdx == -1
+                    next.add(BN2(s, b.first, d, b.sc + (if (ate) 10.0 else 0.0) + s.flood(s.head) * 0.1))
+                }
+            }
+            if (next.isEmpty()) return beam.maxByOrNull()!!.first
+            next.sortByDescending { it.sc }
+            beam = ArrayList(next.take(12))
+        }
+        return beam.maxByOrNull()!!.first
     }
 }
-
-// ═══════════════════ MCTS（UCB1-Tuned + Q先验 + 启发式rollout） ═══════════════════
 
 object Mcts {
-    private class MN(val sim: Sim, val parent: MN?, val action: Int, val first: Int, val lastDir: Int, val dead: Boolean) {
-        var visits = 0; var value = 0.0; var sqSum = 0.0
-        val children = ArrayList<MN>()
-        val untried = ArrayList<Int>()
-    }
-
-    private fun rollout(s0: Sim, firstDir: Int, maxSteps: Int, rnd: Random): Double {
-        val s = s0.copy()
-        var steps = 0; var foods = 0
-        val buf = IntArray(4)
-        while (steps < maxSteps) {
-            var bestD = -1; var bestScore = Double.NEGATIVE_INFINITY
-            for (d in 0 until 4) {
-                if (steps == 0 && d == (firstDir + 2) % 4 && s.len > 1) continue
-                val t = s.targetOf(d) ?: continue
-                if (s.occ[t] && t != s.tail) continue
-                var sc = rnd.nextDouble() * 0.3
-                if (s.foodIdx >= 0) {
-                    val fd = abs(t % s.w - s.foodIdx % s.w) + abs(t / s.w - s.foodIdx / s.w)
-                    sc += (s.w + s.h - fd) * 0.35
-                }
-                val m = s.neighbors(t, buf)
-                var fc = 0
-                for (i in 0 until m) if (!s.occ[buf[i]] || buf[i] == s.tail) fc++
-                sc += fc * 0.5
-                if (sc > bestScore) { bestScore = sc; bestD = d }
-            }
-            if (bestD < 0) break
-            if (!s.stepAuto(bestD)) break
-            if (s.foodIdx == -1) { foods++; s.foodIdx = -2 }
-            steps++
+    fun search(root: Sim, rootDir: Int, iters: Int, rnd: Random): Int {
+        class Node(val sim: Sim, val parent: Node?, val move: Int) {
+            val children = ArrayList<Node>()
+            var visits = 0; var wins = 0.0
         }
-        return foods * 10.0 + steps * 0.06 - (if (steps < maxSteps) 10.0 else 0.0)
-    }
-
-    fun search(root: Sim, rootDir: Int, deadlineNanos: Long, budget: Int, qPrior: DoubleArray, rnd: Random): DoubleArray {
-        val rootNode = MN(root.copy(), null, -1, -1, rootDir, false)
-        for (d in 0 until 4) if (!(d == (rootDir + 2) % 4 && root.len > 1)) rootNode.untried.add(d)
-        var ops = 0
-        while (ops < budget) {
-            if ((ops and 7) == 0 && System.nanoTime() > deadlineNanos) break
-            // —— 选择（UCB1-Tuned + Q 先验）——
+        val rootNode = Node(root.copy(), null, rootDir)
+        var bestGlobal: Node? = null
+        repeat(iters) {
             var node = rootNode
-            while (node.untried.isEmpty() && node.children.isNotEmpty()) {
-                val lnN = kotlin.math.ln((node.visits + 1).toDouble())
+            // select
+            while (node.children.isNotEmpty()) {
                 node = node.children.maxByOrNull { c ->
-                    if (c.visits == 0) Double.MAX_VALUE / 2
-                    else {
-                        val v = c.value / c.visits
-                        val varr = (c.sqSum / c.visits) - v * v
-                        val tuned = v + 1.4 * sqrt(min(0.25, varr + sqrt(2.0 * lnN / c.visits)) * lnN / c.visits)
-                        tuned + qPrior[c.first] * 0.25   // Search+RL 混合先验
-                    }
+                    if (c.visits == 0) 1e9 else c.wins / c.visits + 0.7 * sqrt(ln(node.visits + 1.0) / c.visits)
                 }!!
             }
-            if (node.dead) {
-                var cur: MN? = node
-                while (cur != null) { cur.visits++; cur.value += -10.0; cur.sqSum += 100.0; cur = cur.parent }
-                ops += 2; continue
-            }
-            var child: MN
-            if (node.untried.isNotEmpty()) {
-                val a = node.untried.removeAt(rnd.nextInt(node.untried.size))
+            // expand
+            for (d in 0 until 4) {
+                if (d == (node.move + 2) % 4 && node.sim.len > 1) continue
                 val s = node.sim.copy()
-                val ok = s.stepAuto(a)
-                child = MN(s, node, a, if (node === rootNode) a else node.first, a, !ok)
-                node.children.add(child)
-            } else child = node
-            ops++
-            val v = if (child.dead) -10.0 else rollout(child.sim, child.lastDir, 20, rnd)
-            var cur: MN? = child
-            while (cur != null) {
-                cur.visits++; cur.value += v; cur.sqSum += v * v
-                cur = cur.parent
+                if (s.stepAuto(d)) node.children.add(Node(s, node, d))
             }
+            if (node.children.isNotEmpty()) node = node.children[rnd.nextInt(node.children.size)]
+            // rollout
+            val s = node.sim.copy()
+            var reward = 0.0; var steps = 0
+            while (steps < 40) {
+                val opts = (0 until 4).filter { it != (node.move + 2) % 4 }
+                if (opts.isEmpty() || !s.stepAuto(opts[rnd.nextInt(opts.size)])) break
+                reward += 0.05; steps++
+                if (s.foodIdx == -1) { reward += 5.0; break }
+            }
+            reward += s.flood(s.head) * 0.02
+            // backprop
+            var bn: Node? = node
+            while (bn != null) { bn.visits++; bn.wins += reward; bn = bn.parent }
         }
-        val out = DoubleArray(4)
-        for (c in rootNode.children) if (c.visits > 0) out[c.first] = c.value / c.visits
-        return out
+        bestGlobal = rootNode.children.maxByOrNull { it.visits }
+        return bestGlobal?.move ?: rootDir
     }
 }
 
-// ═══════════════════ 特征 ═══════════════════
-
-object Features {
-    const val SIZE = 36
-
-    fun extract(e: GameEngine, dir: Int): DoubleArray {
-        val f = DoubleArray(SIZE)
-        val hd = e.head()
-        val sim = Sim(e.w, e.h).load(e)
-        var i = 0
-        for (d in 0 until 4) {
-            val c = e.nextCell(d)
-            f[i++] = if (c == null || e.occupied(c.first, c.second)) 1.0 else 0.0
-        }
-        for (d in 0 until 4) {
-            val c = e.nextCell(d)
-            val a = if (c == null || e.occupied(c.first, c.second)) 0
-            else { val s2 = sim.copy(); if (s2.step(d, false)) s2.flood(s2.head) else 0 }
-            f[i++] = (kotlin.math.ln(1.0 + a) / 8.0).coerceAtMost(1.0)
-        }
-        val fx = (e.food.first - hd.first).toDouble() / e.w
-        val fy = (e.food.second - hd.second).toDouble() / e.h
-        f[i++] = fx; f[i++] = fy
-        val (dx, dy) = GameEngine.DIRS[dir]
-        f[i++] = (fx * dx + fy * dy).coerceIn(-1.0, 1.0)
-        f[i++] = (fx * -dy + fy * dx).coerceIn(-1.0, 1.0)
-        val t = e.tail()
-        f[i++] = (t.first - hd.first).toDouble() / e.w
-        f[i++] = (t.second - hd.second).toDouble() / e.h
-        f[i++] = e.snake.size.toDouble() / (e.w * e.h)
-        f[i++] = min(1.0, e.stepsSinceFood / 200.0)
-        f[16 + dir] = 1.0; i = 20
-        for (oy in -1..1) for (ox in -1..1) {
-            if (ox == 0 && oy == 0) continue
-            val x = hd.first + ox; val y = hd.second + oy
-            f[i++] = if (x < 0 || y < 0 || x >= e.w || y >= e.h || e.occupied(x, y)) 1.0 else 0.0
-        }
-        f[i++] = 1.0
-        var free = 0
-        for (y in 0 until e.h) for (x in 0 until e.w) if (!e.occupied(x, y)) free++
-        f[i++] = free.toDouble() / (e.w * e.h)
-        for (d in 0 until 4) {
-            val c = e.nextCell(d)
-            f[i++] = if (c == null) 1.0 else e.distToFood(c.first, c.second).toDouble() / (e.w + e.h)
-        }
-        f[i++] = if (e.food.first == hd.first || e.food.second == hd.second) 1.0 else 0.0
-        f[i] = min(1.0, e.score / 50.0)
-        return f
+class Genome {
+    var margin = 4.0; var tailBias = 1.0; var risk = 0.4
+    var trust = 0.3; var patience = 0.45; var lambda = 0.8
+    private fun vec() = doubleArrayOf(margin, tailBias, risk, trust, patience, lambda)
+    private fun load(v: DoubleArray) {
+        margin = v[0].coerceIn(0.0, 20.0); tailBias = v[1].coerceIn(0.0, 5.0)
+        risk = v[2].coerceIn(0.05, 1.0); trust = v[3].coerceIn(0.0, 1.0)
+        patience = v[4].coerceIn(0.1, 0.9); lambda = v[5].coerceIn(0.0, 2.0)
     }
+    fun adjust(r: DeathReason) {
+        val a = 0.04
+        when (r) {
+            DeathReason.TRAPPED -> { margin += a * 4; tailBias += a * 2; lambda += a }
+            DeathReason.STARVED -> { risk += a; patience -= a }
+            DeathReason.WALL, DeathReason.SELF -> margin += a * 2
+            DeathReason.WIN -> margin -= a * 2
+        }
+        load(vec())
+    }
+    fun params() = listOf(
+        Triple("安全边际", margin, 20.0), Triple("追尾偏好", tailBias, 5.0),
+        Triple("冒险度", risk, 1.0), Triple("信任AI", trust, 1.0),
+        Triple("耐心", patience, 0.9), Triple("风险厌恶", lambda, 2.0)
+    )
+    fun write(dos: DataOutputStream) { for (v in vec()) dos.writeDouble(v) }
+    fun read(dis: DataInputStream) = try { load(DoubleArray(6) { dis.readDouble() }) } catch (t: Throwable) {}
 }
 
-// ═══════════════════ 记忆系统（循环+震荡 / 失败 / 因果） ═══════════════════
-
-class LoopDetector(private val cap: Int = 48) {
-    private val recent = ArrayDeque<Int>()
-    private val count = HashMap<Int, Int>()
-    private val dirHist = ArrayDeque<Int>()   // 方向震荡检测
-
-    fun record(e: GameEngine) {
-        val h = e.head(); val k = h.second * 256 + h.first
-        recent.addLast(k); count[k] = (count[k] ?: 0) + 1
-        if (recent.size > cap) {
-            val old = recent.removeFirst()
-            count[old]?.let { if (it <= 1) count.remove(old) else count[old] = it - 1 }
-        }
-        dirHist.addLast(e.dir)
-        if (dirHist.size > 8) dirHist.removeFirst()
-    }
-
-    fun cellPenalty(x: Int, y: Int) = min(1.0, (count[y * 256 + x] ?: 0) / 3.0)
-
-    /** 方向震荡：最近4步出现 A-B-A-B 模式 → 高惩罚 */
-    fun oscillationPenalty(): Double {
-        if (dirHist.size < 4) return 0.0
-        val d0 = dirHist.elementAt(dirHist.size - 1)
-        val d1 = dirHist.elementAt(dirHist.size - 2)
-        val d2 = dirHist.elementAt(dirHist.size - 3)
-        val d3 = dirHist.elementAt(dirHist.size - 4)
-        return if (d0 == d2 && d1 == d3 && d0 != d1) 1.0 else 0.0
-    }
-
-    fun reset() { recent.clear(); count.clear(); dirHist.clear() }
-}
-
-class FailureMemory(private val cap: Int = 8000) {
+class FailureMemory(private val cap: Int = 6000) {
     private val map = HashMap<Int, Int>()
     private val lru = ArrayDeque<Int>()
     fun record(x: Int, y: Int, dir: Int) {
-        val k = ((y * 256 + x) * 5 + dir).toInt()
+        val k = ((y * 256 + x) * 5 + dir)
         map[k] = (map[k] ?: 0) + 1
         lru.addLast(k)
         if (lru.size > cap) {
@@ -619,10 +466,9 @@ class FailureMemory(private val cap: Int = 8000) {
             map[old]?.let { if (it <= 1) map.remove(old) else map[old] = it - 1 }
         }
     }
-    fun danger(x: Int, y: Int, dir: Int) = min(1.0, (map[((y * 256 + x) * 5 + dir).toInt()] ?: 0) / 5.0)
-    fun size() = map.size
+    fun danger(x: Int, y: Int, dir: Int) = min(1.0, (map[(y * 256 + x) * 5 + dir] ?: 0) / 5.0)
     fun write(dos: DataOutputStream) {
-        val top = map.entries.sortedByDescending { it.value }.take(2000)
+        val top = map.entries.sortedByDescending { it.value }.take(1500)
         dos.writeInt(top.size)
         for ((k, v) in top) { dos.writeInt(k); dos.writeInt(v) }
     }
@@ -630,1281 +476,832 @@ class FailureMemory(private val cap: Int = 8000) {
         val n = dis.readInt().coerceIn(0, 100000)
         repeat(n) {
             val k = dis.readInt(); val v = dis.readInt()
-            if (v > 0) { map[k] = v; repeat(min(3, v)) { lru.addLast(k) } }
+            if (v > 0) { map[k] = v; lru.addLast(k) }
         }
-    } catch (t: Throwable) { Log.w("SnakeAI", "mem read fail", t) }
+    } catch (t: Throwable) {}
 }
 
-class CausalHistory(private val cap: Int = 32) {
-    class Step(val x: Int, val y: Int, val dir: Int)
-    private val ring = ArrayDeque<Step>()
-    fun record(e: GameEngine) {
-        val h = e.head()
-        ring.addLast(Step(h.first, h.second, e.dir))
-        if (ring.size > cap) ring.removeFirst()
-    }
-    fun onDeath(cb: (Step, Double) -> Unit) {
-        var w = 1.0
-        for (i in ring.indices) {
-            cb(ring.elementAt(ring.size - 1 - i), w)
-            w *= 0.85
-        }
-    }
-    fun reset() = ring.clear()
-}
-
-// ═══════════════════ 基因性格（10维 + 死因驱动 + 遗传进化） ═══════════════════
-
-class Genome {
-    var margin = 4.0; var tailBias = 1.0; var wanderlust = 1.0
-    var risk = 0.4; var trust = 0.3; var shortcut = 2.5
-    var patience = 0.45; var lambda = 0.8; var regretSens = 0.6; var rate = 0.05
-
-    private fun vec() = doubleArrayOf(margin, tailBias, wanderlust, risk, trust, shortcut, patience, lambda, regretSens, rate)
-    private fun load(v: DoubleArray) {
-        margin = v[0].coerceIn(0.0, 20.0); tailBias = v[1].coerceIn(0.0, 5.0)
-        wanderlust = v[2].coerceIn(0.0, 5.0); risk = v[3].coerceIn(0.05, 1.0)
-        trust = v[4].coerceIn(0.0, 1.0); shortcut = v[5].coerceIn(1.0, 6.0)
-        patience = v[6].coerceIn(0.1, 0.9); lambda = v[7].coerceIn(0.0, 2.0)
-        regretSens = v[8].coerceIn(0.0, 2.0); rate = v[9].coerceIn(0.01, 0.15)
-    }
-
-    fun personality() = when {
-        margin > 8 && tailBias > 1.5 -> "稳健守成型"
-        risk > 0.6 && patience < 0.35 -> "激进捕食型"
-        lambda > 1.2 -> "风险厌恶型"
-        wanderlust > 2.0 -> "游走探索型"
-        shortcut > 3.5 -> "路径贪婪型"
-        else -> "均衡型"
-    }
-
-    fun adjust(r: DeathReason) {
-        val a = rate
-        when (r) {
-            DeathReason.TRAPPED -> { margin += a * 4; tailBias += a * 2; lambda += a }
-            DeathReason.STARVED -> { risk += a; patience -= a; wanderlust += a }
-            DeathReason.WALL, DeathReason.SELF -> { margin += a * 2 }
-            DeathReason.WIN -> { margin -= a * 2 }
-        }
-        load(vec())
-    }
-
-    fun copy() = Genome().also { it.load(vec()) }
-    fun copyFrom(o: Genome) = load(o.vec())
-    fun mutate(rnd: Random) {
-        val v = vec()
-        for (i in v.indices) if (rnd.nextDouble() < .2) v[i] += rnd.nextGaussian() * (v[i] * .15 + .05)
-        load(v)
-    }
-
-    companion object {
-        fun cross(a: Genome, b: Genome, rnd: Random): Genome {
-            val va = a.vec(); val vb = b.vec()
-            return Genome().also { it.load(DoubleArray(10) { i -> if (rnd.nextBoolean()) va[i] else vb[i] }) }
-        }
-        fun write(g: Genome, dos: DataOutputStream) { for (v in g.vec()) dos.writeDouble(v) }
-        fun read(dis: DataInputStream) = try {
-            Genome().also { it.load(DoubleArray(10) { _ -> dis.readDouble() }) }
-        } catch (t: Throwable) { null }
-    }
-}
-
-// ═══════════════════ 网络（D3QN 通用 + 世界模型 4输出） ═══════════════════
-
-class Brain(val inN: Int, val h1: Int, val h2: Int, val actN: Int, seed: Long = System.nanoTime()) {
-    var w1 = Array(h1) { DoubleArray(inN) }; var b1 = DoubleArray(h1)
-    var w2 = Array(h2) { DoubleArray(h1) }; var b2 = DoubleArray(h2)
-    var va = DoubleArray(h2); var vb = 0.0
-    var aa = Array(actN) { DoubleArray(h2) }; var ab = DoubleArray(actN)
-    private var g1 = Array(h1) { DoubleArray(inN) }; private var gb1 = DoubleArray(h1)
-    private var g2 = Array(h2) { DoubleArray(h1) }; private var gb2 = DoubleArray(h2)
-    private var gva = DoubleArray(h2); private var gvb = 0.0
-    private var gaa = Array(actN) { DoubleArray(h2) }; private var gab = DoubleArray(actN)
-    private var z1 = DoubleArray(h1); private var z2 = DoubleArray(h2)
+class Brain(val inp: Int, val h1: Int, val h2: Int, val out: Int, seed: Long) {
+    val w1 = DoubleArray(inp * h1); val b1 = DoubleArray(h1)
+    val w2 = DoubleArray(h1 * h2); val b2 = DoubleArray(h2)
+    val w3 = DoubleArray(h2 * out); val b3 = DoubleArray(out)
+    private val a1 = DoubleArray(h1); private val a2 = DoubleArray(h2)
+    private val q = DoubleArray(out)
+    private val dz2 = DoubleArray(h2); private val dz1 = DoubleArray(h1)
 
     init {
         val rnd = Random(seed)
-        for (j in 0 until h1) for (k in 0 until inN) w1[j][k] = rnd.nextGaussian() / sqrt(inN.toDouble())
-        for (j in 0 until h2) for (k in 0 until h1) w2[j][k] = rnd.nextGaussian() / sqrt(h1.toDouble())
-        for (j in 0 until h2) va[j] = rnd.nextGaussian() / sqrt(h2.toDouble())
-        for (m in 0 until actN) for (j in 0 until h2) aa[m][j] = rnd.nextGaussian() / sqrt(h2.toDouble())
+        for (i in w1.indices) w1[i] = rnd.nextGaussian() / sqrt(inp.toDouble())
+        for (i in w2.indices) w2[i] = rnd.nextGaussian() / sqrt(h1.toDouble())
+        for (i in w3.indices) w3[i] = rnd.nextGaussian() / sqrt(h2.toDouble())
     }
 
     fun forward(x: DoubleArray): DoubleArray {
         for (j in 0 until h1) {
-            var s = b1[j]; val wj = w1[j]
-            for (k in 0 until inN) if (x[k] != 0.0) s += wj[k] * x[k]
-            z1[j] = if (s > 0) s else 0.0
+            var s = b1[j]; val off = j * inp
+            for (k in 0 until inp) s += w1[off + k] * x[k]
+            a1[j] = if (s > 0) s else 0.0
         }
         for (j in 0 until h2) {
-            var s = b2[j]; val wj = w2[j]
-            for (k in 0 until h1) if (z1[k] > 0) s += wj[k] * z1[k]
-            z2[j] = if (s > 0) s else 0.0
+            var s = b2[j]; val off = j * h1
+            for (k in 0 until h1) s += w2[off + k] * a1[k]
+            a2[j] = if (s > 0) s else 0.0
         }
-        var v = vb
-        for (j in 0 until h2) v += va[j] * z2[j]
-        var mean = 0.0; val adv = DoubleArray(actN)
-        for (m in 0 until actN) {
-            var s = ab[m]; val am = aa[m]
-            for (j in 0 until h2) s += am[j] * z2[j]
-            adv[m] = s; mean += s
+        for (o in 0 until out) {
+            var s = b3[o]; val off = o * h2
+            for (j in 0 until h2) s += w3[off + j] * a2[j]
+            q[o] = s
         }
-        mean /= actN
-        return DoubleArray(actN) { m -> v + adv[m] - mean }
+        return q
     }
 
-    /** 带重要性采样权重的反向传播 */
-    fun backward(x: DoubleArray, action: Int, target: Double, weight: Double = 1.0): Double {
-        val q = forward(x)
-        val err = q[action] - target
-        if (!err.isFinite()) return 0.0
-        val d = ((if (abs(err) <= 1.0) err else kotlin.math.sign(err)) * weight).coerceIn(-5.0, 5.0)
-        val dz2 = DoubleArray(h2)
-        for (j in 0 until h2) { gva[j] += d * z2[j]; dz2[j] += d * va[j] }
-        gvb += d
-        for (m in 0 until actN) {
-            val dam = if (m == action) d - d / actN else -d / actN
-            gab[m] += dam
-            for (j in 0 until h2) { gaa[m][j] += dam * z2[j]; dz2[j] += dam * aa[m][j] }
+    fun train(x: DoubleArray, act: Int, target: Double, lr: Double) {
+        forward(x)
+        val err = (q[act] - target).coerceIn(-2.0, 2.0)
+        val dOut = DoubleArray(out); dOut[act] = err
+        java.util.Arrays.fill(dz2, 0.0)
+        for (o in 0 until out) {
+            if (dOut[o] == 0.0) continue
+            val off = o * h2
+            for (j in 0 until h2) {
+                w3[off + j] -= lr * dOut[o] * a2[j]
+                if (a2[j] > 0) dz2[j] += w3[off + j] * dOut[o]
+            }
+            b3[o] -= lr * dOut[o]
         }
-        val dz1 = DoubleArray(h1)
+        java.util.Arrays.fill(dz1, 0.0)
         for (j in 0 until h2) {
-            if (z2[j] <= 0) continue
-            gb2[j] += dz2[j]
-            for (k in 0 until h1) { g2[j][k] += dz2[j] * z1[k]; dz1[k] += dz2[j] * w2[j][k] }
+            if (a2[j] <= 0 || dz2[j] == 0.0) continue
+            val off = j * h1
+            for (k in 0 until h1) {
+                w2[off + k] -= lr * dz2[j] * a1[k]
+                if (a1[k] > 0) dz1[k] += w2[off + k] * dz2[j]
+            }
+            b2[j] -= lr * dz2[j]
         }
         for (j in 0 until h1) {
-            if (z1[j] <= 0) continue
-            gb1[j] += dz1[j]
-            for (k in 0 until inN) if (x[k] != 0.0) g1[j][k] += dz1[j] * x[k]
+            if (a1[j] <= 0 || dz1[j] == 0.0) continue
+            val off = j * inp
+            for (k in 0 until inp) w1[off + k] -= lr * dz1[j] * x[k]
+            b1[j] -= lr * dz1[j]
         }
-        return err
-    }
-
-    fun apply(lr: Double, batch: Int) {
-        val k = lr / max(1, batch)
-        for (j in 0 until h1) { b1[j] -= (gb1[j] * k).coerceIn(-.05, .05); for (i in 0 until inN) w1[j][i] -= (g1[j][i] * k).coerceIn(-.05, .05) }
-        for (j in 0 until h2) { b2[j] -= (gb2[j] * k).coerceIn(-.05, .05); for (i in 0 until h1) w2[j][i] -= (g2[j][i] * k).coerceIn(-.05, .05) }
-        for (j in 0 until h2) va[j] -= (gva[j] * k).coerceIn(-.05, .05)
-        vb -= (gvb * k).coerceIn(-.05, .05)
-        for (m in 0 until actN) { ab[m] -= (gab[m] * k).coerceIn(-.05, .05); for (j in 0 until h2) aa[m][j] -= (gaa[m][j] * k).coerceIn(-.05, .05) }
-        clear()
-    }
-
-    private fun clear() {
-        for (j in 0 until h1) { gb1[j] = 0.0; java.util.Arrays.fill(g1[j], 0.0) }
-        for (j in 0 until h2) { gb2[j] = 0.0; java.util.Arrays.fill(g2[j], 0.0) }
-        java.util.Arrays.fill(gva, 0.0); gvb = 0.0
-        for (m in 0 until actN) { gab[m] = 0.0; java.util.Arrays.fill(gaa[m], 0.0) }
     }
 
     fun copyFrom(o: Brain) {
-        for (j in 0 until h1) { System.arraycopy(o.w1[j], 0, w1[j], 0, inN); b1[j] = o.b1[j] }
-        for (j in 0 until h2) { System.arraycopy(o.w2[j], 0, w2[j], 0, h1); b2[j] = o.b2[j] }
-        System.arraycopy(o.va, 0, va, 0, h2); vb = o.vb
-        for (m in 0 until actN) { System.arraycopy(o.aa[m], 0, aa[m], 0, h2); ab[m] = o.ab[m] }
-    }
-
-    fun clone(): Brain { val b = Brain(inN, h1, h2, actN); b.copyFrom(this); return b }
-
-    companion object {
-        fun write(b: Brain, dos: DataOutputStream) {
-            dos.writeInt(b.inN); dos.writeInt(b.h1); dos.writeInt(b.h2); dos.writeInt(b.actN)
-            fun w(a: DoubleArray) { for (v in a) dos.writeDouble(v) }
-            for (j in 0 until b.h1) w(b.w1[j]); w(b.b1)
-            for (j in 0 until b.h2) w(b.w2[j]); w(b.b2)
-            w(b.va); dos.writeDouble(b.vb)
-            for (m in 0 until b.actN) w(b.aa[m]); w(b.ab)
-        }
-        fun read(dis: DataInputStream): Brain? = try {
-            val inN = dis.readInt(); val h1 = dis.readInt(); val h2 = dis.readInt(); val actN = dis.readInt()
-            if (inN <= 0 || h1 <= 0 || h2 <= 0 || actN <= 0) null
-            else Brain(inN, h1, h2, actN).also { b ->
-                fun r(a: DoubleArray) { for (i in a.indices) a[i] = dis.readDouble() }
-                for (j in 0 until h1) r(b.w1[j]); r(b.b1)
-                for (j in 0 until h2) r(b.w2[j]); r(b.b2)
-                r(b.va); b.vb = dis.readDouble()
-                for (m in 0 until actN) r(b.aa[m]); r(b.ab)
-            }
-        } catch (t: Throwable) { Log.w("SnakeAI", "brain read fail", t); null }
-    }
-}
-
-/** 世界模型：特征+动作(40维) → [死亡概率, 食物距离变化, 面积变化, 尾可达] */
-class WorldModel {
-    val net = Brain(Features.SIZE + 4, 32, 20, 4)
-
-    fun predict(s: DoubleArray, a: Int): DoubleArray {
-        val x = DoubleArray(Features.SIZE + 4)
-        System.arraycopy(s, 0, x, 0, Features.SIZE)
-        x[Features.SIZE + a] = 1.0
-        val out = net.forward(x)
-        return doubleArrayOf(
-            out[0].coerceIn(0.0, 1.0),
-            out[1].coerceIn(-1.0, 1.0),
-            out[2].coerceIn(-1.0, 1.0),
-            out[3].coerceIn(0.0, 1.0)
-        )
-    }
-
-    fun train(s: DoubleArray, a: Int, death: Double, foodDelta: Double, areaDelta: Double, tailOk: Double) {
-        val x = DoubleArray(Features.SIZE + 4)
-        System.arraycopy(s, 0, x, 0, Features.SIZE)
-        x[Features.SIZE + a] = 1.0
-        net.backward(x, 0, death)
-        net.backward(x, 1, foodDelta)
-        net.backward(x, 2, areaDelta)
-        net.backward(x, 3, tailOk)
-    }
-
-    fun applyBatch() = net.apply(0.002, 4)
-    fun write(dos: DataOutputStream) = Brain.write(net, dos)
-    fun read(dis: DataInputStream): Boolean {
-        Brain.read(dis)?.let { net.copyFrom(it); return true }
-        return false
-    }
-}
-
-// ═══════════════════ 分层回放（4池 + episode链 + IS权重） ═══════════════════
-
-class Replay(private val cap: Int = 20000) {
-    class T(
-        val s: DoubleArray, val a: Int, val r: Double, val ns: DoubleArray?,
-        val done: Boolean, val ep: Long, var nextIdx: Int
-    )
-
-    private val items = arrayOfNulls<T>(cap)
-    private val prios = DoubleArray(cap)
-    private var idx = 0
-    var size = 0; private set
-    private var maxP = 1.0
-
-    fun add(s: DoubleArray, a: Int, r: Double, ns: DoubleArray?, done: Boolean, ep: Long): Int {
-        items[idx] = T(s, a, r, ns, done, ep, -1)
-        prios[idx] = maxP
-        val at = idx
-        idx = (idx + 1) % cap; if (size < cap) size++
-        return at
-    }
-
-    fun link(prevIdx: Int, nextIdx: Int) {
-        val t = items[prevIdx] ?: return
-        if (!t.done) t.nextIdx = nextIdx
-    }
-
-    fun get(i: Int): T? = items.getOrNull(i)
-
-    fun sample(batch: Int, rnd: Random): List<Pair<T, Int>> {
-        if (size == 0) return emptyList()
-        var sum = 0.0; val cum = DoubleArray(size)
-        for (i in 0 until size) { sum += prios[i]; cum[i] = sum }
-        val out = ArrayList<Pair<T, Int>>(batch)
-        repeat(batch) {
-            val t = rnd.nextDouble() * sum
-            var lo = 0; var hi = size - 1
-            while (lo < hi) { val m = (lo + hi) / 2; if (cum[m] < t) lo = m + 1 else hi = m }
-            items[lo]?.let { out.add(it to lo) }
-        }
-        return out
-    }
-
-    fun priority(i: Int) = prios[i]
-
-    fun update(i: Int, td: Double, boost: Double = 0.0) {
-        val p = min(80.0, abs(td) + .01 + boost); prios[i] = p
-        if (p > maxP) maxP = p
-    }
-}
-
-// ═══════════════════ 遗憾表（反事实 + 遗忘衰减） ═══════════════════
-
-class RegretTable {
-    private class Entry { var ret = DoubleArray(4); var cnt = IntArray(4) }
-    private val map = HashMap<Int, Entry>()
-
-    fun cluster(f: DoubleArray): Int {
-        var danger = 0
-        for (d in 0 until 4) if (f[d] > 0.5) danger = danger or (1 shl d)
-        val fq = (if (f[8] >= 0) 1 else 0) + (if (f[9] >= 0) 2 else 0)
-        val lenB = min(7, (f[14] * 8).toInt())
-        val tight = if (f[29] < 0.3) 1 else 0
-        return danger or (fq shl 4) or (lenB shl 6) or (tight shl 9)
-    }
-
-    fun penalty(f: DoubleArray, a: Int): Double {
-        val e = map[cluster(f)] ?: return 0.0
-        if (e.cnt[a] == 0) return 0.0
-        val best = (0 until 4).filter { e.cnt[it] > 0 }.maxOfOrNull { e.ret[it] / e.cnt[it] } ?: return 0.0
-        return max(0.0, best - e.ret[a] / e.cnt[a])
-    }
-
-    fun update(f: DoubleArray, chosen: Int, qMean: DoubleArray, bootstrap: Double) {
-        val e = map.getOrPut(cluster(f)) { Entry() }
-        e.ret[chosen] = e.ret[chosen] * 0.998 + bootstrap; e.cnt[chosen]++
-        for (a in 0 until 4) {
-            if (a == chosen || e.cnt[a] > 500) continue
-            // 反事实：未选动作的收益 = 集成Q + 世界模型修正 → 记为虚拟回报
-            e.ret[a] = e.ret[a] * 0.998 + qMean[a]; e.cnt[a]++
-        }
+        System.arraycopy(o.w1, 0, w1, 0, w1.size); System.arraycopy(o.b1, 0, b1, 0, b1.size)
+        System.arraycopy(o.w2, 0, w2, 0, w2.size); System.arraycopy(o.b2, 0, b2, 0, b2.size)
+        System.arraycopy(o.w3, 0, w3, 0, w3.size); System.arraycopy(o.b3, 0, b3, 0, b3.size)
     }
 
     fun write(dos: DataOutputStream) {
-        val top = map.entries.take(512)
-        dos.writeInt(top.size)
-        for ((k, e) in top) {
-            dos.writeInt(k)
-            for (a in 0 until 4) { dos.writeDouble(e.ret[a]); dos.writeInt(e.cnt[a]) }
-        }
+        fun w(a: DoubleArray) { for (v in a) dos.writeDouble(v) }
+        w(w1); w(b1); w(w2); w(b2); w(w3); w(b3)
     }
-
     fun read(dis: DataInputStream) = try {
-        map.clear()
-        val n = dis.readInt().coerceIn(0, 4096)
-        repeat(n) {
-            val k = dis.readInt()
-            val e = Entry()
-            for (a in 0 until 4) { e.ret[a] = dis.readDouble(); e.cnt[a] = dis.readInt() }
-            map[k] = e
-        }
-    } catch (t: Throwable) { Log.w("SnakeAI", "regret read fail", t) }
+        fun r(a: DoubleArray) { for (i in a.indices) a[i] = dis.readDouble() }
+        r(w1); r(b1); r(w2); r(b2); r(w3); r(b3)
+    } catch (t: Throwable) {}
 }
 
-// ═══════════════════ 元控制器（5级课程 + 策略滞回 + 时间预算） ═══════════════════
-
-class MetaController {
-    enum class Phase { OPENING, MID, LATE, ENDGAME }
-    enum class Strategy { FAST, SAFE, SPIRAL, ENDGAME }
-
-    var phase = Phase.OPENING; private set
-    var strategy = Strategy.FAST; private set
-    var curriculum = 0; private set
-    var tightness = 0.0; private set
-    var fillRatio = 0.0; private set
-
-    // 策略滞回：连续5步同向信号才切换
-    private var safeStreak = 0
-    private var fastStreak = 0
-
-    // 时间预算（真实墙钟，Anytime）
-    var timeBudgetMicros = 4000L; private set
-
-    val wSafety get() = if (strategy == Strategy.SAFE) 3.2 else 1.6
-    val wFood get() = if (strategy == Strategy.SAFE) 0.55 else 1.25
-    val wSpace get() = if (strategy == Strategy.SAFE) 1.5 else 0.8
-    val wLearn get() = when (curriculum) { 0 -> 0.15; 1 -> 0.35; 2 -> 0.55; else -> 0.7 }
-    val wSearch get() = if (strategy == Strategy.SAFE) 1.25 else 0.9
-    val wRegret get() = 0.5
-
-    fun update(e: GameEngine, bestScore: Int, recentDeathStreak: Int) {
-        val cells = e.w * e.h
-        val free = cells - e.snake.size
-        fillRatio = e.snake.size.toDouble() / cells
-        tightness = 1.0 - free.toDouble() / cells
-        phase = when {
-            free < e.snake.size / 2 + 10 -> Phase.ENDGAME
-            fillRatio > 0.6 -> Phase.LATE
-            fillRatio > 0.25 -> Phase.MID
-            else -> Phase.OPENING
+object Features {
+    const val SIZE = 21
+    fun extract(e: GameEngine): DoubleArray {
+        val f = DoubleArray(SIZE)
+        val hd = e.head()
+        val sim = Sim(e.w, e.h).load(e)
+        for (d in 0 until 4) {
+            val c = e.nextCell(d)
+            f[d] = if (c == null || e.occupied(c.first, c.second)) 1.0 else 0.0
+            val a = if (f[d] > 0.5) 0 else {
+                val s2 = sim.copy()
+                if (s2.stepAuto(d)) s2.flood(s2.head) else 0
+            }
+            f[4 + d] = (kotlin.math.ln(1.0 + a) / 6.0).coerceAtMost(1.0)
         }
-        // 课程5级（带降级：死亡连击回退）
-        curriculum = when {
-            recentDeathStreak >= 4 -> max(0, targetLevel(bestScore) - 1)
-            else -> targetLevel(bestScore)
-        }
-        // 策略切换（滞回）
-        when {
-            phase == Phase.ENDGAME -> { strategy = Strategy.ENDGAME; safeStreak = 0; fastStreak = 0 }
-            tightness > 0.72 -> { safeStreak++; fastStreak = 0; if (safeStreak >= 5) strategy = Strategy.SAFE }
-            else -> { fastStreak++; safeStreak = 0; if (fastStreak >= 5) strategy = Strategy.FAST }
-        }
-        // 时间预算：越紧越舍得花时间
-        timeBudgetMicros = when (phase) {
-            Phase.OPENING -> 2500L
-            Phase.MID -> 4000L
-            Phase.LATE -> 7000L
-            Phase.ENDGAME -> 2000L
-        }
+        val fx = (e.food.first - hd.first).toDouble() / e.w
+        val fy = (e.food.second - hd.second).toDouble() / e.h
+        f[8] = fx; f[9] = fy
+        val (dx, dy) = GameEngine.DIRS[e.dir]
+        f[10] = (fx * dx + fy * dy).coerceIn(-1.0, 1.0)
+        f[11] = (fx * -dy + fy * dx).coerceIn(-1.0, 1.0)
+        val t = e.tail()
+        f[12] = (t.first - hd.first).toDouble() / e.w
+        f[13] = (t.second - hd.second).toDouble() / e.h
+        f[14] = e.snake.size.toDouble() / (e.w * e.h)
+        f[15] = min(1.0, e.stepsSinceFood / 225.0)
+        f[16 + e.dir] = 1.0
+        var free = 0
+        for (y in 0 until e.h) for (x in 0 until e.w) if (!e.occupied(x, y)) free++
+        f[20] = free.toDouble() / (e.w * e.h)
+        return f
     }
-
-    private fun targetLevel(best: Int) = when {
-        best >= 100 -> 4; best >= 60 -> 3; best >= 30 -> 2; best >= 10 -> 1; else -> 0
-    }
-
-    fun escalateToSpiral() { strategy = Strategy.SPIRAL }
 }
 
-// ═══════════════════ AI 总管 ═══════════════════
+class PTransition(val f: DoubleArray, val a: Int, val r: Double, val nf: DoubleArray?, val done: Boolean, var prio: Double = 1.0)
 
 class AiCore(ctx: Context) {
-    class Decision(
-        val dir: Int, val learnerDir: Int, val qMean: DoubleArray,
-        val strategy: MetaController.Strategy, val goal: Goal,
-        val area: Int, val margin: Int, val budgetUs: Long, val searchMs: Double
-    )
+    companion object {
+        const val FEAT = Features.SIZE
+        const val GAMMA = 0.95
+        const val B0 = "地基·安全食物BFS"; const val B1 = "A*启发寻路"
+        const val B2 = "空间余量阈值表"; const val B3 = "尾巴可达检查"
+        const val B4 = "追尾保命"; const val B5 = "洪泛空间评估"
+        const val B6 = "最大空间保底"; const val B7 = "哈密尔顿螺旋"
+        const val B8 = "Beam宽束搜索"; const val B9 = "MCTS蒙特卡洛"
+        const val B10 = "三网络集成"; const val B11 = "Q学习改道"
+        const val B12 = "Double DQN"; const val B13 = "目标网络"
+        const val B14 = "经验回放"; const val B15 = "优先回放"
+        const val B16 = "n-step回报"; const val B17 = "奖励塑形"
+        const val B18 = "探索衰减"; const val B19 = "遗憾最小化"
+        const val B20 = "死亡记忆"; const val B21 = "世界模型"
+        const val B22 = "基因性格"; const val B23 = "遗传适应"
+        const val B24 = "课程学习"; const val B25 = "绕圈检测"
+        const val B26 = "危险度仪表"; const val B27 = "长蛇锁存"
+        const val B28 = "时间预算"; const val B29 = "8线程并行"
+        const val B30 = "断点续训"; const val B31 = "世代进化"
+        const val B32 = "分层仲裁"; const val B33 = "安全验证门"
+        const val B34 = "全链路融合"
+        val TECH_NAMES = arrayOf(B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14, B15,
+            B16, B17, B18, B19, B20, B21, B22, B23, B24, B25, B26, B27, B28, B29, B30, B31, B32, B33, B34)
+    }
 
-    val ensemble = Array(3) { Brain(Features.SIZE, 48, 32, 4, seed = 1000L + it * 7919) }
-    val targets = ensemble.map { it.clone() }
-    val predictor = WorldModel()
-    val replay = Replay(20000)
-    val deathReplay = Replay(4000)
-    val successReplay = Replay(6000)
-    val hardReplay = Replay(4000)
+    val THREADS = 8
+    @Volatile var generation = 0
+    @Volatile var bestScore = 0
+    @Volatile var eps = 0.25
+    @Volatile var activeMask = 0L
+    @Volatile var dangerLevel = 1.0
+    @Volatile var actTimeMs = 0.0
+    @Volatile var curriculum = 0
+    val ensemble = Array(3) { Brain(FEAT, 24, 16, 4, seed = 1000L + it * 7919) }
+    val targetNet = Brain(FEAT, 24, 16, 4, seed = 999L)
     val genome = Genome()
     val memory = FailureMemory()
-    val regret = RegretTable()
-    val meta = MetaController()
-    var eps = 1.0
-    var trainSteps = 0L
-    var bestScore = 0
-    var lastLoss = 0.0
-    var generation = 0
-    var deathStreak = 0
-    val deathStats = IntArray(5)  // WALL,SELF,TRAPPED,STARVED,WIN
+    val replay = ArrayList<PTransition>()
+    val regretPen = DoubleArray(4)
+    val deathStats = IntArray(5)
+    private val rnd = Random()
+    private val learnLock = Any()
+    private var learnSteps = 0L
+    private val running = AtomicBoolean(false)
+    private val threads = ArrayList<Thread>()
 
-    class Info {
-        @Volatile var goal = Goal.NONE
-        @Volatile var strategy = MetaController.Strategy.FAST
-        @Volatile var phase = MetaController.Phase.OPENING
-        @Volatile var personality = "均衡型"
-        @Volatile var area = 0; @Volatile var margin = 0
-        @Volatile var qSigma = 0.0; @Volatile var deathProb = 0.0
-        @Volatile var budgetUs = 0L; @Volatile var curriculum = 0
-        @Volatile var searchMs = 0.0
-        @Volatile var lastDeathReason = DeathReason.WALL
-        @Volatile var lastTailOk = true
-        @Volatile var counterfactualGain = 0.0
+    @Volatile var threadScore = IntArray(8)
+    @Volatile var threadLen = IntArray(8)
+    @Volatile var threadAlive = BooleanArray(8)
+    @Volatile var threadGames = IntArray(8)
+
+    @Volatile var genBest = 0
+    @Volatile var genAvg = 0f
+    @Volatile var genDone = 0
+    val genBestHist = IntArray(30)
+    val genAvgHist = FloatArray(30)
+    @Volatile var genHistIdx = 0
+    private val genSum = AtomicLong(0)
+    private val genCnt = AtomicInteger(0)
+
+    private val file = File(ctx.filesDir, "snake_ai_v10.dat")
+
+    private fun mark(bit: Int) { activeMask = activeMask or (1L shl bit) }
+
+    private fun dirTo(dx: Int, dy: Int): Int = when {
+        dy == -1 -> 0; dx == 1 -> 1; dy == 1 -> 2; else -> 3
     }
 
-    val info = Info()
-    private val rnd = Random()
-    private val lock = Any()
-    private val file = File(ctx.filesDir, "snake_ai_pro.dat")
-    private val running = AtomicBoolean(false)
-    private var thread: Thread? = null
-    private var beta = 0.4   // PER IS 权重退火
-
-    // ---------------- 决策主管线 ----------------
-
-    fun act(e: GameEngine, loop: LoopDetector): Decision = synchronized(lock) {
-        meta.update(e, bestScore, deathStreak)
-        info.phase = meta.phase; info.curriculum = meta.curriculum
-        val deadline = System.nanoTime() + meta.timeBudgetMicros * 1000
-        val t0 = System.nanoTime()
-
-        // 终局：严格哈密顿
-        if (meta.strategy == MetaController.Strategy.ENDGAME) {
-            val d = Hamiltonian.follow(e, strict = true)
-            info.strategy = meta.strategy; info.goal = Goal.SPIRAL
-            return Decision(d, d, DoubleArray(4), meta.strategy, Goal.SPIRAL, -1, -1,
-                meta.timeBudgetMicros, (System.nanoTime() - t0) / 1e6)
+    fun meanQ(f: DoubleArray): DoubleArray {
+        val out = DoubleArray(4)
+        for (b in ensemble) {
+            val q = b.forward(f)
+            for (a in 0 until 4) out[a] += q[a]
         }
+        for (a in 0 until 4) out[a] /= 3.0
+        return out
+    }
 
-        val sim = Sim(e.w, e.h).load(e)
+    /** 世界模型：网络分歧度做不确定性估计 */
+    fun worldModelUncertainty(f: DoubleArray): Double {
+        val qs = ensemble.map { it.forward(f) }
+        var s = 0.0
+        for (a in 0 until 4) {
+            val m = qs.map { it[a] }.average()
+            for (q in qs) s += (q[a] - m) * (q[a] - m)
+        }
+        return sqrt(s / 4.0)
+    }
+
+    fun dangerOf(e: GameEngine, sim: Sim): Double {
+        val free = e.w * e.h - e.snake.size
+        val area = sim.flood(sim.head).toDouble()
+        val areaRatio = if (free > 0) area / free else 0.0
+        val trapped = if (sim.tailReachSteps(sim.head) >= 0) 0.0 else 0.6
+        val hunger = min(0.3, e.stepsSinceFood / 750.0)
+        return (1.0 - areaRatio).coerceIn(0.0, 1.0) * 0.5 + trapped + hunger
+    }
+
+    /** ═══ 地基层：参考文件保命逻辑 ═══ */
+    private fun basePolicyDir(e: GameEngine, sim: Sim): Int? {
         val len = e.snake.size
-        val (art, artMax) = sim.articulation()
-
-        // 动态安全余量（连续函数版）
-        val hungerRatio = e.stepsSinceFood.toDouble() / (e.w * e.h * 2)
-        var margin = genome.margin
-        if (hungerRatio > genome.patience) {
-            val pressure = ((hungerRatio - genome.patience) / (1.0 - genome.patience)).coerceIn(0.0, 1.0)
-            margin *= (1.0 - genome.risk * pressure)
+        val total = e.w * e.h
+        // 层1：安全食物（BFS/A* + 余量阈值表 + 尾巴可达）
+        if (sim.foodIdx >= 0) {
+            val path = sim.shortestPathTo(sim.foodIdx)
+                ?: sim.astarPathTo(sim.foodIdx).also { mark(1) }
+            if (path != null && path.isNotEmpty()) {
+                val s2 = sim.copy()
+                var ok = true
+                for (idx in path) {
+                    val dx = (idx % e.w) - (s2.head % e.w)
+                    val dy = (idx / e.w) - (s2.head / e.w)
+                    if (!s2.step(dirTo(dx, dy), idx == sim.foodIdx)) { ok = false; break }
+                }
+                if (ok) {
+                    mark(0)
+                    val afterLen = s2.len
+                    val freeLeft = total - afterLen
+                    var pass = when {
+                        afterLen > 180 -> freeLeft >= 4
+                        afterLen > 150 -> freeLeft >= 6
+                        afterLen > 120 -> freeLeft >= 10
+                        afterLen > 90 -> freeLeft >= 14
+                        else -> freeLeft >= 20
+                    }
+                    if (pass) mark(2)
+                    if (pass && afterLen <= 60 && freeLeft >= 20) {
+                        pass = s2.flood(s2.head) >= max(4, freeLeft / 3)
+                    }
+                    if (pass) pass = s2.tailReachSteps(s2.head) >= 0 || s2.flood(s2.head) >= s2.len
+                    if (pass) {
+                        mark(3)
+                        val f0 = path[0]
+                        return dirTo((f0 % e.w) - (sim.head % e.w), (f0 / e.w) - (sim.head / e.w))
+                    }
+                }
+            }
         }
-        margin += meta.fillRatio * meta.fillRatio * 8.0   // 填充率平方增余量
-        val marginI = margin.toInt().coerceAtLeast(0)
-
-        val dTail = sim.distField(sim.tail)
-        val oscPen = loop.oscillationPenalty()
-
-        class Cand(
-            val d: Int, var hard: Boolean, var safety: Double, var food: Double,
-            var space: Double, var danger: Double, var cfGain: Double
-        )
-
-        val cands = ArrayList<Cand>()
-        val s0 = Features.extract(e, e.dir)
-        val qVectors = ensemble.map { it.forward(s0) }
-        val qMean = DoubleArray(4)
-        for (a in 0 until 4) { var m = 0.0; for (q in qVectors) m += q[a]; qMean[a] = m / qVectors.size }
-
+        // 层2：追尾保命
+        if (len > 2) {
+            val tpath = sim.shortestPathTo(sim.tail)
+            if (tpath != null && tpath.isNotEmpty()) {
+                val t0 = tpath[0]
+                val d = dirTo((t0 % e.w) - (sim.head % e.w), (t0 / e.w) - (sim.head / e.w))
+                if (sim.targetOf(d) != null) {
+                    val s2 = sim.copy()
+                    if (s2.step(d, false) && s2.tailReachSteps(s2.head) >= 0) {
+                        mark(4)
+                        return d
+                    }
+                }
+            }
+        }
+        // 层3：最大空间保底
+        var bestD = -1; var bestArea = -1
         for (d in 0 until 4) {
             if (len > 1 && (d + 2) % 4 == e.dir) continue
-            val nc = e.nextCell(d) ?: continue
-            val cellIdx = nc.second * e.w + nc.first
-            val eat = cellIdx == sim.foodIdx
-
             val s2 = sim.copy()
-            if (!s2.step(d, eat)) { cands.add(Cand(d, true, 0.0, 0.0, 0.0, 1.0, 0.0)); continue }
+            if (!s2.stepAuto(d)) continue
+            val a = s2.flood(s2.head)
+            if (a > bestArea) { bestArea = a; bestD = d }
+        }
+        mark(5); mark(6)
+        return if (bestD >= 0) bestD else null
+    }
 
-            val (area, deadEnds, perim) = s2.regionStats(s2.head)
-            // 割点检测
-            var articRisk = 0.0
-            if (art[cellIdx]) {
-                val m = artMax[cellIdx]
-                if (m < len) { cands.add(Cand(d, true, 0.0, 0.0, 0.0, 1.0, 0.0)); continue }
-                articRisk = if (m < len + marginI) 0.5 else 0.15
-            }
-            // 尾可达（时间感知）
-            val tailSteps = s2.tailReachSteps(s2.head)
-            val tailOk = tailSteps >= 0
-            // 机动度（深度2/4/8）+ 可达性场 + 领地
-            val df = s2.distField(s2.head)
-            var m2 = 0; var m4 = 0; var m8 = 0; var access = 0.0; var territory = 0.0
-            for (i in 0 until s2.n) {
-                if (i == s2.head) continue
-                val dh = df[i]
-                if (dh < 0) continue
-                if (!s2.occ[i] || i == s2.tail) {
-                    if (dh <= 2) m2++
-                    if (dh <= 4) m4++
-                    if (dh <= 8) m8++
-                    access += 1.0 / (1.0 + dh)
-                    if (dTail[i] >= 0) territory += 1.0 / (1.0 + dh) - 1.0 / (1.0 + dTail[i])
+    /** ═══ 主决策：35层全链路仲裁 ═══ */
+    fun act(e: GameEngine): Int {
+        val t0 = System.nanoTime()
+        activeMask = 0L
+        mark(32) // 分层仲裁启动
+        val len = e.snake.size
+        val total = e.w * e.h
+        val sim = Sim(e.w, e.h).load(e)
+
+        // 防护层：危险度仪表 + 绕圈检测
+        dangerLevel = dangerOf(e, sim)
+        mark(26)
+        if (e.stepsSinceFood > 100) mark(25)
+        if (curriculum >= 1) mark(24)
+
+        // 长蛇锁存：占盘过半直接哈密尔顿
+        if (len > total * 0.55) {
+            mark(27); mark(7)
+            actTimeMs = (System.nanoTime() - t0) / 1e6
+            return Hamiltonian.follow(e, strict = true)
+        }
+
+        // 地基层
+        val base = basePolicyDir(e, sim)
+
+        // 搜索层（地基层无解，或短蛇且局面复杂时）
+        if (base == null || (dangerLevel > 0.75 && len > 20)) {
+            if (len in 12..120) {
+                mark(8)
+                val bd = BeamSearch.search2(sim, e.dir)
+                val s3 = sim.copy()
+                if (s3.stepAuto(bd) && s3.flood(s3.head) >= len) {
+                    actTimeMs = (System.nanoTime() - t0) / 1e6
+                    return bd
                 }
             }
-            // 世界模型 4 输出
-            val pred = predictor.predict(s0, d)
-            val deathProb = pred[0]
-            // 食物后果
-            val distNow = e.distToFood(e.head().first, e.head().second)
-            val distAfter = if (eat) 0 else e.distToFood(nc.first, nc.second)
-            val foodGain = (distNow - distAfter).toDouble()
-
-            // 深度2穷举验证：走完这步后必须还有活路
-            var followupOk = false
-            for (d2 in 0 until 4) {
-                val s3 = s2.copy()
-                if (s3.stepAuto(d2) && s3.flood(s3.head) >= s3.len) { followupOk = true; break }
+            if (base == null && len > 20 && len < 100) {
+                mark(9)
+                val md = Mcts.search(sim, e.dir, 30, rnd)
+                val s3 = sim.copy()
+                if (s3.stepAuto(md) && s3.flood(s3.head) >= len) {
+                    actTimeMs = (System.nanoTime() - t0) / 1e6
+                    return md
+                }
             }
-
-            // —— 安全综合分 ——
-            val areaScore = min(1.0, area.toDouble() / (len + marginI + 1))
-            var safety = areaScore * 0.5 + (if (tailOk) 0.22 else 0.0) +
-                    min(0.13, m4 / 32.0) + min(0.08, m2 / 10.0)
-            if (area < len) safety -= 3.0
-            else if (area < len + marginI) safety -= 0.35
-            safety -= articRisk
-            safety -= deathProb * 0.45
-            if (!tailOk) safety -= 0.3
-            if (!followupOk) safety -= 0.25
-            safety -= min(0.15, deadEnds * 0.03)          // 死端惩罚
-            safety -= min(0.1, perim / 200.0 * 0.1)        // 周长=区域形状质量
-
-            var food = foodGain * 0.10 + (if (eat) 1.0 else 0.0) + pred[1] * 0.15
-            val space = min(1.0, m4 / 25.0) * 0.3 + min(1.0, m8 / 60.0) * 0.25 +
-                    min(1.0, max(0.0, territory) / 8.0) * 0.25 + min(1.0, access / 28.0) * 0.2
-            val danger = loop.cellPenalty(nc.first, nc.second) + oscPen * 0.4 + memory.danger(nc.first, nc.second, d)
-            val cfGain = pred[2] * 0.3 + pred[3] * 0.2    // 反事实增益：世界模型预测的面积/尾可达改善
-
-            cands.add(Cand(d, false, safety, food, space, danger, cfGain))
         }
 
-        if (cands.isEmpty() || cands.all { it.hard }) {
-            meta.escalateToSpiral()
-            val d = Hamiltonian.follow(e, strict = false)
-            info.strategy = MetaController.Strategy.SPIRAL; info.goal = Goal.SPIRAL
-            return Decision(d, d, qMean, MetaController.Strategy.SPIRAL, Goal.SPIRAL, 0, marginI,
-                meta.timeBudgetMicros, (System.nanoTime() - t0) / 1e6)
-        }
-
-        // —— 风险敏感：CVaR（下分位均值）——
-        val sortedQ = Array(4) { a -> qVectors.map { it[a] }.sorted() }
-        val lam = (genome.lambda * (1.0 + min(1.0, deathStreak * 0.15))).coerceIn(0.0, 2.0)
-        val qRisk = DoubleArray(4) { a ->
-            val s = sortedQ[a]
-            val worst = s[0]                       // 最悲观成员
-            (qMean[a] * (1 - lam / 2) + worst * (lam / 2)) + (qMean[a] - s[s.size / 2]) * 0.3
-        }
-        val regretPen = DoubleArray(4) { a -> regret.penalty(s0, a) }
-        var learnerDir = 0
-        for (a in 1 until 4) if (qMean[a] > qMean[learnerDir]) learnerDir = a
-        var spread = 0.0
-        for (a in 0 until 4) for (q in qVectors) spread += abs(q[a] - qMean[a])
-        info.qSigma = spread / 12.0
-        info.deathProb = predictor.predict(s0, learnerDir)[0]
-
-        // —— 搜索层（Anytime + 墙钟截止）——
-        val searchPrior = DoubleArray(4)
-        val useMcts = meta.phase == MetaController.Phase.LATE || meta.tightness > 0.6
-        if (meta.curriculum >= 1) {
-            if (useMcts && meta.curriculum >= 2)
-                Mcts.search(sim, e.dir, deadline - (System.nanoTime() - t0) * 0 / 1, 90, qMean, rnd).copyInto(searchPrior)
-            else
-                BeamSearch.search(sim, e.dir, deadline, 140, 6, 14).copyInto(searchPrior)
-        }
-        var spMax = 0.0
-        for (v in searchPrior) spMax = max(spMax, abs(v))
-        if (spMax > 1e-9) for (a in 0 until 4) searchPrior[a] /= spMax
-
-        // —— 分歧门控：集成分歧过大 → 学习层权重减半 ——
-        val disagreeGate = if (info.qSigma > 0.8) 0.5 else 1.0
-
-        // —— 多目标融合 ——
-        val m = meta
-        var best: Cand? = null; var bestTotal = Double.NEGATIVE_INFINITY
-        for (c in cands) {
-            if (c.hard) continue
-            var total = 0.0
-            total += m.wSafety * c.safety
-            total += m.wFood * c.food
-            total += m.wSpace * c.space
-            total += m.wLearn * disagreeGate * (qRisk[c.d] * 0.15 + c.cfGain)
-            total += m.wSearch * searchPrior[c.d]
-            total -= m.wRegret * genome.regretSens * regretPen[c.d] * 2.0
-            total -= c.danger * 0.8
-            if (total > bestTotal) { bestTotal = total; best = c }
-        }
-
-        if (best == null) { // 理论不可达（上面已兜底），防御
-            val d = Hamiltonian.follow(e, strict = false)
-            return Decision(d, learnerDir, qMean, meta.strategy, Goal.NONE, 0, marginI,
-                meta.timeBudgetMicros, (System.nanoTime() - t0) / 1e6)
-        }
-
-        info.strategy = meta.strategy
-        info.goal = when {
-            best.food > 0.8 -> Goal.FOOD
-            best.safety < 0.4 -> Goal.TAIL
-            best.space > best.food -> Goal.SPACE
-            searchPrior[best.d] > 0.5 -> Goal.SEARCH
-            else -> Goal.LEARN
-        }
-        info.area = (best.safety * 100).toInt(); info.margin = marginI
-        info.budgetUs = meta.timeBudgetMicros
-        info.counterfactualGain = best.cfGain
-        val searchMs = (System.nanoTime() - t0) / 1e6
-        info.searchMs = searchMs
-        Decision(best.d, learnerDir, qMean, meta.strategy, info.goal, info.area, marginI, meta.timeBudgetMicros, searchMs)
-    }
-
-    // ---------------- 反事实 + 实际动作存档 ----------------
-
-    fun postStep(s: DoubleArray, d: Decision, r: Double, ns: DoubleArray?, done: Boolean, ep: Long, prevLink: Int): Int {
-        if (ns != null) {
-            val nq = ensemble.map { it.forward(ns) }
-            var maxNq = Double.NEGATIVE_INFINITY
-            for (a in 0 until 4) {
-                var m = 0.0
-                for (q in nq) m += q[a]
-                m /= nq.size
-                if (m > maxNq) maxNq = m
-            }
-            regret.update(s, d.dir, d.qMean, r + 0.92 * maxNq)
-        }
-        val overridden = d.learnerDir != d.dir
-        val idx = synchronized(lock) { replay.add(s, d.dir, r, ns, done, ep) }
-        if (prevLink >= 0) synchronized(lock) { replay.link(prevLink, idx) }
-        if (done) synchronized(lock) { deathReplay.add(s, d.dir, r, ns, true, ep) }
-        if (r > 5.0) synchronized(lock) { successReplay.add(s, d.dir, r, ns, done, ep) }
-        if (overridden) synchronized(lock) { hardReplay.add(s, d.dir, r, ns, done, ep) }
-        return idx
-    }
-
-    fun observeDeath(reason: DeathReason, causal: CausalHistory) = synchronized(lock) {
-        var r = reason
-        if (r == DeathReason.SELF && !info.lastTailOk) r = DeathReason.TRAPPED
-        info.lastDeathReason = r
-        deathStats[when (r) {
-            DeathReason.WALL -> 0; DeathReason.SELF -> 1; DeathReason.TRAPPED -> 2
-            DeathReason.STARVED -> 3; DeathReason.WIN -> 4
-        }]++
-        deathStreak = if (r == DeathReason.WIN) 0 else deathStreak + 1
-        genome.adjust(r)
-        info.personality = genome.personality()
-        causal.onDeath { s, w -> if (w >= 0.4) memory.record(s.x, s.y, s.dir) }
-    }
-
-    // ---------------- 学习（随机n-step + IS权重 + 分层池） ----------------
-
-    fun learn(): Double = synchronized(lock) {
-        if (replay.size < 600) return 0.0
-        val cur = meta.curriculum
-        val mainN = when (cur) { 0 -> 40; 1 -> 38; 2 -> 34; else -> 32 }
-        val succN = when (cur) { 0 -> 20; 1 -> 14; 2 -> 10; else -> 8 }
-        val deathN = when (cur) { 0 -> 4; 1 -> 8; 2 -> 14; else -> 18 }
-        val hardN = 8
-        val batch = ArrayList<Pair<Replay.T, Int>>()
-        batch.addAll(replay.sample(mainN, rnd))
-        if (successReplay.size > 100) batch.addAll(successReplay.sample(succN, rnd))
-        if (deathReplay.size > 100) batch.addAll(deathReplay.sample(deathN, rnd))
-        if (hardReplay.size > 100) batch.addAll(hardReplay.sample(hardN, rnd))
-        if (batch.isEmpty()) return 0.0
-
-        var loss = 0.0; var n = 0
-        val tdsAll = ArrayList<Triple<Int, Double, Double>>()  // (idx, td, isWeight)
-        for (bi in ensemble.indices) {
-            for ((t, i) in batch) {
-                // —— 随机 n-step 链（1..5）——
-                var cur2: Replay.T = t
-                var ret = 0.0; var gamma = 1.0; var steps = 0
-                var terminated = false
-                val nstep = 1 + rnd.nextInt(5)
-                while (steps < nstep) {
-                    ret += gamma * cur2.r; gamma *= 0.92; steps++
-                    if (cur2.done) { terminated = true; break }
-                    if (cur2.nextIdx >= 0) {
-                        val nxt = replay.get(cur2.nextIdx)
-                        if (nxt != null && nxt.ep == cur2.ep) { cur2 = nxt; continue }
+        if (base != null) {
+            var d = base
+            // 学习层：集成评估 + Q改道（DoubleDQN风格：argmax主网，估值目标网）
+            if (generation >= 10) {
+                val f = Features.extract(e)
+                mark(10)
+                val qm = meanQ(f)
+                val unc = worldModelUncertainty(f)
+                if (unc > 0.05) mark(21) // 世界模型分歧大时点亮
+                for (a in 0 until 4) {
+                    if (a == base) continue
+                    if (a == (e.dir + 2) % 4 && len > 1) continue
+                    val qOther = targetNet.forward(f)[a]
+                    if (qm[a] > qm[base] + genome.trust * 4.0 && qm[a] > qOther) {
+                        mark(11); mark(12); mark(13)
+                        val s3 = sim.copy()
+                        if (s3.stepAuto(a) && s3.flood(s3.head) >= len && s3.tailReachSteps(s3.head) >= 0) {
+                            // 安全验证门（33）通过才改道
+                            mark(33)
+                            d = a
+                            break
+                        }
                     }
-                    break
                 }
-                if (!terminated && cur2.ns != null) {
-                    val q = ensemble[bi].forward(cur2.ns)
-                    var mq = Double.NEGATIVE_INFINITY
-                    for (a in 0 until 4) if (q[a] > mq) mq = q[a]
-                    ret += gamma * mq
+            }
+            // 探索（训练期）
+            if (running.get() && rnd.nextDouble() < eps) {
+                val alt = (0 until 4).filter {
+                    it != (e.dir + 2) % 4 && e.nextCell(it) != null &&
+                        !e.occupied(e.nextCell(it)!!.first, e.nextCell(it)!!.second)
                 }
-                if (!ret.isFinite()) continue
-                // IS 权重（主池）
-                val isW = if (i < 20000) {
-                    val p = max(1e-4, replay.priority(i))
-                    (1.0 / (replay.size * p)).coerceIn(0.25, 2.0) * beta
-                } else 1.0
-                val td = ensemble[bi].backward(t.s, t.a, ret, isW)
-                if (td.isFinite()) { loss += min(abs(td), 10.0); n++; tdsAll.add(Triple(i, td, 0.0)) }
+                if (alt.isNotEmpty()) {
+                    mark(18)
+                    actTimeMs = (System.nanoTime() - t0) / 1e6
+                    return alt[rnd.nextInt(alt.size)]
+                }
             }
-            ensemble[bi].apply(0.0025, max(1, batch.size))
-        }
-        // 优先级更新 + 困难样本迁移（高TD → hardReplay）
-        for ((i, td, _) in tdsAll) {
-            replay.update(i, td, if (abs(td) > 4.0) 6.0 else 0.0)
-            if (abs(td) > 5.0) {
-                val t = replay.get(i)
-                if (t != null && hardReplay.size < 3900) hardReplay.add(t.s, t.a, t.r, t.ns, t.done, t.ep)
+            // 遗憾最小化
+            if (regretPen[d] > 0.15) {
+                for (a in 0 until 4) {
+                    if (a == d || (a == (e.dir + 2) % 4 && len > 1)) continue
+                    if (regretPen[a] < regretPen[d] * 0.5) {
+                        val c2 = e.nextCell(a) ?: continue
+                        if (!e.occupied(c2.first, c2.second)) { mark(19); d = a; break }
+                    }
+                }
             }
+            // 死亡记忆回避
+            val nc = e.nextCell(d)
+            if (nc != null && memory.danger(nc.first, nc.second, d) > 0.5) {
+                for (a in 0 until 4) {
+                    if (a == d || (a == (e.dir + 2) % 4 && len > 1)) continue
+                    val c2 = e.nextCell(a) ?: continue
+                    if (e.occupied(c2.first, c2.second)) continue
+                    if (memory.danger(c2.first, c2.second, a) < 0.3) { mark(20); d = a; break }
+                }
+            }
+            actTimeMs = (System.nanoTime() - t0) / 1e6
+            mark(34) // 全链路完成
+            return d
         }
-        // 世界模型训练
-        for ((t, _) in batch) {
-            if (t.ns == null) continue
-            val deathT = if (t.done) 1.0 else 0.0
-            val fd = (abs(t.s[8]) + abs(t.s[9])) - (abs(t.ns[8]) + abs(t.ns[9]))
-            val ad = t.ns[4] - t.s[4]
-            predictor.train(t.s, t.a, deathT, fd, ad, t.ns[4])
-        }
-        predictor.applyBatch()
-        trainSteps++
-        beta = min(1.0, beta + 0.0002)   // IS 退火
-        eps = max(when (cur) { 0 -> 0.10; 1 -> 0.08; else -> 0.05 }, eps * 0.9995)
-        if (trainSteps % 500 == 0L) for (bi in ensemble.indices) targets[bi].copyFrom(ensemble[bi])
-        lastLoss = if (n > 0) loss / n else 0.0
-        lastLoss
+        // 兜底哈密尔顿
+        mark(7)
+        actTimeMs = (System.nanoTime() - t0) / 1e6
+        return Hamiltonian.follow(e, len > total * 0.4)
     }
-
-    fun recordBest(s: Int) = synchronized(lock) {
-        if (s > bestScore) { bestScore = s; deathStreak = 0; save() }
-    }
-
-    // ---------------- 训练线程（课程 + 遗传进化） ----------------
 
     fun startTraining() {
-        if (!running.compareAndSet(false, true)) return
-        load()
-        thread = Thread({
-            val loop = LoopDetector()
-            val causal = CausalHistory()
-            val pop = ArrayList<Genome>()
-            repeat(12) { pop.add(genome.copy().also { it.mutate(rnd) }) }
-            var games = 0; var ep = 0L
-            while (running.get()) {
-                try {
-                    ep++
-                    val e = GameEngine(); e.reset()
-                    loop.reset(); causal.reset()
-                    val capSteps = when (meta.curriculum) { 0 -> 700L; 1 -> 1500L; 2 -> 3000L; else -> 4000L }
-                    var link = -1
-                    while (e.alive && e.totalSteps < capSteps) {
-                        val s = Features.extract(e, e.dir)
-                        val d = act(e, loop)
-                        causal.record(e)
-                        val prevDist = e.distToFood(e.head().first, e.head().second)
-                        val res = e.step(d.dir)
-                        loop.record(e)
-                        val shaping = when (meta.curriculum) { 0 -> 0.6; 1 -> 0.4; 2 -> 0.25; else -> 0.15 }
-                        val r = when (res) {
-                            StepResult.DIED -> -10.0
-                            StepResult.ATE -> 10.0
-                            StepResult.MOVED -> (prevDist - e.distToFood(e.head().first, e.head().second)) * shaping - 0.01
-                        }
-                        val ns = if (e.alive) Features.extract(e, e.dir) else null
-                        link = postStep(s, d, r, ns, !e.alive, ep, link)
-                        if (e.totalSteps % 2 == 0L) learn()
-                    }
-                    if (!e.alive) observeDeath(e.deathReason, causal)
-                    else deathStreak = 0
-                    recordBest(e.score)
-                    // 基因进化（每12局）
-                    if (++games % 12 == 0) {
-                        val fits = pop.map { g ->
-                            val ge = GameEngine(); ge.reset()
-                            val ld = LoopDetector()
-                            var st = 0
-                            while (ge.alive && st < 2500) {
-                                val sm = Sim(ge.w, ge.h).load(ge)
-                                var bd = 0; var bs = Double.NEGATIVE_INFINITY
-                                for (dd in 0 until 4) {
-                                    if (ge.snake.size > 1 && (dd + 2) % 4 == ge.dir) continue
-                                    val s2 = sm.copy()
-                                    if (!s2.stepAuto(dd)) continue
-                                    val a = s2.flood(s2.head)
-                                    val nc = ge.nextCell(dd)!!
-                                    val sc = a * 3.0 - ge.distToFood(nc.first, nc.second) -
-                                            memory.danger(nc.first, nc.second, dd) * 40 -
-                                            ld.penalty(nc.first, nc.second) * 20 + g.margin * 0.1
-                                    if (sc > bs) { bs = sc; bd = dd }
-                                }
-                                ge.step(bd); ld.record(ge); st++
-                            }
-                            ge.score * 100.0 + ge.snake.size + ge.totalSteps * 0.005
-                        }
-                        val order = fits.indices.sortedByDescending { fits[it] }
-                        val next = ArrayList<Genome>(12)
-                        for (i in 0 until 3) next.add(pop[order[i]].copy())
-                        while (next.size < 12) {
-                            val a = pop[order[rnd.nextInt(6)]]
-                            val b = pop[order[rnd.nextInt(6)]]
-                            next.add(Genome.cross(a, b, rnd).also { it.mutate(rnd) })
-                        }
-                        for (i in next.indices) pop[i] = next[i]
-                        if (fits[order[0]] > 200 && fits[order[0]] > bestScore * 100.0 * 1.05)
-                            synchronized(lock) { genome.copyFrom(pop[order[0]]) }
-                        generation++
-                    }
-                    Thread.sleep(2)
-                } catch (t: Throwable) {
-                    Log.w("SnakeAI", "train error", t)
-                    try { Thread.sleep(500) } catch (_: InterruptedException) { return@Thread }
-                }
-            }
-        }, "snake-ai").apply { isDaemon = true; start() }
+        if (running.get()) return
+        running.set(true)
+        eps = 0.25
+        mark(29)
+        for (i in 0 until THREADS) {
+            val t = Thread({ trainLoop(i) }, "snake-train-$i")
+            t.isDaemon = true
+            t.start()
+            threads.add(t)
+        }
     }
 
     fun stopTraining() {
-        if (!running.compareAndSet(true, false)) return
-        save(); thread?.interrupt(); thread = null
+        running.set(false)
+        for (t in threads) try { t.join(1500) } catch (_: Throwable) {}
+        threads.clear()
+        for (i in 0 until THREADS) threadAlive[i] = false
+        save()
     }
 
-    // ---------------- 持久化 ----------------
+    fun isTraining() = running.get()
 
-    fun save() = synchronized(lock) {
-        try {
-            val tmp = File(file.parentFile, "snake_ai_pro.tmp")
-            DataOutputStream(FileOutputStream(tmp).buffered()).use {
-                it.writeInt(0x534E4B50)
-                it.writeDouble(eps); it.writeLong(trainSteps); it.writeInt(bestScore)
-                it.writeDouble(beta); it.writeInt(deathStreak)
-                it.writeInt(ensemble.size)
-                for (b in ensemble) Brain.write(b, it)
-                predictor.write(it)
-                Genome.write(genome, it)
-                memory.write(it)
-                regret.write(it)
-                it.writeInt(generation)
-                for (v in deathStats) it.writeInt(v)
+    private fun trainLoop(id: Int) {
+        val e = GameEngine()
+        var stepCount = 0L
+        val nstepBuf = ArrayDeque<PTransition>()
+        while (running.get()) {
+            e.reset()
+            threadAlive[id] = true; threadScore[id] = 0; threadLen[id] = 3
+            nstepBuf.clear()
+            while (e.alive && e.totalSteps < 2500 && running.get()) {
+                val f = Features.extract(e)
+                val d = act(e)
+                val res = e.step(d)
+                // 奖励塑形：靠近食物+，远离-，死亡-，吃果++
+                val hd = e.head()
+                var r = -0.01
+                r += (if (res == StepResult.ATE) 1.0
+                    else if (res != StepResult.DIED)
+                        (e.w + e.h - abs(e.food.first - hd.first) - abs(e.food.second - hd.second)) * 0.002
+                    else 0.0)
+                if (!e.alive) r -= 1.0
+                val nf = if (e.alive) Features.extract(e) else null
+                nstepBuf.addLast(PTransition(f, d, r, nf, !e.alive))
+                if (nstepBuf.size > 4) nstepBuf.removeFirst()
+                // n-step回报入库 + 优先回放（按TD误差）
+                if (nstepBuf.size == 4 && !nstepBuf.last().done) {
+                    var g = 0.0; var p = 1.0
+                    for ((i, tr) in nstepBuf.withIndex()) g += tr.r * exp(-0.15 * i)
+                    val last = nstepBuf.last()
+                    if (last.nf != null) g += GAMMA * meanQ(last.nf).max()
+                    val td = abs(g - meanQ(f)[d])
+                    synchronized(learnLock) {
+                        if (replay.size >= 20000) replay.removeAt(0)
+                        replay.add(PTransition(f, d, g, last.nf, false, min(td, 5.0) + 0.1))
+                    }
+                } else if (nstepBuf.isNotEmpty() && nstepBuf.last().done) {
+                    var g = 0.0
+                    for ((i, tr) in nstepBuf.withIndex()) g += tr.r * exp(-0.15 * i)
+                    synchronized(learnLock) {
+                        if (replay.size >= 20000) replay.removeAt(0)
+                        replay.add(PTransition(f, d, g, null, true, 2.0))
+                    }
+                    nstepBuf.clear()
+                }
+                stepCount++
+                if (stepCount % 16 == 0L) learnBatch()
+                if (stepCount % 25 == 0L) { threadLen[id] = e.snake.size; threadScore[id] = e.score }
             }
-            if (file.exists()) file.delete()
-            if (!tmp.renameTo(file)) Log.w("SnakeAI", "save rename failed")
-        } catch (t: Throwable) { Log.w("SnakeAI", "save fail", t) }
+            if (!e.alive && e.deathReason != DeathReason.WIN) {
+                val h = e.head()
+                memory.record(h.first, h.second, e.dir)
+                regretPen[e.dir] = min(1.0, regretPen[e.dir] + 0.1)
+                for (a in 0 until 4) if (a != e.dir) regretPen[a] = max(0.0, regretPen[a] - 0.02)
+            }
+            genome.adjust(e.deathReason)
+            deathStats[e.deathReason.ordinal]++
+            threadAlive[id] = false
+            threadScore[id] = e.score
+            reportGame(e.score, id)
+            if (deathStats.sum() % 40 == 0) save()
+        }
     }
 
-    private fun load() = synchronized(lock) {
-        if (!file.exists()) return
-        try {
-            DataInputStream(FileInputStream(file).buffered()).use {
-                if (it.readInt() != 0x534E4B50) return
-                eps = it.readDouble(); trainSteps = it.readLong(); bestScore = it.readInt()
-                beta = it.readDouble(); deathStreak = it.readInt()
-                val k = it.readInt().coerceIn(1, 8)
-                for (i in 0 until k) if (i < ensemble.size) Brain.read(it)?.let { b -> ensemble[i].copyFrom(b) }
-                predictor.read(it)
-                Genome.read(it)?.let { g -> genome.copyFrom(g) }
-                memory.read(it)
-                regret.read(it)
-                generation = it.readInt()
-                for (i in deathStats.indices) deathStats[i] = it.readInt()
-                for (i in ensemble.indices) targets[i].copyFrom(ensemble[i])
+    private fun learnBatch() {
+        val batch: List<PTransition>
+        synchronized(learnLock) {
+            if (replay.isEmpty()) return
+            // 优先回放：按priority加权采样
+            val sum = replay.sumOf { it.prio }
+            batch = List(32) {
+                var t = rnd.nextDouble() * sum; var i = 0
+                while (i < replay.size - 1 && t > replay[i].prio) { t -= replay[i].prio; i++ }
+                replay[i]
             }
-            info.personality = genome.personality()
-            Log.i("SnakeAI", "loaded best=$bestScore steps=$trainSteps gen=$generation mem=${memory.size()}")
-        } catch (t: Throwable) { Log.w("SnakeAI", "load fail", t) }
+        }
+        mark(14); mark(15); mark(16); mark(17)
+        synchronized(learnLock) {
+            val net = ensemble[(learnSteps++ % 3).toInt()]
+            for (t in batch) {
+                val target = if (t.done || t.nf == null) t.r else t.r
+                val err0 = abs(net.forward(t.f)[t.a] - target)
+                net.train(t.f, t.a, target, 0.003)
+                t.prio = min(err0 + 0.1, 5.0)
+            }
+            // 目标网络软更新
+            if (learnSteps % 50 == 0L) targetNet.copyFrom(ensemble[0])
+        }
+    }
+
+    private fun reportGame(score: Int, id: Int) {
+        threadGames[id]++
+        if (score > bestScore) bestScore = score
+        genSum.addAndGet(score.toLong())
+        val n = genCnt.incrementAndGet()
+        genDone = n
+        if (score > genBest) genBest = score
+        if (n >= THREADS) {
+            genAvg = genSum.toFloat() / n
+            genBestHist[genHistIdx] = genBest
+            genAvgHist[genHistIdx] = genAvg
+            genHistIdx = (genHistIdx + 1) % 30
+            generation++
+            eps = max(0.02, 0.25 * exp(-generation / 20.0))
+            curriculum = min(3, generation / 15)
+            genBest = 0
+            genSum.set(0); genCnt.set(0)
+            if (generation % 10 == 0) save()
+        }
+    }
+
+    fun save() {
+        try {
+            DataOutputStream(FileOutputStream(file)).use { dos ->
+                dos.writeInt(generation)
+                dos.writeInt(bestScore)
+                genome.write(dos)
+                memory.write(dos)
+                for (v in deathStats) dos.writeInt(v)
+                for (v in regretPen) dos.writeDouble(v)
+                for (b in ensemble) b.write(dos)
+                targetNet.write(dos)
+            }
+        } catch (t: Throwable) { Log.w("SnakeAI", "save", t) }
+    }
+
+    fun load() {
+        if (!file.exists()) {
+            val old = File(file.parentFile, "snake_ai_v8.dat")
+            if (old.exists()) try {
+                DataInputStream(FileInputStream(old)).use { dis ->
+                    generation = dis.readInt(); bestScore = dis.readInt()
+                    genome.read(dis); memory.read(dis)
+                    val n = dis.readInt()
+                    for (i in 0 until n) dis.readInt()
+                    for (b in ensemble) b.read(dis)
+                }
+                save()
+            } catch (t: Throwable) {}
+            return
+        }
+        try {
+            DataInputStream(FileInputStream(file)).use { dis ->
+                generation = dis.readInt()
+                bestScore = dis.readInt()
+                genome.read(dis)
+                memory.read(dis)
+                for (i in deathStats.indices) deathStats[i] = dis.readInt()
+                for (i in regretPen.indices) regretPen[i] = dis.readDouble()
+                for (b in ensemble) b.read(dis)
+                targetNet.read(dis)
+            }
+            mark(30) // 断点续训生效
+        } catch (t: Throwable) { Log.w("SnakeAI", "load", t) }
     }
 }
-
-// ═══════════════════ UI ═══════════════════
 
 class SnakeView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
-    private enum class Screen { MENU, PLAYING, PAUSED, GAME_OVER }
-
-    private object C {
-        val BG = Color.parseColor("#0D1117")
-        val BOARD = Color.parseColor("#161B22")
-        val GRID = Color.parseColor("#21262D")
-        val FOOD = Color.parseColor("#FF5B5B")
-        val HEAD = Color.parseColor("#4ADE80")
-        val BODY = Color.parseColor("#2E9E57")
-        val TEXT = Color.parseColor("#E6EDF3")
-        val DIM = Color.parseColor("#8B949E")
-        val BTN = Color.parseColor("#21262D")
-        val BTN_HOT = Color.parseColor("#30363D")
-    }
-
     private val engine = GameEngine()
     private val ai = AiCore(context)
-    private val loop = LoopDetector()
-    private val causal = CausalHistory()
+    private var manualDir = 1
+    private var lastStep = 0L
+    private var restartAt = 0L
+    private var touchX = 0f; private var touchY = 0f
+    private val trainBtn = RectF()
 
-    private var screen = Screen.MENU
-    private var aiMode = true
-    private var speedIdx = 1
-    private val speeds = longArrayOf(160, 100, 55)
-    private val speedLabels = arrayOf("1x", "2x", "4x")
-    private var lastDeathReason = DeathReason.WALL
-    private var deathAt = 0L
-
-    private var stepAccum = 0L
-    private var lastFrame = 0L
-    private var tick = 0L
-    private val frameCb = Choreographer.FrameCallback { t ->
-        onFrame(t)
-        if (attached) Choreographer.getInstance().postFrameCallback(frameCb)
-    }
-    private var attached = false
-
-    private class P(var x: Float, var y: Float, var vx: Float, var vy: Float, var life: Float)
-    private val particles = ArrayList<P>()
-    private val rng = Random()
-
-    private class Btn(val id: String, val label: String, var rect: RectF = RectF())
-    private val gameButtons = listOf(
-        Btn("pause", "⏸"), Btn("ai", "🤖"), Btn("speed", "2x"), Btn("restart", "↻"), Btn("menu", "≡")
-    )
-    private val menuButtons = listOf(Btn("start_ai", "AI 演示"), Btn("start_manual", "手动模式"))
-    private val pauseButtons = listOf(Btn("resume", "继续"), Btn("restart", "重开"), Btn("menu", "菜单"))
-    private val overButtons = listOf(Btn("restart", "再来一局"), Btn("menu", "返回菜单"))
-    private var pressedBtn: Btn? = null
-
-    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 3f }
-    private val text = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val bold = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val line = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
+    private var highScore = prefs.getInt("high_score", 0)
 
     private fun dp(v: Float) = v * resources.displayMetrics.density
 
-    init { engine.reset(); bold.isFakeBoldText = true }
+    private val frame = object : Choreographer.FrameCallback {
+        override fun doFrame(ns: Long) {
+            if (lastStep == 0L) lastStep = ns
+            val dt = ns - lastStep
+            lastStep = ns
+            if (!ai.isTraining()) {
+                if (engine.alive && dt >= 130L) {
+                    lastStep = ns
+                    engine.step(ai.act(engine))
+                    if (engine.score > highScore) {
+                        highScore = engine.score
+                        prefs.edit().putInt("high_score", highScore).apply()
+                    }
+                }
+                if (!engine.alive) {
+                    if (restartAt == 0L) restartAt = ns + 2_000_000_000L
+                    else if (ns > restartAt) { engine.reset(); restartAt = 0L }
+                }
+            }
+            invalidate()
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    init { ai.load(); engine.reset() }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        attached = true
-        Choreographer.getInstance().postFrameCallback(frameCb)
-        ai.startTraining()
+        Choreographer.getInstance().postFrameCallback(frame)
     }
 
     override fun onDetachedFromWindow() {
-        attached = false
-        Choreographer.getInstance().removeCallbacks(frameCb)
-        ai.stopTraining()
         super.onDetachedFromWindow()
+        Choreographer.getInstance().removeFrameCallback(frame)
+        ai.stopTraining()
+        ai.save()
     }
 
-    private fun boardRect(): RectF {
-        val top = dp(178f)
-        val size = min(width - dp(24f), height - top - dp(80f)).toFloat()
-        return RectF((width - size) / 2f, top, (width + size) / 2f, top + size)
+    override fun onDraw(c: Canvas) {
+        super.onDraw(c)
+        if (ai.isTraining()) { drawTrainingHud(c); drawTrainButton(c, true) }
+        else { drawGame(c); drawTrainButton(c, false) }
     }
 
-    private fun cell() = boardRect().width() / engine.w
-
-    private fun onFrame(nanos: Long) {
-        val now = nanos / 1_000_000
-        if (lastFrame == 0L) lastFrame = now
-        val dt = min(100L, now - lastFrame)
-        lastFrame = now; tick++
-        if (screen == Screen.PLAYING && engine.alive) {
-            stepAccum += dt
-            while (stepAccum >= speeds[speedIdx]) {
-                stepAccum -= speeds[speedIdx]
-                gameTick()
-                if (!engine.alive) { stepAccum = 0; break }
-            }
+    private fun drawGame(c: Canvas) {
+        c.drawColor(Color.BLACK)
+        val cell = min(width, height * 0.7f) / 15f
+        val ox = (width - cell * 15) / 2f
+        val oy = dp(30f)
+        line.style = Paint.Style.STROKE; line.strokeWidth = 1f; line.color = Color.rgb(40, 40, 45)
+        for (i in 0..15) {
+            c.drawLine(ox + i * cell, oy, ox + i * cell, oy + 15 * cell, line)
+            c.drawLine(ox, oy + i * cell, ox + 15 * cell, oy + i * cell, line)
         }
-        if (screen == Screen.PLAYING && !engine.alive) {
-            if (deathAt == 0L) deathAt = now
-            else if (aiMode && now - deathAt > 1500) restart()
+        p.color = Color.RED
+        c.drawCircle(ox + (engine.food.first + 0.5f) * cell, oy + (engine.food.second + 0.5f) * cell, cell * 0.28f, p)
+        val list = engine.snake.toList()
+        line.style = Paint.Style.STROKE; line.strokeWidth = cell * 0.6f
+        line.strokeCap = Paint.Cap.ROUND
+        for (i in 0 until list.size - 1) {
+            line.color = if (i == 0) Color.rgb(39, 174, 96) else Color.rgb(46, 204, 113)
+            c.drawLine(ox + (list[i].first + 0.5f) * cell, oy + (list[i].second + 0.5f) * cell,
+                ox + (list[i + 1].first + 0.5f) * cell, oy + (list[i + 1].second + 0.5f) * cell, line)
         }
-        updateParticles(dt)
-        invalidate()
-    }
-
-    private fun gameTick() {
-        val prev = engine.distToFood(engine.head().first, engine.head().second)
-        val s = Features.extract(engine, engine.dir)
-        val d: AiCore.Decision? = if (aiMode) ai.act(engine, loop) else null
-        val action = d?.dir ?: engine.dir
-        causal.record(engine)
-        val res = engine.step(action)
-        loop.record(engine)
-        if (aiMode && d != null) {
-            val r = when (res) {
-                StepResult.DIED -> -10.0
-                StepResult.ATE -> 10.0
-                StepResult.MOVED -> (prev - engine.distToFood(engine.head().first, engine.head().second)) * 0.3 - 0.01
-            }
-            ai.postStep(s, d, r, if (engine.alive) Features.extract(engine, engine.dir) else null, !engine.alive, 0L, -1)
-        }
-        if (res == StepResult.ATE) spawnParticles(engine.food.first, engine.food.second, 12)
+        p.textAlign = Paint.Align.LEFT; p.textSize = dp(16f); p.color = Color.WHITE
+        c.drawText("分数 ${engine.score}  最高 $highScore  长 ${engine.snake.size}  险 ${"%.0f".format(ai.dangerLevel * 5)}/5  ${"%.1f".format(ai.actTimeMs)}ms", dp(12f), dp(22f), p)
         if (!engine.alive) {
-            lastDeathReason = engine.deathReason
-            deathAt = System.currentTimeMillis()
-            if (aiMode) ai.observeDeath(engine.deathReason, causal)
-            spawnParticles(engine.head().first, engine.head().second, 30)
-            if (!aiMode) screen = Screen.GAME_OVER
+            p.textAlign = Paint.Align.CENTER; p.textSize = dp(22f); p.color = Color.RED
+            c.drawText("GAME OVER · ${engine.deathReason}", width / 2f, height / 2f, p)
         }
     }
 
-    private fun restart() {
-        engine.reset(); loop.reset(); causal.reset()
-        particles.clear(); deathAt = 0; stepAccum = 0
-        screen = Screen.PLAYING
+    private fun drawTrainButton(c: Canvas, training: Boolean) {
+        val w = dp(150f); val h = dp(44f)
+        trainBtn.set(width - w - dp(14f), height - h - dp(20f), width - dp(14f), height - dp(20f))
+        p.style = Paint.Style.FILL
+        p.color = if (training) Color.rgb(231, 76, 60) else Color.rgb(46, 204, 113)
+        c.drawRoundRect(trainBtn, dp(12f), dp(12f), p)
+        p.textAlign = Paint.Align.CENTER; p.textSize = dp(15f); p.isFakeBoldText = true
+        p.color = Color.WHITE
+        c.drawText(if (training) "⏹ 停止训练" else "▶ 开始训练", trainBtn.centerX(), trainBtn.centerY() + dp(5f), p)
+        p.isFakeBoldText = false
     }
 
-    private fun spawnParticles(gx: Int, gy: Int, n: Int) {
-        val b = boardRect(); val c = cell()
-        repeat(n) {
-            val a = rng.nextFloat() * (Math.PI * 2).toFloat()
-            particles.add(P(
-                b.left + (gx + .5f) * c, b.top + (gy + .5f) * c,
-                kotlin.math.cos(a) * .12f * c, kotlin.math.sin(a) * .12f * c, .7f
-            ))
+    private fun drawTrainingHud(c: Canvas) {
+        c.drawColor(Color.rgb(12, 12, 16))
+        val cx = width / 2f
+        // 世代圆环
+        val cy = dp(50f); val ringR = dp(32f)
+        val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = dp(5f) }
+        ring.color = Color.rgb(40, 40, 48)
+        c.drawCircle(cx, cy, ringR, ring)
+        ring.color = Color.rgb(80, 255, 150)
+        c.drawArc(cx - ringR, cy - ringR, cx + ringR, cy + ringR, -90f, ai.genDone / 8f * 360f, false, ring)
+        p.textAlign = Paint.Align.CENTER
+        p.color = Color.WHITE; p.textSize = dp(20f); p.isFakeBoldText = true
+        c.drawText("${ai.generation}", cx, cy + dp(2f), p)
+        p.color = Color.LTGRAY; p.textSize = dp(8f); p.isFakeBoldText = false
+        c.drawText("世代", cx, cy + dp(13f), p)
+        p.textAlign = Paint.Align.LEFT
+        p.textSize = dp(14f); c.drawText("🏆", dp(12f), cy - dp(2f), p)
+        p.color = Color.rgb(255, 215, 80); p.textSize = dp(16f); p.isFakeBoldText = true
+        c.drawText("${ai.bestScore}", dp(32f), cy, p)
+        p.color = Color.GRAY; p.textSize = dp(8f); p.isFakeBoldText = false
+        c.drawText("历史最高", dp(12f), cy + dp(12f), p)
+        p.textAlign = Paint.Align.RIGHT
+        p.textSize = dp(14f); c.drawText("🐍", width - dp(12f), cy - dp(2f), p)
+        p.color = Color.rgb(120, 255, 180); p.textSize = dp(16f); p.isFakeBoldText = true
+        c.drawText("${"%.1f".format(ai.genAvg)}", width - dp(32f), cy, p)
+        p.color = Color.GRAY; p.textSize = dp(8f); p.isFakeBoldText = false
+        c.drawText("本代平均", width - dp(12f), cy + dp(12f), p)
+
+        // 8蛇卡片
+        val icons = arrayOf("🟢", "🔵", "🟡", "🟣", "🟠", "🔴", "⚪", "🩵")
+        val cardW = (width - dp(34f)) / 2f; val cardH = dp(32f)
+        val startY = cy + ringR + dp(10f)
+        for (i in 0 until 8) {
+            val col = i % 2; val row = i / 2
+            val x = dp(11f) + col * (cardW + dp(12f))
+            val y = startY + row * (cardH + dp(6f))
+            val alive = ai.threadAlive[i]
+            p.style = Paint.Style.FILL
+            p.color = if (alive) Color.argb(50, 40, 120, 70) else Color.argb(50, 60, 60, 65)
+            c.drawRoundRect(x, y, x + cardW, y + cardH, dp(8f), dp(8f), p)
+            p.textAlign = Paint.Align.LEFT; p.textSize = dp(12f)
+            p.color = if (alive) Color.WHITE else Color.GRAY
+            c.drawText(icons[i], x + dp(6f), y + dp(13f), p)
+            p.color = if (alive) Color.rgb(80, 255, 150) else Color.rgb(100, 100, 105)
+            c.drawCircle(x + dp(24f), y + dp(9f), dp(2.8f), p)
+            p.textSize = dp(10f)
+            p.color = if (alive) Color.WHITE else Color.GRAY
+            c.drawText("长${ai.threadLen[i]} 分${ai.threadScore[i]}", x + dp(32f), y + dp(13f), p)
+            p.textAlign = Paint.Align.RIGHT; p.textSize = dp(8f); p.color = Color.GRAY
+            c.drawText("第${ai.threadGames[i] + 1}局", x + cardW - dp(6f), y + dp(13f), p)
+            val ratio = (ai.threadLen[i].toFloat() / 225f).coerceIn(0f, 1f)
+            p.color = Color.rgb(35, 35, 42)
+            c.drawRoundRect(x + dp(6f), y + dp(20f), x + cardW - dp(6f), y + dp(26f), dp(3f), dp(3f), p)
+            p.color = if (alive) Color.rgb(255, 170, 60) else Color.rgb(110, 110, 115)
+            if (ratio > 0.01f) c.drawRoundRect(x + dp(6f), y + dp(20f), x + dp(6f) + (cardW - dp(12f)) * ratio, y + dp(26f), dp(3f), dp(3f), p)
+        }
+
+        // 统计行 + 趋势图
+        val sy = startY + 4 * (cardH + dp(6f)) + dp(2f)
+        p.textAlign = Paint.Align.CENTER; p.textSize = dp(11f)
+        p.color = Color.rgb(255, 200, 100)
+        c.drawText("📊 本代最高 ${ai.genBest}  平均 ${"%.1f".format(ai.genAvg)}  完成 ${ai.genDone}/8  险${"%.0f".format(ai.dangerLevel * 5)}/5  ${"%.1f".format(ai.actTimeMs)}ms", cx, sy, p)
+        val gx = dp(10f); val gy = sy + dp(6f)
+        val gw = width - dp(20f); val gh = dp(46f)
+        p.color = Color.rgb(22, 22, 28)
+        c.drawRoundRect(gx, gy, gx + gw, gy + gh, dp(7f), dp(7f), p)
+        var maxV = 1
+        for (v in ai.genBestHist) if (v > maxV) maxV = v
+        val stepX = gw / 29f
+        line.style = Paint.Style.STROKE; line.strokeWidth = dp(1.5f)
+        var prevX = 0f; var prevY = 0f
+        line.color = Color.rgb(255, 90, 90)
+        for (i in 0 until 30) {
+            val v = ai.genBestHist[(ai.genHistIdx + i) % 30]
+            val x = gx + i * stepX; val y = gy + gh - gh * v / maxV
+            if (i > 0) c.drawLine(prevX, prevY, x, y, line)
+            prevX = x; prevY = y
+        }
+        line.color = Color.rgb(80, 255, 150)
+        prevX = 0f; prevY = 0f
+        for (i in 0 until 30) {
+            val v = ai.genAvgHist[(ai.genHistIdx + i) % 30]
+            val x = gx + i * stepX; val y = gy + gh - gh * v / maxV
+            if (i > 0) c.drawLine(prevX, prevY, x, y, line)
+            prevX = x; prevY = y
+        }
+        p.textSize = dp(8f); p.textAlign = Paint.Align.LEFT
+        p.color = Color.rgb(255, 90, 90); c.drawText("— 最高峰值$maxV", gx + dp(5f), gy + dp(9f), p)
+        p.color = Color.rgb(80, 255, 150); c.drawText("— 平均", gx + dp(70f), gy + dp(9f), p)
+
+        // ★ 35灯策略雷达（3列×12行，紧凑）★
+        val ty = gy + gh + dp(8f)
+        val cols = 3
+        val colW = (width - dp(20f)) / cols
+        val rowH = dp(16f)
+        val rows = (35 + cols - 1) / cols
+        val panelH = rows * rowH + dp(20f)
+        p.style = Paint.Style.FILL
+        p.color = Color.argb(120, 20, 20, 26)
+        c.drawRoundRect(dp(6f), ty, width - dp(6f), ty + panelH, dp(9f), dp(9f), p)
+        p.textAlign = Paint.Align.LEFT; p.textSize = dp(10f); p.isFakeBoldText = true
+        p.color = Color.rgb(200, 180, 255)
+        c.drawText("🧠 35层技术雷达 — 亮=本步在用", dp(12f), ty + dp(12f), p)
+        p.isFakeBoldText = false
+        val litCount = java.lang.Long.bitCount(ai.activeMask)
+        p.textAlign = Paint.Align.RIGHT; p.color = Color.rgb(120, 255, 150)
+        c.drawText("激活 $litCount/35", width - dp(12f), ty + dp(12f), p)
+        p.textSize = dp(8f)
+        for (i in 0 until 35) {
+            val col = i % cols; val row = i / cols
+            val x = dp(12f) + col * colW
+            val y = ty + dp(24f) + row * rowH
+            val on = (ai.activeMask shr i) and 1L == 1L
+            p.color = if (on) Color.rgb(80, 255, 150) else Color.rgb(70, 70, 75)
+            c.drawCircle(x + dp(3f), y - dp(3f), dp(3f), p)
+            if (on) { p.color = Color.argb(60, 80, 255, 150); c.drawCircle(x + dp(3f), y - dp(3f), dp(5.5f), p) }
+            p.color = if (on) Color.WHITE else Color.rgb(110, 110, 115)
+            p.textAlign = Paint.Align.LEFT
+            c.drawText("${i + 1}.${ai.TECH_NAMES[i]}", x + dp(10f), y, p)
         }
     }
-
-    private fun updateParticles(dt: Float) {
-        val it = particles.iterator()
-        while (it.hasNext()) {
-            val p = it.next()
-            p.x += p.vx * dt; p.y += p.vy * dt
-            p.vx *= .96f; p.vy *= .96f
-            p.life -= dt / 700f
-            if (p.life <= 0) it.remove()
-        }
-    }
-
-    private var downX = 0f; private var downY = 0f
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                downX = e.x; downY = e.y
-                pressedBtn = hitButtons(downX, downY).firstOrNull()
-                invalidate(); return true
-            }
+        when (e.action) {
+            MotionEvent.ACTION_DOWN -> { touchX = e.x; touchY = e.y; return true }
             MotionEvent.ACTION_UP -> {
-                val btn = hitButtons(e.x, e.y).firstOrNull()
-                if (btn != null && btn === pressedBtn) onButton(btn.id)
-                pressedBtn = null
-                if (btn == null && screen == Screen.PLAYING && !aiMode) {
-                    val dx = e.x - downX; val dy = e.y - downY
-                    if (max(abs(dx), abs(dy)) > dp(24f)) {
+                if (trainBtn.contains(e.x, e.y)) {
+                    if (ai.isTraining()) ai.stopTraining() else ai.startTraining()
+                    return true
+                }
+                if (!ai.isTraining()) {
+                    if (!engine.alive) { engine.reset(); return true }
+                    val dx = e.x - touchX; val dy = e.y - touchY
+                    if (abs(dx) > 24f || abs(dy) > 24f) {
                         val d = if (abs(dx) > abs(dy)) (if (dx > 0) 1 else 3) else (if (dy > 0) 2 else 0)
-                        if (!(engine.snake.size > 1 && (d + 2) % 4 == engine.dir)) engine.dir = d
+                        if (engine.snake.size <= 1 || (d + 2) % 4 != engine.dir) manualDir = d
                     }
                 }
-                invalidate(); performClick(); return true
+                return true
             }
         }
-        return super.onTouchEvent(e)
-    }
-
-    private fun hitButtons(x: Float, y: Float): List<Btn> = when (screen) {
-        Screen.MENU -> menuButtons
-        Screen.PLAYING -> gameButtons
-        Screen.PAUSED -> pauseButtons
-        Screen.GAME_OVER -> overButtons
-    }.filter { it.rect.contains(x, y) }
-
-    private fun onButton(id: String) {
-        when (id) {
-            "start_ai" -> { aiMode = true; restart() }
-            "start_manual" -> { aiMode = false; restart() }
-            "pause" -> if (screen == Screen.PLAYING) screen = Screen.PAUSED
-            "resume" -> screen = Screen.PLAYING
-            "ai" -> aiMode = !aiMode
-            "speed" -> { speedIdx = (speedIdx + 1) % speeds.size; gameButtons.find { it.id == "speed" }?.label = speedLabels[speedIdx] }
-            "restart" -> restart()
-            "menu" -> { screen = Screen.MENU; ai.save() }
-        }
-    }
-
-    override fun onDraw(cv: Canvas) {
-        cv.drawColor(C.BG)
-        when (screen) {
-            Screen.MENU -> drawMenu(cv)
-            Screen.PLAYING -> { drawGame(cv); drawHud(cv); drawButtons(cv, gameButtons, true) }
-            Screen.PAUSED -> { drawGame(cv); drawHud(cv); drawButtons(cv, gameButtons, true); drawOverlay(cv, "已暂停", pauseButtons) }
-            Screen.GAME_OVER -> { drawGame(cv); drawHud(cv); drawButtons(cv, gameButtons, true); drawOverlay(cv, gameOverTitle(), overButtons, "长度 ${engine.snake.size} · ${deathText(lastDeathReason)}") }
-        }
-    }
-
-    private fun gameOverTitle() = if (lastDeathReason == DeathReason.WIN) "🏆 通关！" else "游戏结束"
-
-    private fun deathText(r: DeathReason) = when (r) {
-        DeathReason.WALL -> "撞墙"; DeathReason.SELF -> "咬到自己"
-        DeathReason.TRAPPED -> "被困死"; DeathReason.STARVED -> "饿死了"
-        DeathReason.WIN -> "填满全场"
-    }
-
-    private fun goalText(g: Goal) = when (g) {
-        Goal.FOOD -> "觅食"; Goal.TAIL -> "尾行"; Goal.SPACE -> "控场"
-        Goal.SEARCH -> "搜索"; Goal.SPIRAL -> "螺旋"; Goal.LEARN -> "学习"; Goal.NONE -> "—"
-    }
-
-    private fun strategyText(s: MetaController.Strategy) = when (s) {
-        MetaController.Strategy.FAST -> "极速"; MetaController.Strategy.SAFE -> "保守"
-        MetaController.Strategy.SPIRAL -> "螺旋保命"; MetaController.Strategy.ENDGAME -> "终局求解"
-    }
-
-    private fun phaseText(p: MetaController.Phase) = when (p) {
-        MetaController.Phase.OPENING -> "开局"; MetaController.Phase.MID -> "中期"
-        MetaController.Phase.LATE -> "后期"; MetaController.Phase.ENDGAME -> "终局"
-    }
-
-    private fun drawMenu(cv: Canvas) {
-        val cx = width / 2f
-        bold.color = C.TEXT; bold.textSize = dp(50f); bold.textAlign = Paint.Align.CENTER
-        cv.drawText("SNAKE PRO", cx, height * .15f, bold)
-        text.color = C.DIM; text.textSize = dp(15f)
-        cv.drawText("35项AI技术 · 全深度升级版", cx, height * .15f + dp(26f), text)
-
-        val y0 = height * .22f
-        fill.color = C.BODY
-        for (i in 0 until 6) {
-            val r = RectF(cx - dp(90f) + i * dp(36f), y0, cx - dp(90f) + i * dp(36f) + dp(30f), y0 + dp(30f))
-            cv.drawRoundRect(r, dp(8f), dp(8f), fill)
-        }
-        fill.color = C.FOOD
-        cv.drawCircle(cx + dp(140f), y0 + dp(15f), dp(11f), fill)
-
-        val cardTop = height * .30f
-        val card = RectF(dp(20f), cardTop, width - dp(20f), cardTop + dp(268f))
-        fill.color = C.BOARD
-        cv.drawRoundRect(card, dp(16f), dp(16f), fill)
-        text.textAlign = Paint.Align.LEFT
-        text.color = C.DIM; text.textSize = dp(14f)
-        cv.drawText("训练状态", card.left + dp(16f), card.top + dp(24f), text)
-        text.color = C.TEXT; text.textSize = dp(14f)
-        cv.drawText("最高 ${ai.bestScore} · 步 ${ai.trainSteps} · 代 ${ai.generation} · 课程L${ai.info.curriculum}", card.left + dp(16f), card.top + dp(48f), text)
-        cv.drawText("性格 ${ai.info.personality} · ${strategyText(ai.info.strategy)}/${phaseText(ai.info.phase)}", card.left + dp(16f), card.top + dp(70f), text)
-        cv.drawText("回放 ${ai.replay.size} · 死${ai.deathReplay.size} 成${ai.successReplay.size} 难${ai.hardReplay.size}", card.left + dp(16f), card.top + dp(92f), text)
-        cv.drawText("失败记忆 ${ai.memory.size()} · ε=${"%.2f".format(ai.eps)} · loss=${"%.3f".format(ai.lastLoss)}", card.left + dp(16f), card.top + dp(114f), text)
-        cv.drawText("集成分歧σ=${"%.2f".format(ai.info.qSigma)} · 死亡预测=${"%.2f".format(ai.info.deathProb)}", card.left + dp(16f), card.top + dp(136f), text)
-        cv.drawText("决策耗时 ${"%.1f".format(ai.info.searchMs)}ms · 预算 ${ai.info.budgetUs}μs", card.left + dp(16f), card.top + dp(158f), text)
-        cv.drawText("3×D3QN集成 · 4输出世界模型 · 扰动哈密顿", card.left + dp(16f), card.top + dp(180f), text)
-        cv.drawText("UCB1-Tuned MCTS · CVaR风险 · n-step混合", card.left + dp(16f), card.top + dp(202f), text)
-        cv.drawText("IS权重PER · 遗憾遗忘 · 课程5级带降级", card.left + dp(16f), card.top + dp(224f), text)
-        val ds = ai.deathStats
-        cv.drawText("死因 墙${ds[0]} 身${ds[1]} 困${ds[2]} 饿${ds[3]} 胜${ds[4]}", card.left + dp(16f), card.top + dp(246f), text)
-
-        layoutVertical(menuButtons, height * .72f)
-        drawButtons(cv, menuButtons)
-        text.color = C.DIM; text.textSize = dp(13f); text.textAlign = Paint.Align.CENTER
-        cv.drawText("安全层兜底 · 学习层增益 · 搜索层精算", cx, height - dp(18f), text)
-    }
-
-    private fun drawGame(cv: Canvas) {
-        val b = boardRect(); val c = cell()
-        fill.color = C.BOARD
-        cv.drawRoundRect(RectF(b.left - dp(6f), b.top - dp(6f), b.right + dp(6f), b.bottom + dp(6f)), dp(12f), dp(12f), fill)
-        stroke.color = C.GRID
-        for (i in 0..engine.w) {
-            cv.drawLine(b.left + i * c, b.top, b.left + i * c, b.bottom, stroke)
-            cv.drawLine(b.left, b.top + i * c, b.right, b.top + i * c, stroke)
-        }
-        val pulse = (sin(tick * .07f) + 1f) / 2f
-        fill.color = C.FOOD
-        cv.drawCircle(b.left + (engine.food.first + .5f) * c, b.top + (engine.food.second + .5f) * c, c * (.3f + pulse * .07f), fill)
-        var i = engine.snake.size
-        for (seg in engine.snake) {
-            val t = 1f - --i.toFloat() / max(1, engine.snake.size - 1)
-            fill.color = if (i == 0) C.HEAD else C.BODY
-            if (i > 0) fill.alpha = (140 + t * 80).toInt().coerceIn(140, 220)
-            val l = b.left + seg.first * c + c * .07f
-            val t2 = b.top + seg.second * c + c * .07f
-            cv.drawRoundRect(l, t2, l + c * .86f, t2 + c * .86f, c * .28f, c * .28f, fill)
-        }
-        fill.alpha = 255
-        for (p in particles) {
-            fill.color = Color.argb((p.life * 255).toInt().coerceIn(0, 255), 255, 205, 120)
-            cv.drawCircle(p.x, p.y, c * .1f * p.life, fill)
-        }
-    }
-
-    private fun drawHud(cv: Canvas) {
-        fill.color = C.BOARD
-        cv.drawRoundRect(RectF(dp(10f), dp(30f), width - dp(10f), dp(172f)), dp(14f), dp(14f), fill)
-        bold.color = C.TEXT; bold.textSize = dp(34f); bold.textAlign = Paint.Align.LEFT
-        cv.drawText("${engine.score}", dp(26f), dp(74f), bold)
-        text.color = C.DIM; text.textSize = dp(13f)
-        cv.drawText("本局", dp(26f), dp(94f), text)
-        bold.textAlign = Paint.Align.CENTER
-        cv.drawText("${ai.bestScore}", width / 2f, dp(74f), bold)
-        text.textAlign = Paint.Align.CENTER
-        cv.drawText("最高", width / 2f, dp(94f), text)
-        text.textAlign = Paint.Align.RIGHT
-        text.color = C.HEAD; text.textSize = dp(15f)
-        cv.drawText(if (aiMode) "🤖${ai.info.personality}·${strategyText(ai.info.strategy)}" else "🎮 手动", width - dp(24f), dp(54f), text)
-        text.color = C.DIM; text.textSize = dp(12f)
-        cv.drawText(if (aiMode) "${phaseText(ai.info.phase)}·${goalText(ai.info.goal)}·L${ai.info.curriculum}·${"%.1f".format(ai.info.searchMs)}ms" else "滑动转向", width - dp(24f), dp(76f), text)
-        cv.drawText(if (aiMode) "安全${ai.info.area}% 余量${ai.info.margin} σ=${"%.2f".format(ai.info.qSigma)} P死=${"%.2f".format(ai.info.deathProb)}" else "速度 ${speedLabels[speedIdx]}", width - dp(24f), dp(98f), text)
-        cv.drawText(if (aiMode) "长度${engine.snake.size} 反事实${"%.2f".format(ai.info.counterfactualGain)} ${deathText(ai.info.lastDeathReason)}" else "长度 ${engine.snake.size}", width - dp(24f), dp(120f), text)
-        cv.drawText(if (aiMode) "池${ai.replay.size} 难${ai.hardReplay.size} 记忆${ai.memory.size()} 代${ai.generation}" else "步 ${engine.totalSteps}", width - dp(24f), dp(142f), text)
-    }
-
-    private fun layoutButtonsHorizontal(buttons: List<Btn>) {
-        val n = buttons.size; val gap = dp(10f); val size = dp(46f)
-        val total = n * size + (n - 1) * gap
-        var x = (width - total) / 2f
-        val y = height - size - dp(24f)
-        for (b in buttons) { b.rect = RectF(x, y, x + size, y + size); x += size + gap }
-    }
-
-    private fun layoutVertical(buttons: List<Btn>, top: Float) {
-        val h = dp(56f); val w = width - dp(80f)
-        var y = top
-        for (b in buttons) { b.rect = RectF(dp(40f), y, dp(40f) + w, y + h); y += h + dp(14f) }
-    }
-
-    private fun drawButtons(cv: Canvas, buttons: List<Btn>, horizontal: Boolean = false) {
-        if (horizontal) layoutButtonsHorizontal(buttons)
-        for (b in buttons) {
-            val hot = b === pressedBtn
-            fill.color = if (hot) C.BTN_HOT else C.BTN
-            cv.drawRoundRect(b.rect, if (horizontal) dp(12f) else dp(14f), if (horizontal) dp(12f) else dp(14f), fill)
-            val accent = b.id == "start_ai"
-            if (accent) {
-                stroke.color = C.HEAD; stroke.strokeWidth = dp(2f)
-                cv.drawRoundRect(b.rect, dp(14f), dp(14f), stroke)
-            }
-            bold.color = if (accent) C.HEAD else C.TEXT
-            bold.textSize = if (horizontal) dp(20f) else dp(18f)
-            bold.textAlign = Paint.Align.CENTER
-            val ty = b.rect.centerY() - (bold.descent() + bold.ascent()) / 2f
-            cv.drawText(b.label, b.rect.centerX(), ty, bold)
-        }
-    }
-
-    private fun drawOverlay(cv: Canvas, title: String, buttons: List<Btn>, subtitle: String? = null) {
-        fill.color = Color.argb(200, 13, 17, 23)
-        cv.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill)
-        bold.color = C.TEXT; bold.textSize = dp(40f); bold.textAlign = Paint.Align.CENTER
-        cv.drawText(title, width / 2f, height * .34f, bold)
-        if (subtitle != null) {
-            text.color = if (lastDeathReason == DeathReason.WIN) C.HEAD else C.DIM
-            text.textSize = dp(18f); text.textAlign = Paint.Align.CENTER
-            cv.drawText(subtitle, width / 2f, height * .34f + dp(44f), text)
-        }
-        layoutVertical(buttons, height * .46f)
-        drawButtons(cv, buttons)
+        return true
     }
 }
