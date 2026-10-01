@@ -221,7 +221,7 @@ class SnakeView @JvmOverloads constructor(
     private companion object {
         const val V2_FOOD_DIR = 4
         const val V2_FOODDIST = 3
-        const val V2_DANGER = 8     // 合并：只记最危险方向
+        const val V2_DANGER = 16    // dangerMask返回0-15，不能改
         const val V2_MOBILITY = 3   // 合并：0/1/2+
         const val V2_SPACE = 4
         const val V2_HUNGER = 3     // 合并：<10 / 10~40 / >40
@@ -274,7 +274,7 @@ class SnakeView @JvmOverloads constructor(
         const val N_STEP = 3                     // N-step 回报步数
         const val POLYAK_TAU = 0.02f             // target 网络软更新系数
         const val CURIOSITY_VISIT_BONUS = 0.015f // 低访问状态额外好奇
-        const val TRAIN_SAVE_VERSION = 6         // 存档版本号（状态维度合并了）
+        const val TRAIN_SAVE_VERSION = 7         // 存档版本号（修复danger维度）
     }
 
     private val qV2 = FloatArray(V2_Q_SIZE) { 0.5f }  // 乐观初始化，鼓励探索
