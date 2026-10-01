@@ -24,7 +24,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /* ============================================================================
- * SNAKE PRO — 35项AI技术 + 商店皮肤/棋盘 + MainActivity 完整对接版（修正版）
+ * SNAKE PRO — 35项AI技术 + 商店皮肤/棋盘 + MainActivity 完整对接版（v3修正）
  * ==========================================================================*/
 
 // ═══════════════════ 引擎 ═══════════════════
@@ -261,7 +261,8 @@ class Sim(val w: Int, val h: Int) {
         val art = BooleanArray(n); val maxComp = IntArray(n)
         var timer = 0
         val buf = IntArray(4)
-        val dfs: (Int, Int) -> Unit = fun(u: Int, parent: Int) {
+        // 修复：局部递归 fun（val lambda 无法自引用）
+        fun dfs(u: Int, parent: Int): Unit {
             disc[u] = timer
             low[u] = timer
             timer++
@@ -964,7 +965,12 @@ class MetaController {
     val wSafety get() = if (strategy == Strategy.SAFE) 3.2 else 1.6
     val wFood get() = if (strategy == Strategy.SAFE) 0.55 else 1.25
     val wSpace get() = if (strategy == Strategy.SAFE) 1.5 else 0.8
-    val wLearn get() = when (curriculum) { 0 -> 0.15; 1 -> 0.35; 2 -> 0.55; else -> 0.7 }
+    val wLearn get() = when (curriculum) {
+        0 -> 0.15
+        1 -> 0.35
+        2 -> 0.55
+        else -> 0.7
+    }
     val wSearch get() = if (strategy == Strategy.SAFE) 1.25 else 0.9
     val wRegret get() = 0.5
 
@@ -1016,6 +1022,11 @@ class AiCore(ctx: Context) {
         val area: Int, val margin: Int, val budgetUs: Long, val searchMs: Double
     )
 
+    private class Cand(
+        val d: Int, val hard: Boolean, val safety: Double, val food: Double,
+        val space: Double, val danger: Double, val cfGain: Double
+    )
+
     val ensemble = Array(3) { Brain(Features.SIZE, 48, 32, 4, seed = 1000L + it * 7919) }
     val targets = ensemble.map { it.clone() }
     val predictor = WorldModel()
@@ -1042,9 +1053,12 @@ class AiCore(ctx: Context) {
         @Volatile var strategy = MetaController.Strategy.FAST
         @Volatile var phase = MetaController.Phase.OPENING
         @Volatile var personality = "均衡型"
-        @Volatile var area = 0; @Volatile var margin = 0
-        @Volatile var qSigma = 0.0; @Volatile var deathProb = 0.0
-        @Volatile var budgetUs = 0L; @Volatile var curriculum = 0
+        @Volatile var area = 0
+        @Volatile var margin = 0
+        @Volatile var qSigma = 0.0
+        @Volatile var deathProb = 0.0
+        @Volatile var budgetUs = 0L
+        @Volatile var curriculum = 0
         @Volatile var searchMs = 0.0
         @Volatile var lastDeathReason = DeathReason.WALL
         @Volatile var lastTailOk = true
@@ -1074,7 +1088,9 @@ class AiCore(ctx: Context) {
 
         val sim = Sim(e.w, e.h).load(e)
         val len = e.snake.size
-        val (art, artMax) = sim.articulation()
+        val artPair = sim.articulation()
+        val art = artPair.first
+        val artMax = artPair.second
 
         val hungerRatio = e.stepsSinceFood.toDouble() / (e.w * e.h * 2)
         var margin = genome.margin
@@ -1104,7 +1120,9 @@ class AiCore(ctx: Context) {
             if (!s2.step(d, eat)) { cands.add(Cand(d, true, 0.0, 0.0, 0.0, 1.0, 0.0)); continue }
 
             val stats = s2.regionStats(s2.head)
-            val area = stats.first; val deadEnds = stats.second; val perim = stats.third
+            val area = stats.first
+            val deadEnds = stats.second
+            val perim = stats.third
             var articRisk = 0.0
             if (art[cellIdx]) {
                 val m = artMax[cellIdx]
@@ -1198,7 +1216,8 @@ class AiCore(ctx: Context) {
         val disagreeGate = if (info.qSigma > 0.8) 0.5 else 1.0
 
         val m = meta
-        var best: Cand? = null; var bestTotal = Double.NEGATIVE_INFINITY
+        var best: Cand? = null
+        var bestTotal = Double.NEGATIVE_INFINITY
         for (c in cands) {
             if (c.hard) continue
             var total = 0.0
@@ -1226,18 +1245,14 @@ class AiCore(ctx: Context) {
             searchPrior[best.d] > 0.5 -> Goal.SEARCH
             else -> Goal.LEARN
         }
-        info.area = (best.safety * 100).toInt(); info.margin = marginI
+        info.area = (best.safety * 100).toInt()
+        info.margin = marginI
         info.budgetUs = meta.timeBudgetMicros
         info.counterfactualGain = best.cfGain
         val searchMs = (System.nanoTime() - t0) / 1e6
         info.searchMs = searchMs
         Decision(best.d, learnerDir, qMean, meta.strategy, info.goal, info.area, marginI, meta.timeBudgetMicros, searchMs)
     }
-
-    private class Cand(
-        val d: Int, val hard: Boolean, val safety: Double, val food: Double,
-        val space: Double, val danger: Double, val cfGain: Double
-    )
 
     fun postStep(s: DoubleArray, d: Decision, r: Double, ns: DoubleArray?, done: Boolean, ep: Long, prevLink: Int): Int {
         if (ns != null) {
@@ -1264,10 +1279,14 @@ class AiCore(ctx: Context) {
         var r = reason
         if (r == DeathReason.SELF && !info.lastTailOk) r = DeathReason.TRAPPED
         info.lastDeathReason = r
-        deathStats[when (r) {
-            DeathReason.WALL -> 0; DeathReason.SELF -> 1; DeathReason.TRAPPED -> 2
-            DeathReason.STARVED -> 3; DeathReason.WIN -> 4
-        }]++
+        val idx = when (r) {
+            DeathReason.WALL -> 0
+            DeathReason.SELF -> 1
+            DeathReason.TRAPPED -> 2
+            DeathReason.STARVED -> 3
+            DeathReason.WIN -> 4
+        }
+        deathStats[idx]++
         deathStreak = if (r == DeathReason.WIN) 0 else deathStreak + 1
         genome.adjust(r)
         info.personality = genome.personality()
@@ -1504,11 +1523,28 @@ class Theme(ctx: Context) {
         skinId = prefs.getString("equipped_skin", "green") ?: "green"
         boardId = prefs.getString("equipped_board", "dark") ?: "dark"
         when (boardId) {
-            "light" -> { bg = Color.parseColor("#E8EAED"); board = Color.parseColor("#FFFFFF"); grid = Color.parseColor("#DADCE0"); text = Color.parseColor("#202124"); dim = Color.parseColor("#5F6368") }
-            "neon" -> { bg = Color.parseColor("#050510"); board = Color.parseColor("#0A0A2A"); grid = Color.parseColor("#202060"); food = Color.parseColor("#00FFFF") }
-            "forest" -> { bg = Color.parseColor("#0F1A0F"); board = Color.parseColor("#1A2E1A"); grid = Color.parseColor("#2A4A2A"); food = Color.parseColor("#FFD700") }
-            "cyberpunk" -> { bg = Color.parseColor("#12051F"); board = Color.parseColor("#1F0A33"); grid = Color.parseColor("#3A1560"); food = Color.parseColor("#FF00A0") }
-            else -> { bg = Color.parseColor("#0D1117"); board = Color.parseColor("#161B22"); grid = Color.parseColor("#21262D"); text = Color.parseColor("#E6EDF3"); dim = Color.parseColor("#8B949E") }
+            "light" -> {
+                bg = Color.parseColor("#E8EAED"); board = Color.parseColor("#FFFFFF")
+                grid = Color.parseColor("#DADCE0"); text = Color.parseColor("#202124")
+                dim = Color.parseColor("#5F6368")
+            }
+            "neon" -> {
+                bg = Color.parseColor("#050510"); board = Color.parseColor("#0A0A2A")
+                grid = Color.parseColor("#202060"); food = Color.parseColor("#00FFFF")
+            }
+            "forest" -> {
+                bg = Color.parseColor("#0F1A0F"); board = Color.parseColor("#1A2E1A")
+                grid = Color.parseColor("#2A4A2A"); food = Color.parseColor("#FFD700")
+            }
+            "cyberpunk" -> {
+                bg = Color.parseColor("#12051F"); board = Color.parseColor("#1F0A33")
+                grid = Color.parseColor("#3A1560"); food = Color.parseColor("#FF00A0")
+            }
+            else -> {
+                bg = Color.parseColor("#0D1117"); board = Color.parseColor("#161B22")
+                grid = Color.parseColor("#21262D"); text = Color.parseColor("#E6EDF3")
+                dim = Color.parseColor("#8B949E")
+            }
         }
         when (skinId) {
             "blue" -> { head = Color.parseColor("#60A5FA"); body = Color.parseColor("#2563EB") }
@@ -1574,11 +1610,11 @@ class SnakeView @JvmOverloads constructor(
     private var tick = 0L
     private var attached = false
 
-    // 修复：显式类型标注，断开递归类型推断
+    // 修复：用 this 重新注册，不在初始化器里引用 frameCb 自身
     private val frameCb: Choreographer.FrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             onFrame(frameTimeNanos)
-            if (attached) Choreographer.getInstance().postFrameCallback(frameCb)
+            if (attached) Choreographer.getInstance().postFrameCallback(this)
         }
     }
 
@@ -1627,7 +1663,11 @@ class SnakeView @JvmOverloads constructor(
         val dt = min(100L, now - lastFrame)
         lastFrame = now; tick++
         if (!pausedByLifecycle && aiOn && engine.alive) {
-            val interval = when (ai.intensity) { 2 -> 35L; 1 -> 60L; else -> 110L }
+            val interval = when (ai.intensity) {
+                2 -> 35L
+                1 -> 60L
+                else -> 110L
+            }
             stepAccum += dt
             while (stepAccum >= interval) {
                 stepAccum -= interval
@@ -1780,16 +1820,25 @@ class SnakeView @JvmOverloads constructor(
         text.color = theme.dim; text.textSize = dp(12f); text.textAlign = Paint.Align.LEFT
         val info = ai.info
         val strategy = when (info.strategy) {
-            MetaController.Strategy.FAST -> "极速"; MetaController.Strategy.SAFE -> "保守"
-            MetaController.Strategy.SPIRAL -> "螺旋"; MetaController.Strategy.ENDGAME -> "终局"
+            MetaController.Strategy.FAST -> "极速"
+            MetaController.Strategy.SAFE -> "保守"
+            MetaController.Strategy.SPIRAL -> "螺旋"
+            MetaController.Strategy.ENDGAME -> "终局"
         }
         val goal = when (info.goal) {
-            Goal.FOOD -> "觅食"; Goal.TAIL -> "尾行"; Goal.SPACE -> "控场"
-            Goal.SEARCH -> "搜索"; Goal.SPIRAL -> "螺旋"; Goal.LEARN -> "学习"; Goal.NONE -> "—"
+            Goal.FOOD -> "觅食"
+            Goal.TAIL -> "尾行"
+            Goal.SPACE -> "控场"
+            Goal.SEARCH -> "搜索"
+            Goal.SPIRAL -> "螺旋"
+            Goal.LEARN -> "学习"
+            Goal.NONE -> "—"
         }
         val phase = when (info.phase) {
-            MetaController.Phase.OPENING -> "开局"; MetaController.Phase.MID -> "中期"
-            MetaController.Phase.LATE -> "后期"; MetaController.Phase.ENDGAME -> "终局"
+            MetaController.Phase.OPENING -> "开局"
+            MetaController.Phase.MID -> "中期"
+            MetaController.Phase.LATE -> "后期"
+            MetaController.Phase.ENDGAME -> "终局"
         }
         cv.drawText(
             "🤖${info.personality}·$strategy·$phase·$goal 余量${info.margin} σ=${"%.2f".format(info.qSigma)} " +
