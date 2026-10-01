@@ -359,6 +359,7 @@ class SnakeView @JvmOverloads constructor(
         if (state !in 0 until V2_STATE_COUNT) return
         if (action !in 0 until V2_ACTIONS) return
 
+        visitedStates.add(state)
         val effectiveReward = reward
         val idx = qIndex(state, action)
 
@@ -1182,24 +1183,26 @@ class SnakeView @JvmOverloads constructor(
                             }
 
                             if (agentId == -1) {
-                                synchronized(evolveLock) {
+                                Thread.yield()
+                                continue
+                            }
+
+                            try {
+                                game.playOneGame(agentId)
+                            } catch (e: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                break
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            } finally {
+                                synchronized(sharedLock) {
+                                    completedAgents++
                                     if (completedAgents >= POPULATION_SIZE) {
                                         evolveNextGeneration()
                                         currentAgentIndex = 0
                                         completedAgents = 0
                                     }
                                 }
-                                continue
-                            }
-
-                            try {
-                                game.playOneGame(agentId)
-                                synchronized(sharedLock) { completedAgents++ }
-                            } catch (e: InterruptedException) {
-                                Thread.currentThread().interrupt()
-                                break
-                            } catch (e: Exception) {
-                                e.printStackTrace()
                             }
                         }
                     },
@@ -5900,7 +5903,7 @@ class SnakeView @JvmOverloads constructor(
             Color.WHITE
 
         c.drawText(
-            "$deathCause -> $lastLearnAction",
+            "训练中",
             left + 118f,
             learnY,
             text
