@@ -1089,7 +1089,6 @@ class SnakeView @JvmOverloads constructor(
                         else -> {
                             val pIdx = Random.nextInt(eliteCount)
                             val childBrain = eliteBrains[pIdx].deepCopy()
-                            childBrain.mutate(if (generation < 10) 0.18f else if (generation < 30) 0.10f else 0.05f)
                             val childGenome = eliteGenomes[pIdx].deepCopy().also { it.mutate(1.4f) }
                             nextBrains.add(childBrain)
                             nextGenomes.add(childGenome)
