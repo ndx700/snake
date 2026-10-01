@@ -220,12 +220,12 @@ class SnakeView @JvmOverloads constructor(
 
     private companion object {
         const val V2_FOOD_DIR = 4
-        const val V2_FOODDIST = 3    // 新增：食物距离桶（近/中/远）
-        const val V2_DANGER = 16
-        const val V2_MOBILITY = 5
+        const val V2_FOODDIST = 3
+        const val V2_DANGER = 8     // 合并：只记最危险方向
+        const val V2_MOBILITY = 3   // 合并：0/1/2+
         const val V2_SPACE = 4
-        const val V2_HUNGER = 5
-        const val V2_LENGTH = 4
+        const val V2_HUNGER = 3     // 合并：<10 / 10~40 / >40
+        const val V2_LENGTH = 3     // 合并：<20 / 20~60 / >60
         const val V2_TAIL = 2
         const val V2_HEADING = 1
 
@@ -249,8 +249,8 @@ class SnakeView @JvmOverloads constructor(
         const val ALPHA_FAST = 0.18f
         const val ALPHA_NORMAL = 0.055f
 
-        const val EPS_START = 0.22f
-        const val EPS_MIN = 0.015f
+        const val EPS_START = 0.35f
+        const val EPS_MIN = 0.02f
 
         const val REWARD_STEP = -0.005f
         const val REWARD_FOOD = 8.0f
@@ -274,11 +274,11 @@ class SnakeView @JvmOverloads constructor(
         const val N_STEP = 3                     // N-step 回报步数
         const val POLYAK_TAU = 0.02f             // target 网络软更新系数
         const val CURIOSITY_VISIT_BONUS = 0.015f // 低访问状态额外好奇
-        const val TRAIN_SAVE_VERSION = 5         // 存档版本号（NN加宽了）
+        const val TRAIN_SAVE_VERSION = 6         // 存档版本号（状态维度合并了）
     }
 
-    private val qV2 = FloatArray(V2_Q_SIZE)
-    private val qTarget = FloatArray(V2_Q_SIZE)
+    private val qV2 = FloatArray(V2_Q_SIZE) { 0.5f }  // 乐观初始化，鼓励探索
+    private val qTarget = FloatArray(V2_Q_SIZE) { 0.5f }
     private val nV2 = IntArray(V2_Q_SIZE)
     private var targetUpdateCounter = 0
 
@@ -1856,11 +1856,11 @@ class SnakeView @JvmOverloads constructor(
             )
 
         val mobility =
-            countSafeMovesFor(
-                body,
-                heading,
-                target
-            ).coerceIn(0, 4)
+            when (countSafeMovesFor(body, heading, target)) {
+                0 -> 0
+                1 -> 1
+                else -> 2
+            }
 
         val region =
             freeRegion(body)
@@ -1883,18 +1883,15 @@ class SnakeView @JvmOverloads constructor(
         val hungerBucket =
             when {
                 hungerValue < 10 -> 0
-                hungerValue < 25 -> 1
-                hungerValue < 50 -> 2
-                hungerValue < 100 -> 3
-                else -> 4
+                hungerValue < 40 -> 1
+                else -> 2
             }
 
         val lengthBucket =
             when {
-                body.size < 12 -> 0
-                body.size < 30 -> 1
-                body.size < 60 -> 2
-                else -> 3
+                body.size < 20 -> 0
+                body.size < 60 -> 1
+                else -> 2
             }
 
         val tail =
