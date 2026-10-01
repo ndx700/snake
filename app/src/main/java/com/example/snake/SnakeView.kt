@@ -14,6 +14,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.AttributeSet
+import android.util.Log
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
@@ -31,7 +32,9 @@ import java.util.concurrent.Future
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.tanh
 import kotlin.random.Random
+import java.util.LinkedHashMap
 
 class SnakeView @JvmOverloads constructor(
     context: Context,
@@ -142,10 +145,14 @@ class SnakeView @JvmOverloads constructor(
 
     // V3 50 Agent 训练
     private val v3PopulationLock = Any()
-    private var v3Population: List<AIEngineV3> = List(POPULATION_SIZE) { AIEngineV3() }
+    private val v3TrainingShared = V3SharedLearning()
+    private var v3Population: List<AIEngineV3> = List(POPULATION_SIZE) { AIEngineV3(v3TrainingShared) }
     private val v3AgentResults = arrayOfNulls<V3AgentResult>(POPULATION_SIZE)
     private val v3EvolveLock = Any()
     @Volatile private var v3Evolving = false
+    private val completedAgentIds = HashSet<Int>()
+    @Volatile var v3FallbackCount = 0
+    @Volatile var v3ExceptionCount = 0
 
     private fun toV3State(): V3State {
         val bodyArr = IntArray(snake.size)
@@ -573,20 +580,33 @@ class SnakeView @JvmOverloads constructor(
             v3Evolving = true
             try {
                 val results = synchronized(v3PopulationLock) {
-                    v3AgentResults.filterNotNull()
+                    v3AgentResults.map { it }.filterNotNull()
                 }
-                if (results.size < POPULATION_SIZE) return
-                val next = V3EvolutionManager.evolve(results, generation, 5)
+                if (results.size != POPULATION_SIZE) return
+
+                val oldGen = generation
+                val next = V3EvolutionManager.evolve(results, oldGen, 5)
+                if (next.size != POPULATION_SIZE) return
                 if (!isTrainingRunActive(runId)) return
+
                 synchronized(v3PopulationLock) {
                     v3Population = next
+                    for (agent in next) {
+                        agent.setTraining(true)
+                        agent.setGeneration(oldGen + 1)
+                        agent.resetEpisode()
+                    }
                     java.util.Arrays.fill(v3AgentResults, null)
+                completedAgentIds.clear()
                 }
                 synchronized(sharedLock) {
-                    generation++
+                    generation = oldGen + 1
                     completedAgents = 0
+                    currentAgentIndex = 0
+                    for (i in 0 until POPULATION_SIZE) currentScores[i] = 0f
                 }
-            } catch (e: Exception) {
+                try { saveTrainingState() } catch (_: Throwable) {}
+            } catch (e: Throwable) {
                 e.printStackTrace()
             } finally {
                 v3Evolving = false
@@ -1230,6 +1250,10 @@ class SnakeView @JvmOverloads constructor(
 
             currentAgentIndex = 0
             completedAgents = 0
+            synchronized(v3PopulationLock) {
+                completedAgentIds.clear()
+                java.util.Arrays.fill(v3AgentResults, null)
+            }
             bestScoreThisGen = 0f
             for (i in 0 until POPULATION_SIZE) {
                 currentScores[i] = 0f
@@ -1267,7 +1291,7 @@ class SnakeView @JvmOverloads constructor(
 
                             var result: V3AgentResult? = null
                             try {
-                                result = game.playOneGameV3(agentId)
+                                result = game.playOneGame(agentId)
                             } catch (e: InterruptedException) {
                                 Thread.currentThread().interrupt()
                                 break
@@ -1277,13 +1301,22 @@ class SnakeView @JvmOverloads constructor(
                             }
                             if (isTrainingRunActive(myRunId)) {
                                 val finalResult = result ?: V3AgentResult(agent = agent, fitness = -1000f, score = 0, food = 0, survivalSteps = 0, deathReason = V3DeathReason.UNKNOWN)
-                                synchronized(v3PopulationLock) { v3AgentResults[agentId] = finalResult }
-                                var shouldEvolve = false
-                                synchronized(sharedLock) {
-                                    completedAgents++
-                                    if (completedAgents >= POPULATION_SIZE) shouldEvolve = true
+                                var accepted = false
+                                synchronized(v3PopulationLock) {
+                                    if (agentId !in completedAgentIds) {
+                                        completedAgentIds.add(agentId)
+                                        v3AgentResults[agentId] = finalResult
+                                        accepted = true
+                                    }
                                 }
-                                if (shouldEvolve) performV3Evolution(myRunId)
+                                if (accepted) {
+                                    var shouldEvolve = false
+                                    synchronized(sharedLock) {
+                                        completedAgents++
+                                        if (completedAgents >= POPULATION_SIZE) shouldEvolve = true
+                                    }
+                                    if (shouldEvolve) performV3Evolution(myRunId)
+                                }
                             }
                         }
                     },
@@ -6891,6 +6924,7 @@ class SnakeView @JvmOverloads constructor(
 
         var v3Active = false
         var gFoodEaten = 0
+        private var gPrevHashes = LongArray(0)
 
         val gSnake =
             ArrayDeque<P>()
@@ -6941,24 +6975,15 @@ class SnakeView @JvmOverloads constructor(
 
         private var currentAgentId = 0
 
-        fun playOneGame(agentId: Int) {
+        fun playOneGame(agentId: Int): V3AgentResult {
             currentAgentId = agentId
             gSnake.clear()
 
-            gSnake.add(
-                P(7, 7)
-            )
+            gSnake.add(P(7, 7))
+            gSnake.add(P(6, 7))
+            gSnake.add(P(5, 7))
 
-            gSnake.add(
-                P(6, 7)
-            )
-
-            gSnake.add(
-                P(5, 7)
-            )
-
-            gDir =
-                P(1, 0)
+            gDir = P(1, 0)
 
             gScore = 0
             gFoodEaten = 0
@@ -6969,7 +6994,13 @@ class SnakeView @JvmOverloads constructor(
 
             prevState = -1
             prevAction = -1
+            lastDeathCause = "UNKNOWN"
+            gPrevHashes = LongArray(0)
             gLastFreeRegion = gFreeRegion(gSnake).toFloat()
+
+            v3.resetEpisode()
+            v3.setTraining(true)
+            v3.setGeneration(generation)
 
             gPlaceFood()
 
@@ -6992,10 +7023,7 @@ class SnakeView @JvmOverloads constructor(
             } else if (gOver && isTrainingRunActive(runId)) {
                 gDie(lastDeathCause)
             }
-        }
 
-        fun playOneGameV3(agentId: Int): V3AgentResult {
-            playOneGame(agentId)
             val reason = when (lastDeathCause) {
                 "WALL" -> V3DeathReason.HIT_WALL
                 "SELF" -> V3DeathReason.HIT_SELF
@@ -7004,10 +7032,12 @@ class SnakeView @JvmOverloads constructor(
                 "TIMEOUT" -> V3DeathReason.LOOP
                 else -> V3DeathReason.UNKNOWN
             }
+
             val fit = V3EvolutionManager.fitness(
                 score = gScore, food = gFoodEaten,
                 survivalSteps = gSteps, length = gSnake.size, deathReason = reason
             )
+
             return V3AgentResult(agent = v3, fitness = fit, score = gScore, food = gFoodEaten, survivalSteps = gSteps, deathReason = reason)
         }
 
@@ -7092,10 +7122,17 @@ class SnakeView @JvmOverloads constructor(
                         score = gScore, steps = gSteps,
                         stepsSinceFood = gHunger,
                         hunger = gHunger.toFloat(),
-                        gameOver = gOver
+                        gameOver = gOver,
+                        recentHashes = (gPrevHashes + (bodyArr.contentHashCode().toLong() * 31 + gFood.y * cols + gFood.x)).takeLast(16).toLongArray()
                     )
+                    gPrevHashes = next.recentHashes
                     v3.feedback(nextState = next, ateFood = gScore > prevScore, died = died)
-                } catch (e: Exception) {}
+                } catch (e: InterruptedException) {
+                    throw e
+                } catch (e: Throwable) {
+                    v3ExceptionCount++
+                    Log.e("SnakeV3", "V3 feedback error", e)
+                }
             }
 
             if (!gInside(nh)) {
@@ -7262,22 +7299,8 @@ class SnakeView @JvmOverloads constructor(
 
             v3Feedback(false)
 
-            if (!v3Active) {
-                qUpdate(
-                    state,
-                    action,
-                    reward,
-                    nextState,
-                    nextMask,
-                    false
-                )
-            }
-
-            prevState =
-                nextState
-
-            prevAction =
-                action
+            prevState = nextState
+            prevAction = action
         }
 
         private fun gTerminal(
@@ -7285,17 +7308,6 @@ class SnakeView @JvmOverloads constructor(
             action: Int,
             reward: Float
         ) {
-            if (!v3Active) {
-                qUpdate(
-                    state,
-                    action,
-                    reward,
-                    state,
-                    0,
-                    true
-                )
-            }
-
             prevState = -1
             prevAction = -1
         }
@@ -7328,7 +7340,7 @@ class SnakeView @JvmOverloads constructor(
                     hunger = gHunger.toFloat(),
                     gameOver = gOver
                 )
-                v3.setTrainingEnabled(true)
+                v3.setTraining(true)
                 val a = v3.act(v3state)
                 v3Active = true
                 return when(a) {
@@ -7337,7 +7349,11 @@ class SnakeView @JvmOverloads constructor(
                     V3Action.DOWN -> P(0, 1)
                     V3Action.LEFT -> P(-1, 0)
                 }
-            } catch (e: Exception) {}
+            } catch (_: Throwable) {
+                v3Active = false
+                v3ExceptionCount++
+                Log.e("SnakeV3", "V3 chooseMove error")
+            }
 
             val cands =
                 dirs.map {
@@ -7349,9 +7365,11 @@ class SnakeView @JvmOverloads constructor(
                     it.legal
                 }
 
-            if (legal.isEmpty()) {
-                return gDir
-            }
+            if (legal.isEmpty()) return gDir
+
+            // V3失败：纯安全fallback，不进旧V2学习
+            v3FallbackCount++
+            return legal.maxByOrNull { it.region }?.d ?: gDir
 
             if (
                 gSnake.size < 15
@@ -9053,15 +9071,6 @@ class SnakeView @JvmOverloads constructor(
     }
 }
 
-﻿package com.example.snake
-
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.tanh
-import kotlin.random.Random
-import java.util.ArrayDeque
-import java.util.LinkedHashMap
 
 /*
  * ============================================================
@@ -9302,7 +9311,9 @@ data class V3Experience(
 
     val deathReason: V3DeathReason? = null,
 
-    val priority: Float = 1f
+    val priority: Float = 1f,
+
+    val nextLegalMask: BooleanArray? = null
 )
 
 
@@ -10828,35 +10839,26 @@ class V3QLearner(
                     experience.nextState.hash
                 )
 
+            val legalMask = experience.nextLegalMask
 
+            var foundLegal = false
+            var bestValue = Float.NEGATIVE_INFINITY
             var bestAction = 0
 
-
-            for (
-                i in 1 until nextOnline.size
-            ) {
-
-                if (
-                    nextOnline[i] >
-                    nextOnline[bestAction]
-                ) {
-
+            for (i in nextOnline.indices) {
+                if (legalMask != null && (i >= legalMask.size || !legalMask[i])) continue
+                if (!foundLegal || nextOnline[i] > bestValue) {
+                    bestValue = nextOnline[i]
+                    foundLegal = true
                     bestAction = i
                 }
             }
 
+            val nextValue = if (foundLegal) {
+                valuesInternal(target, experience.nextState.hash)[bestAction]
+            } else 0f
 
-            val targetQ =
-                valuesInternal(
-                    target,
-                    experience.nextState.hash
-                )
-
-
-            targetValue =
-                experience.reward +
-                        gamma *
-                        targetQ[bestAction]
+            targetValue = experience.reward + gamma * nextValue
         }
 
 
@@ -13343,7 +13345,16 @@ class AIEngineV3(
                     if (died)
                         8f
                     else
-                        1f
+                        1f,
+
+                nextLegalMask =
+                    if (!died) {
+                        BooleanArray(V3Action.values().size).also { mask ->
+                            for (a in V3Board.legalActions(afterEncoded)) {
+                                mask[a.ordinal] = true
+                            }
+                        }
+                    } else null
             )
 
 
