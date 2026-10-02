@@ -468,7 +468,7 @@ class SnakeView @JvmOverloads constructor(
     }
     private fun v3LoopRisk(): Boolean {
         if (v3RecentHeads.size < 8) return false
-        val last8: List<Int> = if (v3RecentHeads.size > 8) v3RecentHeads.drop(v3RecentHeads.size - 8) else v3RecentHeads
+        val last8: List<Int> = if (v3RecentHeads.size > 8) v3RecentHeads.drop(v3RecentHeads.size - 8) else v3RecentHeads.toList()
         return last8.toSet().size <= 5
     }
     private fun v3SelectGoal(): V3Goal {
@@ -1134,7 +1134,7 @@ class SnakeView @JvmOverloads constructor(
         try { toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP, 55) } catch (_: Throwable) {}
     }
 
-    private val frame = object : Choreographer.FrameCallback {
+    private val frame: Choreographer.FrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(ns: Long) {
             if (!running) return
             if (lastFrame == 0L) lastFrame = ns
@@ -1157,7 +1157,7 @@ class SnakeView @JvmOverloads constructor(
             updateEffects(dt / 16f)
             val shouldRender = if (trainingMode) (++renderSkipCounter % 2) == 0 else true
             if (shouldRender) invalidate()
-            Choreographer.getInstance().postFrameCallback(frame)
+            Choreographer.getInstance().postFrameCallback(this)
         }
     }
 
