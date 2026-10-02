@@ -68,7 +68,6 @@ class SnakeView @JvmOverloads constructor(
         val afterRegion: Int = 0, val afterTailOk: Boolean = false, val afterSafeMoves: Int = 0
     )
 
-    /** ★ V4 Fusion Foundation：老版本经验提取的环境特征（只提供数据，不返回动作） */
     private data class FoundationInfo(
         val safeFoodExists: Boolean,
         val safeFoodMove: P?,
@@ -122,7 +121,13 @@ class SnakeView @JvmOverloads constructor(
     private data class BeamNode(
         val body: ArrayDeque<P>, val dir: P, val food: P, val score: Float,
         val steps: Int, val ateFood: Boolean, val dead: Boolean,
-        val loopPenalty: Float, val firstAction: P, val recentHeadCells: IntArray
+        val loopPenalty: Float, val firstAction: P, val recentHeadCells: IntArray,
+        // ★ V9：缓存已经算好的特征，避免后续重复 BFS
+        val region: Int = 0,
+        val tailReachable: Boolean = false,
+        val safeMoves: Int = 0,
+        val foodDistance: Int = -1,
+        val danger: Float = 0f
     )
 
     private data class AgentTask(
@@ -196,7 +201,6 @@ class SnakeView @JvmOverloads constructor(
     @Volatile private var evolving = false
     @Volatile private var generationTransitioning = false
 
-    // Beam 统计（线程安全）
     private val beamCalls = AtomicLong(0)
     private val beamSuccess = AtomicLong(0)
     private val beamSelected = AtomicLong(0)
@@ -208,7 +212,14 @@ class SnakeView @JvmOverloads constructor(
     private val beamEligibleCalls = AtomicLong(0)
     private val replayUpdateCount = AtomicLong(0)
 
-    // ★ Foundation 统计
+    // ★ V9：性能监控
+    private val featureCalls = AtomicLong(0)
+    private val featureCacheHits = AtomicLong(0)
+    private val beamNodeEvaluations = AtomicLong(0)
+    private val rolloutCalls = AtomicLong(0)
+    private val rolloutStepsTotal = AtomicLong(0)
+    private val foodDeadEndCalls = AtomicLong(0)
+
     private val foundationCalls = AtomicLong(0L)
     private val foundationSafeFoodCalls = AtomicLong(0L)
     private val foundationTailSafeCalls = AtomicLong(0L)
@@ -631,7 +642,8 @@ class SnakeView @JvmOverloads constructor(
 
         const val REWARD_STEP = -0.015f
         const val REWARD_FOOD = 8.0f
-        const val REWARD_FOOD_DISTANCE_IMPROVE = 0.04f
+        // ★ V9：小幅提升食物距离奖励，从 0.04 到 0.08，避免 "朝食物移动" 信号太弱
+        const val REWARD_FOOD_DISTANCE_IMPROVE = 0.08f
         const val REWARD_SPACE_DELTA = 0.05f
         const val REWARD_TAIL = 0.03f
         const val REWARD_DANGER = -0.10f
@@ -662,8 +674,8 @@ class SnakeView @JvmOverloads constructor(
         const val BEAM_LONG_LENGTH = 35
 
         const val EVOLUTION_BATCH_SIZE = 16
-        const val TRAINING_STATE_VERSION = 8
-        const val TRAINING_FILE_NAME = "snake_training_v8.dat"
+        const val TRAINING_STATE_VERSION = 9
+        const val TRAINING_FILE_NAME = "snake_training_v9.dat"
 
         const val HUNGER_SAFE = 0.35f
         const val HUNGER_WARNING = 0.60f
@@ -2485,10 +2497,10 @@ class SnakeView @JvmOverloads constructor(
             "回放" to "${replayBuffer.size}",
             "Beam命中" to "${beamSelected.get()}/${beamCalls.get()}",
             "Beam有效" to "${beamSuccess.get()}/${beamCalls.get()}",
-            "Foundation" to "${foundationSuggested.get()}/${foundationCalls.get()}",
-            "F采用率" to (if (foundationCalls.get() > 0L) "%.0f%%".format(foundationFinalSelected.get().toFloat() / foundationCalls.get() * 100f) else "-"),
-            "F覆盖" to "${foundationOverridden.get()}",
-            "F安全食物" to "${foundationSafeFoodCalls.get()}"
+            "Feature" to "${featureCalls.get()}",
+            "F命中" to (if (featureCalls.get() > 0) "%.0f%%".format(featureCacheHits.get().toFloat() / featureCalls.get().toFloat() * 100f) else "-"),
+            "Beam节点" to "${beamNodeEvaluations.get()}",
+            "Rollout" to "${rolloutCalls.get()}"
         )
         val mW = (W - 5 * pad) / 4f; val mH = W * 0.105f
         for (mi in metrics.indices) {
@@ -2754,12 +2766,10 @@ class SnakeView @JvmOverloads constructor(
             val beamSelectRate = if (beamCalls.get() > 0L) beamSelected.get().toFloat() / beamCalls.get().toFloat() else 0f
             c.drawText("Beam有效率 ${"%.1f".format(beamValidRate * 100)}%   采用率 ${"%.1f".format(beamSelectRate * 100)}%   跳过${beamSkippedByLength.get()} 空${beamNullResult.get()} 无效${beamInvalidResult.get()}",
                 left + 16f, infoY + 90f, text)
-            val fCalls = foundationCalls.get()
-            val fSuggestRate = if (fCalls > 0L) foundationSuggested.get().toFloat() / fCalls.toFloat() else 0f
-            val fAdoptRate = if (fCalls > 0L) foundationFinalSelected.get().toFloat() / fCalls.toFloat() else 0f
-            c.drawText("Foundation 调用${fCalls} 安全食物${foundationSafeFoodCalls.get()} 尾安${foundationTailSafeCalls.get()} 吃后安${foundationPostFoodSafeCalls.get()}",
+            val featureHitRate = if (featureCalls.get() > 0L) featureCacheHits.get().toFloat() / featureCalls.get().toFloat() else 0f
+            c.drawText("Feature 调用${featureCalls.get()} 命中${featureCacheHits.get()} 命中率${"%.1f".format(featureHitRate * 100)}%   FoodBFS${foodDeadEndCalls.get()}",
                 left + 16f, infoY + 108f, text)
-            c.drawText("Foundation 建议率${"%.1f".format(fSuggestRate * 100)}%  采用率${"%.1f".format(fAdoptRate * 100)}%  覆盖${foundationOverridden.get()}",
+            c.drawText("Beam节点${beamNodeEvaluations.get()}   Rollout${rolloutCalls.get()}   Rollout步${rolloutStepsTotal.get()}   Foundation${foundationCalls.get()}",
                 left + 16f, infoY + 126f, text)
             text.color = Color.rgb(100, 220, 255); text.isFakeBoldText = true
             c.drawText("趋势: $trendState  原因: $diagnosisCause  AutoTune: $lastAutoTuneText", left + 16f, infoY + 144f, text)
@@ -2839,12 +2849,6 @@ class SnakeView @JvmOverloads constructor(
         try { aiPool.shutdownNow() } catch (_: Throwable) {}
         saveTrainingState()
     }
-
-    // ============================================================
-    // V4 Fusion · Foundation 层
-    // 只提供特征，绝不 return 最终动作。
-    // 必须使用传入的 body / heading / targetFood。
-    // ============================================================
 
     private fun foundationHungerThreshold(length: Int): Int = when {
         length < 20 -> 50
@@ -3155,7 +3159,7 @@ class SnakeView @JvmOverloads constructor(
         val action = dirs.indexOfFirst { it == best.d }.coerceAtLeast(0)
         lastV2State = state; lastV2Action = action
         v3LayerActive = 4; v3LayerWhy = "L4混合决策(Q+NN+Food+Safety+Beam)"
-        ai = Snapshot(strategy = "V8统一评分", reason = "Q/NN/Food/Safety/Beam/Rollout 统一归一化评分",
+        ai = Snapshot(strategy = "V9统一评分", reason = "Q/NN/Food/Safety/Beam/Rollout 统一归一化评分",
             danger = danger, region = regionNow, spaceRatio = regionNow.toFloat() / max(1, snake.size),
             tailReachable = tailReachable(snake), foodReachable = foodDistNow >= 0, foodDistance = foodDistNow,
             hunger = hunger, chosen = best.d, candidates = candidates, depth = 1, nodes = legal.size,
@@ -3387,7 +3391,16 @@ class SnakeView @JvmOverloads constructor(
     private fun beamSearchBestMoveForTrainingState(
         sourceBody: ArrayDeque<P>,
         sourceDir: P,
-        targetFood: P
+        targetFood: P,
+        // ★ V9：允许训练线程传入自己的搜索函数，避免使用主线程状态
+        evalFn: (ArrayDeque<P>, P, P, P) -> Candidate,
+        simulateFn: (
+            ArrayDeque<P>, P, P, P, P, IntArray
+        ) -> BeamNode?,
+        freeRegionFn: (ArrayDeque<P>) -> Int,
+        tailReachFn: (ArrayDeque<P>) -> Boolean,
+        safeMovesFn: (ArrayDeque<P>) -> Int,
+        foodDistFn: (P, P, Collection<P>, Boolean) -> Int
     ): Pair<P, Float>? {
         if (!BEAM_ENABLED) return null
         if (sourceBody.isEmpty()) return null
@@ -3404,7 +3417,7 @@ class SnakeView @JvmOverloads constructor(
             val maxNodes = BEAM_MAX_NODES
 
             val initialMoves = dirs
-                .map { gEvaluateForBeam(sourceBody, sourceDir, targetFood, it) }
+                .map { evalFn(sourceBody, sourceDir, targetFood, it) }
                 .filter { it.legal }
                 .sortedByDescending { it.score }
                 .take(width)
@@ -3414,7 +3427,7 @@ class SnakeView @JvmOverloads constructor(
             var nodesExpanded = 0
             val startHeads = IntArray(4) { -1 }
             for (candidate in initialMoves) {
-                val node = simulateBeamMove(ArrayDeque(sourceBody), sourceDir, targetFood, candidate.d, candidate.d, startHeads)
+                val node = simulateFn(ArrayDeque(sourceBody), sourceDir, targetFood, candidate.d, candidate.d, startHeads)
                 if (node != null) { beam.add(node); nodesExpanded++ }
             }
             if (beam.isEmpty()) return null
@@ -3427,7 +3440,7 @@ class SnakeView @JvmOverloads constructor(
                     if (node.dead) continue
                     if (stop) break
                     val moves = dirs.filter { !isReverse(it, node.dir) }
-                        .mapNotNull { mv -> simulateBeamMove(node.body, node.dir, node.food, mv, node.firstAction, node.recentHeadCells) }
+                        .mapNotNull { mv -> simulateFn(node.body, node.dir, node.food, mv, node.firstAction, node.recentHeadCells) }
                         .sortedByDescending { it.score }.take(width)
                     next.addAll(moves)
                     nodesExpanded += moves.size
@@ -3449,30 +3462,7 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    private fun gEvaluateForBeam(body: ArrayDeque<P>, heading: P, target: P, move: P): Candidate {
-        if (body.isEmpty()) return Candidate(move, -1e9f, "空蛇", false)
-        if (isReverse(move, heading)) return Candidate(move, -1e9f, "反向", false)
-        val head = body.first()
-        val nextHead = P(head.x + move.x, head.y + move.y)
-        if (!inside(nextHead)) return Candidate(move, -1e9f, "越界", false)
-        val ate = nextHead == target
-        val hitBody = body.contains(nextHead)
-        if (hitBody && !(nextHead == body.last() && !ate)) return Candidate(move, -1e9f, "撞身", false)
-        val sim = simulateForBody(body, move, target)
-        if (sim.body.isEmpty()) return Candidate(move, -1e9f, "模拟失败", false)
-        val region = freeRegion(sim.body)
-        val tailOk = tailReachable(sim.body)
-        val mobility = countSafeMovesFor(sim.body, move, target)
-        val foodDist = distance(sim.body.first(), target, sim.body, true)
-        val ratio = region.toFloat() / max(1, sim.body.size)
-        val safety = mobility.toFloat() / 4f * 120f + if (tailOk) 100f else -100f + ratio * 40f
-        val foodScore = if (ate) 300f else if (foodDist >= 0) max(0f, 120f - foodDist * 8f) else -180f
-        val score = safety + foodScore
-        return Candidate(d = move, score = score, reason = "Beam训练候选", legal = true,
-            region = region, mobility = mobility, tailOk = tailOk, foodDist = foodDist, ate = ate)
-    }
-
-    private fun simulateBeamMove(
+    private fun simulateBeamMoveGlobal(
         sourceBody: ArrayDeque<P>, sourceDir: P, targetFood: P, move: P,
         firstAction: P, prevHeads: IntArray
     ): BeamNode? {
@@ -3481,11 +3471,13 @@ class SnakeView @JvmOverloads constructor(
         val body = ArrayDeque<P>(); for (p in sourceBody) body.addLast(p)
         val head = body.first()
         val nextHead = P(head.x + move.x, head.y + move.y)
-        if (!inside(nextHead)) return BeamNode(body, move, targetFood, -1f, 1, false, true, 0f, firstAction, prevHeads)
+        if (!inside(nextHead)) return BeamNode(body, move, targetFood, -1f, 1, false, true, 0f, firstAction, prevHeads, 0, false, 0, -1, 1f)
         val ate = nextHead == targetFood
         val hitBody = body.contains(nextHead)
-        if (hitBody && !(nextHead == body.last() && !ate)) return BeamNode(body, move, targetFood, -1f, 1, false, true, 0f, firstAction, prevHeads)
+        if (hitBody && !(nextHead == body.last() && !ate)) return BeamNode(body, move, targetFood, -1f, 1, false, true, 0f, firstAction, prevHeads, 0, false, 0, -1, 1f)
         body.addFirst(nextHead); if (!ate) body.removeLast()
+        beamNodeEvaluations.incrementAndGet()
+
         val region = freeRegion(body)
         val ratio = region.toFloat() / max(1, body.size)
         val tailOk = tailReachable(body)
@@ -3516,8 +3508,14 @@ class SnakeView @JvmOverloads constructor(
         val newHeads = IntArray(4) { -1 }
         newHeads[0] = nextCell
         for (i in 1..3) newHeads[i] = prevHeads[i - 1]
-        return BeamNode(body, move, targetFood, score, 1, ate, false, loopHits.toFloat(), firstAction, newHeads)
+        return BeamNode(body, move, targetFood, score, 1, ate, false, loopHits.toFloat(), firstAction, newHeads,
+            region, tailOk, safeMoves, foodDistance, dangerN)
     }
+
+    private fun simulateBeamMove(
+        sourceBody: ArrayDeque<P>, sourceDir: P, targetFood: P, move: P,
+        firstAction: P, prevHeads: IntArray
+    ): BeamNode? = simulateBeamMoveGlobal(sourceBody, sourceDir, targetFood, move, firstAction, prevHeads)
 
     private fun recordAgentResult(agentId: Int, scoreVal: Int, steps: Int, foods: Int) {
         synchronized(sharedLock) {
@@ -3669,6 +3667,12 @@ class SnakeView @JvmOverloads constructor(
             return
         }
 
+        // ★ V9：AutoTune 阶段化，避免早期乱调
+        if (generation < 10) {
+            lastAutoTuneText = "OBSERVE(G<10)"
+            return
+        }
+
         if (generation - last50GenStart >= 50) {
             last50GenStart = generation
             autoTuneEventsIn50 = 0
@@ -3679,8 +3683,8 @@ class SnakeView @JvmOverloads constructor(
         }
 
         val shouldDiagnose = when (newTrend) {
-            "STALLED" -> true
-            "DEGRADING" -> consecutiveDegradingGenerations >= 3
+            "STALLED" -> generation >= 15
+            "DEGRADING" -> consecutiveDegradingGenerations >= 3 && generation >= 20
             else -> false
         }
         if (!shouldDiagnose) {
@@ -3716,9 +3720,17 @@ class SnakeView @JvmOverloads constructor(
         val prevSteps = windowAvgSteps(10)
         val recentFood = windowAvgFood(5)
 
+        val totalDeaths = deathWall + deathSelf + deathTrap + deathHunger
+        val hungerRate = deathHunger.toFloat() / max(1, totalDeaths)
+        val foodPerStep = if (recentSteps > 0f) recentFood / recentSteps else 0f
+
         if (beamEligibleCalls.get() > 100L && beamCalls.get() == 0L) return "BEAM_NOT_ACTIVE"
         if (beamCalls.get() > 500L && beamSelected.get().toFloat() / beamCalls.get().toFloat() < 0.02f) return "BEAM_TOO_WEAK"
-        if (hungerDelta > 3 || recentFood < 3f) return "FOOD_PROBLEM"
+
+        // ★ V9：FOOD_PROBLEM 多指标综合判断
+        if ((hungerRate > 0.35f && recentFood < 4f) || (foodPerStep < 0.015f && recentSteps > 80f)) {
+            return "FOOD_PROBLEM"
+        }
         if (trapDelta > 5 || (recentSteps < prevSteps * 0.85f && recentSteps > 0)) return "TRAP_PROBLEM"
         val wallSelfRatio = (deathWall + deathSelf).toFloat() /
                 max(1, deathTrap + deathHunger + deathWall + deathSelf)
@@ -3838,6 +3850,23 @@ class SnakeView @JvmOverloads constructor(
         while (autoTuneEvents.size > 30) autoTuneEvents.pollFirst()
     }
 
+    /**
+     * ★ V9：训练状态特征缓存。
+     * 每个 TrainGame 独立拥有。
+     */
+    private class TrainStateFeatures(
+        val region: Int,
+        val safeMoves: Int,
+        val tailReachable: Boolean,
+        val danger: Int,
+        val foodDistance: Int,
+        val foodSpaceRatio: Float,
+        val foodDeadEnd: Boolean,
+        val headX: Int,
+        val headY: Int,
+        val length: Int
+    )
+
     private inner class TrainGame(
         seed: Long,
         private val runId: Long,
@@ -3867,6 +3896,83 @@ class SnakeView @JvmOverloads constructor(
         private var episodeExpectedEpoch: Long = 0L
         var gLastAction = -1
 
+        // ★ V9：每个 TrainGame 独立的状态特征缓存
+        private var cachedFeatures: TrainStateFeatures? = null
+        private var cachedFeatureKey: Long = 0L
+        private var cachedFeatureValid: Boolean = false
+
+        fun invalidateFeaturesCache() {
+            cachedFeatureValid = false
+        }
+
+        private fun gBodyHash(): Long {
+            var h = 1125899906842597L
+            for (p in gSnake) {
+                h = h * 31L + p.x
+                h = h * 31L + p.y
+            }
+            return h
+        }
+
+        private fun makeFeatureKey(): Long {
+            val head = gSnake.firstOrNull() ?: return 0L
+            val dirIdx = when (gDir) { P(0, -1) -> 0; P(0, 1) -> 1; P(-1, 0) -> 2; else -> 3 }
+            var k = 17L
+            k = k * 31L + head.x
+            k = k * 31L + head.y
+            k = k * 31L + gFood.x
+            k = k * 31L + gFood.y
+            k = k * 31L + gSnake.size
+            k = k * 31L + dirIdx
+            k = k * 31L + gBodyHash()
+            return k
+        }
+
+        fun getCachedTrainFeatures(): TrainStateFeatures {
+            val key = makeFeatureKey()
+            if (cachedFeatureValid && key == cachedFeatureKey) {
+                featureCacheHits.incrementAndGet()
+                return cachedFeatures!!
+            }
+            featureCalls.incrementAndGet()
+            val head = gSnake.firstOrNull() ?: run {
+                val f = TrainStateFeatures(0, 0, false, 5, -1, 0f, true, 0, 0, 0)
+                cachedFeatures = f; cachedFeatureKey = key; cachedFeatureValid = true
+                return f
+            }
+
+            val region = gFreeRegion(gSnake)
+            val safeMoves = gCountSafeMoves(gSnake)
+            val tailOk = gTailReachable(gSnake)
+            val ratio = region.toFloat() / max(1, gSnake.size)
+            val danger = when {
+                safeMoves <= 0 -> 5
+                ratio < 1.5f -> 5
+                ratio < 2.2f -> 4
+                ratio < 3.5f -> 3
+                ratio < 5f -> 2
+                else -> 1
+            }
+            val foodDist = gDistance(gSnake.first(), gFood, gSnake, true)
+            val foodSpaceRatio = if (foodDist < 0) 0f else gFoodSpaceRatio()
+            val foodDeadEnd = foodDist >= 0 && foodSpaceRatio < 1.2f
+
+            val f = TrainStateFeatures(
+                region = region, safeMoves = safeMoves, tailReachable = tailOk,
+                danger = danger, foodDistance = foodDist, foodSpaceRatio = foodSpaceRatio,
+                foodDeadEnd = foodDeadEnd, headX = head.x, headY = head.y, length = gSnake.size
+            )
+            cachedFeatures = f
+            cachedFeatureKey = key
+            cachedFeatureValid = true
+            return f
+        }
+
+        private fun shouldRunFoodDeadEnd(f: TrainStateFeatures): Boolean {
+            val hungerRatio = (gHunger.toFloat() / hungerKillLimit).coerceIn(0f, 1f)
+            return hungerRatio >= 0.45f || f.foodDistance >= 6 || gSnake.size >= 20 || f.danger >= 4
+        }
+
         fun playOneGame(task: AgentTask): Boolean {
             currentAgentId = task.agentId
             if (task.agentId !in 0 until POPULATION_SIZE) { Log.e(LOG_TAG, "INVALID_AGENT_ID=${task.agentId}"); return false }
@@ -3885,6 +3991,7 @@ class SnakeView @JvmOverloads constructor(
             gStepsSinceFood = 0; gFoodEaten = 0
             lastDeathCause = "UNKNOWN"
             gLastFreeRegion = gFreeRegion(gSnake).toFloat(); gPlaceFood()
+            invalidateFeaturesCache()
             val maxIterations = 8000; var iter = 0
             try {
                 while (!gOver && isTrainingRunActive(runId) &&
@@ -3918,6 +4025,8 @@ class SnakeView @JvmOverloads constructor(
             val action = dirs.indexOfFirst { it == mv }.coerceAtLeast(0)
             gLastAction = action
             if (!gIsReverse(mv, gDir)) gDir = mv
+            // ★ V9：状态已变化，失效缓存
+            invalidateFeaturesCache()
             val nh = P(gSnake.first().x + gDir.x, gSnake.first().y + gDir.y)
             if (!gInside(nh)) { gTerminal(state, action, DEATH_WALL); lastDeathCause = "WALL"; gOver = true; return }
             val ate = nh == gFood; val tail = gSnake.last()
@@ -3962,7 +4071,9 @@ class SnakeView @JvmOverloads constructor(
             if (statusIndex in threadStatus.indices) {
                 val st = threadStatus[statusIndex]
                 st.score = gScore; st.steps = gSteps
-                st.phase = if (ate) "捕食" else if (gCalculateDanger() >= 3) "避险" else "搜索"
+                // ★ V9：使用缓存特征，避免重复 BFS
+                val phaseFeatures = getCachedTrainFeatures()
+                st.phase = if (ate) "捕食" else if (phaseFeatures.danger >= 3) "避险" else "搜索"
             }
             if (gHunger >= hungerKillLimit) { gTerminal(state, action, DEATH_HUNGER); lastDeathCause = "HUNGER"; gOver = true; return }
             val nextState = gBuildState(); val nextMask = gLegalMask()
@@ -3992,8 +4103,10 @@ class SnakeView @JvmOverloads constructor(
             val nnInputs = buildInputs(gSnake.first(), gFood, gSnake)
             val nnVals = brain.think(nnInputs)
 
+            // ★ V9：使用缓存的特征，避免重复 BFS
+            val features = getCachedTrainFeatures()
             val hRatio = (gHunger.toFloat() / hungerKillLimit).coerceIn(0f, 1f)
-            val danger = gCalculateDanger()
+            val danger = features.danger
             val weights = computeDynamicWeights(hRatio, danger, gSnake.size)
             val qW = weights[0]; val nnW = weights[1]; val foodW = weights[2]
             val safetyW = weights[3]; val beamW = weights[4]; val rollW = weights[5]; val memW = weights[6]
@@ -4004,11 +4117,12 @@ class SnakeView @JvmOverloads constructor(
                 val h0 = gSnake.first()
                 val foodDxBucket = ((gFood.x - h0.x) / 3).coerceIn(-5, 5)
                 val foodDyBucket = ((gFood.y - h0.y) / 3).coerceIn(-5, 5)
-                val regionBucket = (gFreeRegion(gSnake) / 4).coerceIn(0, 60)
-                val lenBucket = (gSnake.size / 8).coerceIn(0, 30)
+                // ★ V9：使用 features，避免重复 gFreeRegion / gTailReachable
+                val regionBucket = (features.region / 4).coerceIn(0, 60)
+                val lenBucket = (features.length / 8).coerceIn(0, 30)
                 val headingBucket = when (gDir) { P(0, -1) -> 0; P(0, 1) -> 1; P(-1, 0) -> 2; else -> 3 }
-                val dangerBucket = danger.coerceIn(1, 5)
-                val tailBucket = if (gTailReachable(gSnake)) 1 else 0
+                val dangerBucket = features.danger.coerceIn(1, 5)
+                val tailBucket = if (features.tailReachable) 1 else 0
                 var hh = 1125899906842597L
                 hh = hh * 31 + h0.x; hh = hh * 31 + h0.y
                 hh = hh * 31 + foodDxBucket; hh = hh * 31 + foodDyBucket
@@ -4016,7 +4130,13 @@ class SnakeView @JvmOverloads constructor(
                 hh = hh * 31 + regionBucket; hh = hh * 31 + lenBucket; hh = hh * 31 + tailBucket
                 hh xor v3TrainCtxSalt
             }
-            val de = gCheckFoodDeadEnd()
+            // ★ V9：food deadEnd 加条件触发
+            val de = if (shouldRunFoodDeadEnd(features)) {
+                foodDeadEndCalls.incrementAndGet()
+                gCheckFoodDeadEnd()
+            } else {
+                Pair(features.foodDeadEnd, features.foodSpaceRatio)
+            }
             deadEndPredicted = de.first; foodSpaceRatio = de.second
 
             val rSteps = when { gSnake.size > 60 -> 4; gSnake.size > 25 -> 3; else -> 2 }
@@ -4026,11 +4146,15 @@ class SnakeView @JvmOverloads constructor(
                 val result = beamSearchBestMoveForTrainingState(
                     sourceBody = gSnake,
                     sourceDir = gDir,
-                    targetFood = gFood
+                    targetFood = gFood,
+                    evalFn = { body, dir, food, mv -> gEvaluateForBeam(body, dir, food, mv) },
+                    simulateFn = { body, sdir, tfood, mv, fa, ph -> gSimulateBeamMove(body, sdir, tfood, mv, fa, ph) },
+                    freeRegionFn = { b -> gFreeRegion(b) },
+                    tailReachFn = { b -> gTailReachable(b) },
+                    safeMovesFn = { b -> gCountSafeMoves(b) },
+                    foodDistFn = { s, t, b, at -> gDistance(s, t, b, at) }
                 )
-                if (result == null) {
-                    beamNullResult.incrementAndGet()
-                }
+                if (result == null) beamNullResult.incrementAndGet()
                 result
             } else {
                 if (BEAM_ENABLED) beamSkippedByLength.incrementAndGet()
@@ -4038,9 +4162,7 @@ class SnakeView @JvmOverloads constructor(
             }
             val beamMove = beamResult?.first
             val beamValid = beamMove != null && legal.any { it.d == beamMove }
-            if (beamMove != null && !beamValid) {
-                beamInvalidResult.incrementAndGet()
-            }
+            if (beamMove != null && !beamValid) beamInvalidResult.incrementAndGet()
 
             var best = legal.first(); var bestValue = -Float.MAX_VALUE
             for (candidate in legal) {
@@ -4052,7 +4174,7 @@ class SnakeView @JvmOverloads constructor(
                 val foodNorm = candidate.foodNorm
                 val safetyNorm = candidate.safetyNorm
                 val beamNorm = if (beamValid && candidate.d == beamMove) tanh(beamResult!!.second / 20f).coerceIn(-1f, 1f) else 0f
-                val rolloutScore = if (rSteps > 0) gRolloutN(candidate.d, rSteps) else 0f
+                val rolloutScore = if (rSteps > 0) gRolloutN(candidate, rSteps) else 0f
                 val rolloutNorm = tanh(rolloutScore / 30f)
                 val v3Penalty = v3Memory.penaltyFor(v3TrainCtx, a) * (if (v3FusionEnabled) 45f else 0f)
                 val memoryNorm = tanh(v3Penalty / 10f)
@@ -4117,9 +4239,50 @@ class SnakeView @JvmOverloads constructor(
             return Pair(ratio < 1.2f, ratio)
         }
 
-        private fun gRolloutN(startDir: P, maxSteps: Int): Float {
-            var body = ArrayDeque(gSnake); var dir = startDir; var score = 0f
-            for (step in 0 until maxSteps) {
+        private fun gFoodSpaceRatio(): Float {
+            if (gSnake.isEmpty()) return 10f
+            val gVisited = BooleanArray(total); val queue = ArrayDeque<Int>()
+            val start = gFood.y * cols + gFood.x; if (start !in gVisited.indices) return 0f
+            gVisited[start] = true; queue.addLast(start); var space = 0
+            while (queue.isNotEmpty()) {
+                val curr = queue.removeFirst(); space++
+                val x = curr % cols; val y = curr / cols
+                for (d in dirs) {
+                    val nx = x + d.x; val ny = y + d.y
+                    if (nx !in 0 until cols || ny !in 0 until rows) continue
+                    val index = ny * cols + nx; if (gVisited[index]) continue
+                    val p = P(nx, ny); if (gSnake.contains(p)) continue
+                    gVisited[index] = true; queue.addLast(index)
+                }
+            }
+            return space.toFloat() / max(1, gSnake.size)
+        }
+
+        /**
+         * ★ V9：Rollout 第一层复用 Candidate，减少重复 BFS。
+         */
+        private fun gRolloutN(firstCandidate: Candidate, maxSteps: Int): Float {
+            rolloutCalls.incrementAndGet()
+            if (maxSteps <= 0) return 0f
+
+            var score = 0f
+            // 第一层直接使用 Candidate 已有数据
+            val firstSpaceRatio = firstCandidate.region.toFloat() / max(1, gSnake.size + 1)
+            score += firstSpaceRatio.coerceIn(0f, 6f) * 0.8f
+            score += firstCandidate.mobility * 0.5f
+            if (firstCandidate.tailOk) score += 1.5f
+            else if (gSnake.size > 10) score -= 3.0f
+            if (firstCandidate.ate) score += 8f
+            if (firstCandidate.foodDist >= 0) score += 3.0f / (firstCandidate.foodDist + 1)
+            score *= 0.92f
+
+            if (maxSteps <= 1) return score
+
+            // 后续层：只计算空间比 + 食物距离
+            var body = gSimulateOn(ArrayDeque(gSnake), firstCandidate.d).body
+            var dir = firstCandidate.d
+            for (step in 1 until maxSteps) {
+                rolloutStepsTotal.incrementAndGet()
                 if (body.isEmpty()) return score - 50f
                 var bestNext: P? = null; var bestSpace = -1
                 for (d in dirs) {
@@ -4135,11 +4298,18 @@ class SnakeView @JvmOverloads constructor(
                 }
                 if (bestNext == null) return score - 50f
                 val sim = gSimulateOn(body, bestNext); body = sim.body
-                val region = gFreeRegion(body); val tailOk = gTailReachable(body); val mobility = gCountSafeMoves(body)
+
+                // 只算空间比
+                val region = gFreeRegion(body)
                 val spaceRatio = region.toFloat() / max(1, body.size)
                 score += spaceRatio.coerceIn(0f, 6f) * 0.8f
-                score += mobility * 0.5f
-                if (tailOk) score += 1.5f else if (body.size > 10) score -= 3.0f
+
+                // 只有第 2 层且蛇 > 10 或吃到食物时才检查尾巴
+                if (step >= 1 && (body.size > 10 || sim.ate)) {
+                    val tailOk = gTailReachable(body)
+                    if (tailOk) score += 1.5f
+                    else if (body.size > 10) score -= 3.0f
+                }
                 if (sim.ate) score += 8f
                 val fd = gDistance(body.first(), gFood, body, true)
                 if (fd >= 0) score += 3.0f / (fd + 1)
@@ -4217,6 +4387,80 @@ class SnakeView @JvmOverloads constructor(
                 region = region, mobility = mobility, tailOk = tail, foodDist = foodDist, ate = ate,
                 foodNorm = foodNorm, safetyNorm = safetyNorm, eatAfterNorm = eatAfterNormLocal,
                 afterRegion = afterRegion, afterTailOk = afterTail, afterSafeMoves = afterSafe)
+        }
+
+        fun gEvaluateForBeam(body: ArrayDeque<P>, heading: P, target: P, move: P): Candidate {
+            if (body.isEmpty()) return Candidate(move, -1e9f, "空蛇", false)
+            if (isReverse(move, heading)) return Candidate(move, -1e9f, "反向", false)
+            val head = body.first()
+            val nextHead = P(head.x + move.x, head.y + move.y)
+            if (!inside(nextHead)) return Candidate(move, -1e9f, "越界", false)
+            val ate = nextHead == target
+            val hitBody = body.contains(nextHead)
+            if (hitBody && !(nextHead == body.last() && !ate)) return Candidate(move, -1e9f, "撞身", false)
+            val sim = gSimulateForBody(body, move, target)
+            if (sim.body.isEmpty()) return Candidate(move, -1e9f, "模拟失败", false)
+            val region = gFreeRegion(sim.body)
+            val tailOk = gTailReachable(sim.body)
+            val mobility = gCountSafeMovesFor(sim.body, move, target)
+            val foodDist = gDistance(sim.body.first(), target, sim.body, true)
+            val ratio = region.toFloat() / max(1, sim.body.size)
+            val safety = mobility.toFloat() / 4f * 120f + if (tailOk) 100f else -100f + ratio * 40f
+            val foodScore = if (ate) 300f else if (foodDist >= 0) max(0f, 120f - foodDist * 8f) else -180f
+            val score = safety + foodScore
+            return Candidate(d = move, score = score, reason = "Beam训练候选", legal = true,
+                region = region, mobility = mobility, tailOk = tailOk, foodDist = foodDist, ate = ate)
+        }
+
+        private fun gSimulateBeamMove(
+            sourceBody: ArrayDeque<P>, sourceDir: P, targetFood: P, move: P,
+            firstAction: P, prevHeads: IntArray
+        ): BeamNode? {
+            if (sourceBody.isEmpty()) return null
+            if (isReverse(move, sourceDir)) return null
+            val body = ArrayDeque<P>(); for (p in sourceBody) body.addLast(p)
+            val head = body.first()
+            val nextHead = P(head.x + move.x, head.y + move.y)
+            if (!inside(nextHead)) return BeamNode(body, move, targetFood, -1f, 1, false, true, 0f, firstAction, prevHeads, 0, false, 0, -1, 1f)
+            val ate = nextHead == targetFood
+            val hitBody = body.contains(nextHead)
+            if (hitBody && !(nextHead == body.last() && !ate)) return BeamNode(body, move, targetFood, -1f, 1, false, true, 0f, firstAction, prevHeads, 0, false, 0, -1, 1f)
+            body.addFirst(nextHead); if (!ate) body.removeLast()
+            beamNodeEvaluations.incrementAndGet()
+
+            // ★ V9：计算一次并存入 BeamNode
+            val region = gFreeRegion(body)
+            val ratio = region.toFloat() / max(1, body.size)
+            val tailOk = gTailReachable(body)
+            val safeMoves = gCountSafeMoves(body)
+            val foodDistance = gDistance(body.first(), targetFood, body, true).let { if (it < 0) 999 else it }
+            var danger = 0f
+            val h = body.first()
+            for (d in dirs) {
+                val np = P(h.x + d.x, h.y + d.y)
+                if (!inside(np)) { danger += 1f; continue }
+                val ate2 = np == targetFood
+                if (body.contains(np) && !(np == body.last() && !ate2)) danger += 1f
+            }
+            if (safeMoves <= 1) danger += 2f
+            if (safeMoves == 0) danger += 5f
+            val dangerN = (danger / 5f).coerceIn(0f, 1f)
+
+            val foodScore = if (ate) 1.0f else (1f - foodDistance.toFloat() / 50f).coerceIn(-1f, 1f)
+            val spaceScore = (ratio / 3f).coerceIn(-1f, 1f)
+            val tailScore = if (tailOk) 0.8f else -0.6f
+            val safeScore = (safeMoves / 4f).coerceIn(0f, 1f) * 2f - 1f
+            val score = foodScore * BEAM_FOOD_WEIGHT + spaceScore * BEAM_SPACE_WEIGHT +
+                        tailScore * BEAM_TAIL_WEIGHT + (safeScore - dangerN) * BEAM_SAFETY_WEIGHT
+
+            val nextCell = nextHead.y * cols + nextHead.x
+            var loopHits = 0
+            for (hh in prevHeads) if (hh == nextCell) loopHits++
+            val newHeads = IntArray(4) { -1 }
+            newHeads[0] = nextCell
+            for (i in 1..3) newHeads[i] = prevHeads[i - 1]
+            return BeamNode(body, move, targetFood, score, 1, ate, false, loopHits.toFloat(), firstAction, newHeads,
+                region, tailOk, safeMoves, foodDistance, dangerN)
         }
 
         fun gSimulate(d: P): Sim = gSimulateOn(ArrayDeque(gSnake), d)
