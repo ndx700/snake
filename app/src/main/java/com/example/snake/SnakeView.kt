@@ -29,6 +29,8 @@ import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -58,18 +60,12 @@ class SnakeView @JvmOverloads constructor(
         val region: Int = 0, val mobility: Int = 0,
         val tailOk: Boolean = false, val foodDist: Int = -1,
         val ate: Boolean = false, val qValue: Float = 0f,
-        val qNorm: Float = 0f,
-        val nnNorm: Float = 0f,
-        val foodNorm: Float = 0f,
-        val safetyNorm: Float = 0f,
-        val beamNorm: Float = 0f,
-        val rolloutNorm: Float = 0f,
-        val memoryNorm: Float = 0f,
-        val ruleNorm: Float = 0f,
+        val qNorm: Float = 0f, val nnNorm: Float = 0f,
+        val foodNorm: Float = 0f, val safetyNorm: Float = 0f,
+        val beamNorm: Float = 0f, val rolloutNorm: Float = 0f,
+        val memoryNorm: Float = 0f, val ruleNorm: Float = 0f,
         val eatAfterNorm: Float = 0f,
-        val afterRegion: Int = 0,
-        val afterTailOk: Boolean = false,
-        val afterSafeMoves: Int = 0
+        val afterRegion: Int = 0, val afterTailOk: Boolean = false, val afterSafeMoves: Int = 0
     )
 
     private data class Snapshot(
@@ -99,7 +95,6 @@ class SnakeView @JvmOverloads constructor(
         val agentId: Int, val generationToken: Long, val populationEpoch: Long
     )
 
-    // ★ V8：训练趋势快照
     private data class TrainingTrendSnapshot(
         val generation: Int, val bestScore: Int,
         val averageScore: Float, val averageSteps: Float, val averageFood: Float,
@@ -108,7 +103,6 @@ class SnakeView @JvmOverloads constructor(
         val averageSnakeLength: Float
     )
 
-    // ★ V8：自动调参事件
     private class AutoTuneEvent(
         val generation: Int, val diagnosis: String, val paramName: String,
         val oldValue: Float, val newValue: Float, val reason: String,
@@ -168,11 +162,19 @@ class SnakeView @JvmOverloads constructor(
     @Volatile private var evolving = false
     @Volatile private var generationTransitioning = false
 
-    @Volatile private var beamCalls = 0L
-    @Volatile private var beamSuccess = 0L
-    @Volatile private var beamSelected = 0L
-    @Volatile private var beamTotalNodes = 0L
-    @Volatile private var beamBestScore = 0f
+    // ★ 修复：Beam 统计改为线程安全 AtomicLong
+    private val beamCalls = AtomicLong(0)
+    private val beamSuccess = AtomicLong(0)
+    private val beamSelected = AtomicLong(0)
+    private val beamTotalNodes = AtomicLong(0)
+    private val beamBestScore = AtomicReference(0f)
+    // ★ 新增：Beam 诊断计数
+    private val beamSkippedByLength = AtomicLong(0)
+    private val beamNullResult = AtomicLong(0)
+    private val beamInvalidResult = AtomicLong(0)
+    private val beamEligibleCalls = AtomicLong(0)
+    // ★ 新增：Replay 更新计数
+    private val replayUpdateCount = AtomicLong(0)
 
     @Volatile private var activeAgents = 0
     @Volatile private var batchCompletedAgents = 0
@@ -201,6 +203,17 @@ class SnakeView @JvmOverloads constructor(
     @Volatile private var actualRolloutWeight = ROLLOUT_BASE_WEIGHT
     @Volatile private var actualMemoryWeight = MEMORY_BASE_WEIGHT
 
+    // ★ 新增：训练权重统计（8 线程共享，synchronized 保护）
+    private val weightStatsLock = Any()
+    @Volatile private var weightSampleCount = 0L
+    private var weightQSum = 0.0
+    private var weightNNSum = 0.0
+    private var weightFoodSum = 0.0
+    private var weightSafetySum = 0.0
+    private var weightBeamSum = 0.0
+    private var weightRolloutSum = 0.0
+    private var weightMemorySum = 0.0
+
     @Volatile private var decisionQCount = 0L
     @Volatile private var decisionNNCount = 0L
     @Volatile private var decisionFoodCount = 0L
@@ -220,7 +233,6 @@ class SnakeView @JvmOverloads constructor(
         java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
     )
 
-    // ★ V8：自动调参状态
     private val autoTuneSnapshots = ArrayDeque<TrainingTrendSnapshot>()
     private val AUTO_TUNE_WINDOW_MAX = 30
     private val genScoreList = ArrayList<Int>(POPULATION_SIZE)
@@ -610,8 +622,8 @@ class SnakeView @JvmOverloads constructor(
         const val BEAM_LONG_LENGTH = 35
 
         const val EVOLUTION_BATCH_SIZE = 16
-        const val TRAINING_STATE_VERSION = 6
-        const val TRAINING_FILE_NAME = "snake_training_v6.dat"
+        const val TRAINING_STATE_VERSION = 7
+        const val TRAINING_FILE_NAME = "snake_training_v7.dat"
 
         const val HUNGER_SAFE = 0.35f
         const val HUNGER_WARNING = 0.60f
@@ -734,6 +746,7 @@ class SnakeView @JvmOverloads constructor(
             snap = picked
         }
         for (e in snap) evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
+        replayUpdateCount.addAndGet(REPLAY_BATCH_SIZE.toLong())
     }
 
     private fun evoUpdate(state: Int, action: Int, reward: Float, nextState: Int, nextMask: Int, terminal: Boolean) {
@@ -2299,7 +2312,7 @@ class SnakeView @JvmOverloads constructor(
         c.drawText("失败记忆: ${v3Memory.size()} 条", infoX, top + 118f, text)
         c.drawText("教训触发: ${v3LessonFires} 次", infoX, top + 136f, text)
         c.drawText("循环打断: ${v3LoopHits} 次", infoX, top + 154f, text)
-        c.drawText("Beam 命中: $beamSelected/$beamCalls", infoX, top + 172f, text)
+        c.drawText("Beam 命中: ${beamSelected.get()}/${beamCalls.get()}", infoX, top + 172f, text)
         text.textSize = 12f
         if (v3LessonFlash > 0.01f) {
             val a = (v3LessonFlash * 255f).toInt().coerceIn(0, 255)
@@ -2430,8 +2443,8 @@ class SnakeView @JvmOverloads constructor(
             "ε" to (if (v2EpsilonCurrent <= EPSILON_MIN + 0.0005f) "%.3f(MIN)".format(v2EpsilonCurrent) else "%.3f".format(v2EpsilonCurrent)),
             "学习步" to "$v2LearningSteps",
             "回放" to "${replayBuffer.size}",
-            "Beam命中" to "$beamSelected/$beamCalls",
-            "Beam有效" to "$beamSuccess/$beamCalls"
+            "Beam命中" to "${beamSelected.get()}/${beamCalls.get()}",
+            "Beam有效" to "${beamSuccess.get()}/${beamCalls.get()}"
         )
         val mW = (W - 5 * pad) / 4f; val mH = W * 0.105f
         for (mi in metrics.indices) {
@@ -2446,7 +2459,6 @@ class SnakeView @JvmOverloads constructor(
         }
         y += 3 * mH + 2 * pad * 0.5f + pad
 
-        // ★ V8：训练趋势 + 自动调参面板
         val tuneH = W * 0.28f
         panel.color = Color.rgb(18, 24, 34)
         c.drawRoundRect(pad, y, W - pad, y + tuneH, pad * 0.6f, pad * 0.6f, panel)
@@ -2581,7 +2593,7 @@ class SnakeView @JvmOverloads constructor(
             c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW * qCovR, meterY + 19f, 3f, 3f, barPaint)
             meterY += 24f
             text.color = Color.rgb(100, 220, 255)
-            c.drawText("回放 ${replayBuffer.size}/$REPLAY_CAPACITY", left + 16f, meterY + 8f, text)
+            c.drawText("回放 ${replayBuffer.size}/$REPLAY_CAPACITY   更新次数 ${replayUpdateCount.get()}", left + 16f, meterY + 8f, text)
             barPaint.color = Color.rgb(30, 30, 40)
             c.drawRoundRect(left + 16f, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
             barPaint.color = Color.rgb(100, 200, 255)
@@ -2689,13 +2701,17 @@ class SnakeView @JvmOverloads constructor(
                 left + 16f, infoY + 18f, text)
             c.drawText("Q ${"%.2f".format(actualQWeight)}   NN ${"%.2f".format(actualNNWeight)}   Food ${"%.2f".format(actualFoodWeight)}   Safety ${"%.2f".format(actualSafetyWeight)}   Beam ${"%.2f".format(actualBeamWeight)}",
                 left + 16f, infoY + 36f, text)
-            c.drawText("回放${replayBuffer.size}/$REPLAY_CAPACITY   ε${"%.2f".format(v2EpsilonCurrent)}   步${v2LearningSteps}",
+            c.drawText("回放${replayBuffer.size}/$REPLAY_CAPACITY   更新${replayUpdateCount.get()}   ε${"%.2f".format(v2EpsilonCurrent)}   步${v2LearningSteps}",
                 left + 16f, infoY + 54f, text)
-            val avgBeamNodes = if (beamCalls > 0) beamTotalNodes.toFloat() / beamCalls else 0f
-            c.drawText("Beam 命中$beamSelected 调用$beamCalls 有效$beamSuccess 节点$beamTotalNodes 均$avgBeamNodes",
+            val avgBeamNodes = if (beamCalls.get() > 0) beamTotalNodes.get().toFloat() / beamCalls.get().toFloat() else 0f
+            c.drawText("Beam 调用${beamCalls.get()} 有效${beamSuccess.get()} 采用${beamSelected.get()} 节点${beamTotalNodes.get()} 均${"%.1f".format(avgBeamNodes)}",
                 left + 16f, infoY + 72f, text)
+            val beamValidRate = if (beamCalls.get() > 0L) beamSuccess.get().toFloat() / beamCalls.get().toFloat() else 0f
+            val beamSelectRate = if (beamCalls.get() > 0L) beamSelected.get().toFloat() / beamCalls.get().toFloat() else 0f
+            c.drawText("Beam有效率 ${"%.1f".format(beamValidRate * 100)}%   采用率 ${"%.1f".format(beamSelectRate * 100)}%   跳过${beamSkippedByLength.get()} 空${beamNullResult.get()} 无效${beamInvalidResult.get()}",
+                left + 16f, infoY + 90f, text)
             text.color = Color.rgb(100, 220, 255); text.isFakeBoldText = true
-            c.drawText("趋势: $trendState  原因: $diagnosisCause  AutoTune: $lastAutoTuneText", left + 16f, infoY + 92f, text)
+            c.drawText("趋势: $trendState  原因: $diagnosisCause  AutoTune: $lastAutoTuneText", left + 16f, infoY + 108f, text)
             text.isFakeBoldText = false; text.color = Color.WHITE
         } else {
             c.drawText("局数 $totalGames   近50均分 ${"%.0f".format(avg)}   最佳 $bestRecentScore", left + 16f, infoY, text)
@@ -2862,7 +2878,7 @@ class SnakeView @JvmOverloads constructor(
             if (best.ate || (best.foodDist in 0..3)) foodSelectedCount++
             if (best.ate) foodCandidateCount++
         } catch (_: Throwable) {}
-        if (beamValid && best.d == beamMove) beamSelected++
+        if (beamValid && best.d == beamMove) beamSelected.incrementAndGet()
 
         val action = dirs.indexOfFirst { it == best.d }.coerceAtLeast(0)
         lastV2State = state; lastV2Action = action
@@ -3015,11 +3031,12 @@ class SnakeView @JvmOverloads constructor(
             afterRegion = afterRegion, afterTailOk = afterTail, afterSafeMoves = afterSafe)
     }
 
+    /** 全局主蛇 Beam 搜索（仅用于 chooseMove，不影响训练线程） */
     private fun beamSearchBestMove(): Pair<P, Float>? {
         if (!BEAM_ENABLED) return null
         if (snake.isEmpty()) return null
         if (snake.size < BEAM_MIN_LENGTH) return null
-        beamCalls++
+        beamCalls.incrementAndGet()
         try {
             val depth = when {
                 snake.size >= 50 -> BEAM_DEPTH_LONG
@@ -3059,14 +3076,107 @@ class SnakeView @JvmOverloads constructor(
             }
             if (beam.isEmpty()) return null
             val best = beam.filter { !it.dead }.maxByOrNull { it.score } ?: beam.maxByOrNull { it.score } ?: return null
-            beamSuccess++
-            beamTotalNodes += nodesExpanded
-            beamBestScore = best.score
+            beamSuccess.incrementAndGet()
+            beamTotalNodes.addAndGet(nodesExpanded.toLong())
+            beamBestScore.set(best.score)
             return Pair(best.firstAction, best.score)
         } catch (t: Throwable) {
             Log.e(LOG_TAG, "Beam search failed", t)
             return null
         }
+    }
+
+    /**
+     * ★ 修复：训练专用 Beam 搜索。
+     * 使用训练线程自己的 gSnake / gDir / gFood，而不是全局 snake / dir / food。
+     */
+    private fun beamSearchBestMoveForTrainingState(
+        sourceBody: ArrayDeque<P>,
+        sourceDir: P,
+        targetFood: P
+    ): Pair<P, Float>? {
+        if (!BEAM_ENABLED) return null
+        if (sourceBody.isEmpty()) return null
+        if (sourceBody.size < BEAM_MIN_LENGTH) return null
+        beamEligibleCalls.incrementAndGet()
+        beamCalls.incrementAndGet()
+        try {
+            val depth = when {
+                sourceBody.size >= 50 -> BEAM_DEPTH_LONG
+                sourceBody.size >= BEAM_LONG_LENGTH -> BEAM_DEPTH_MID
+                else -> BEAM_DEPTH_SHORT
+            }.coerceAtMost(BEAM_DEPTH_LONG)
+            val width = if (sourceBody.size >= BEAM_LONG_LENGTH) BEAM_WIDTH_MID else BEAM_WIDTH_SHORT
+            val maxNodes = BEAM_MAX_NODES
+
+            val initialMoves = dirs
+                .map { gEvaluateForBeam(sourceBody, sourceDir, targetFood, it) }
+                .filter { it.legal }
+                .sortedByDescending { it.score }
+                .take(width)
+            if (initialMoves.isEmpty()) return null
+
+            var beam = ArrayList<BeamNode>()
+            var nodesExpanded = 0
+            val startHeads = IntArray(4) { -1 }
+            for (candidate in initialMoves) {
+                val node = simulateBeamMove(ArrayDeque(sourceBody), sourceDir, targetFood, candidate.d, candidate.d, startHeads)
+                if (node != null) { beam.add(node); nodesExpanded++ }
+            }
+            if (beam.isEmpty()) return null
+
+            var depthStep = 0
+            while (depthStep < depth - 1 && beam.isNotEmpty()) {
+                val next = ArrayList<BeamNode>()
+                var stop = false
+                for (node in beam) {
+                    if (node.dead) continue
+                    if (stop) break
+                    val moves = dirs.filter { !isReverse(it, node.dir) }
+                        .mapNotNull { mv -> simulateBeamMove(node.body, node.dir, node.food, mv, node.firstAction, node.recentHeadCells) }
+                        .sortedByDescending { it.score }.take(width)
+                    next.addAll(moves)
+                    nodesExpanded += moves.size
+                    if (nodesExpanded >= maxNodes) stop = true
+                }
+                if (next.isEmpty()) { beam = ArrayList(); break }
+                beam = ArrayList(next.sortedByDescending { it.score }.take(width))
+                depthStep++
+            }
+            if (beam.isEmpty()) return null
+            val best = beam.filter { !it.dead }.maxByOrNull { it.score } ?: beam.maxByOrNull { it.score } ?: return null
+            beamSuccess.incrementAndGet()
+            beamTotalNodes.addAndGet(nodesExpanded.toLong())
+            beamBestScore.set(best.score)
+            return Pair(best.firstAction, best.score)
+        } catch (t: Throwable) {
+            Log.e(LOG_TAG, "Training Beam search failed", t)
+            return null
+        }
+    }
+
+    /** ★ 新增：训练专用 Beam 候选评估（不读取全局 snake / food） */
+    private fun gEvaluateForBeam(body: ArrayDeque<P>, heading: P, target: P, move: P): Candidate {
+        if (body.isEmpty()) return Candidate(move, -1e9f, "空蛇", false)
+        if (isReverse(move, heading)) return Candidate(move, -1e9f, "反向", false)
+        val head = body.first()
+        val nextHead = P(head.x + move.x, head.y + move.y)
+        if (!inside(nextHead)) return Candidate(move, -1e9f, "越界", false)
+        val ate = nextHead == target
+        val hitBody = body.contains(nextHead)
+        if (hitBody && !(nextHead == body.last() && !ate)) return Candidate(move, -1e9f, "撞身", false)
+        val sim = simulateForBody(body, move, target)
+        if (sim.body.isEmpty()) return Candidate(move, -1e9f, "模拟失败", false)
+        val region = freeRegion(sim.body)
+        val tailOk = tailReachable(sim.body)
+        val mobility = countSafeMovesFor(sim.body, move, target)
+        val foodDist = distance(sim.body.first(), target, sim.body, true)
+        val ratio = region.toFloat() / max(1, sim.body.size)
+        val safety = mobility.toFloat() / 4f * 120f + if (tailOk) 100f else -100f + ratio * 40f
+        val foodScore = if (ate) 300f else if (foodDist >= 0) max(0f, 120f - foodDist * 8f) else -180f
+        val score = safety + foodScore
+        return Candidate(d = move, score = score, reason = "Beam训练候选", legal = true,
+            region = region, mobility = mobility, tailOk = tailOk, foodDist = foodDist, ate = ate)
     }
 
     private fun simulateBeamMove(
@@ -3133,6 +3243,41 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * ★ 修复：训练权重实时同步到 UI。
+     * 使用滚动平均，避免 8 线程互相覆盖导致 UI 显示瞬时值。
+     */
+    private fun recordTrainingWeights(q: Float, nn: Float, food: Float, safety: Float, beam: Float, rollout: Float, memory: Float) {
+        synchronized(weightStatsLock) {
+            weightSampleCount++
+            weightQSum += q.toDouble()
+            weightNNSum += nn.toDouble()
+            weightFoodSum += food.toDouble()
+            weightSafetySum += safety.toDouble()
+            weightBeamSum += beam.toDouble()
+            weightRolloutSum += rollout.toDouble()
+            weightMemorySum += memory.toDouble()
+            if (weightSampleCount >= 1024L) {
+                weightQSum *= 0.5
+                weightNNSum *= 0.5
+                weightFoodSum *= 0.5
+                weightSafetySum *= 0.5
+                weightBeamSum *= 0.5
+                weightRolloutSum *= 0.5
+                weightMemorySum *= 0.5
+                weightSampleCount /= 2L
+            }
+            val n = weightSampleCount.coerceAtLeast(1L).toDouble()
+            actualQWeight = (weightQSum / n).toFloat()
+            actualNNWeight = (weightNNSum / n).toFloat()
+            actualFoodWeight = (weightFoodSum / n).toFloat()
+            actualSafetyWeight = (weightSafetySum / n).toFloat()
+            actualBeamWeight = (weightBeamSum / n).toFloat()
+            actualRolloutWeight = (weightRolloutSum / n).toFloat()
+            actualMemoryWeight = (weightMemorySum / n).toFloat()
+        }
+    }
+
     private fun recordGenerationMetrics(genBest: Int) {
         val scoreList: List<Int>; val stepList: List<Int>; val foodList: List<Int>
         synchronized(sharedLock) {
@@ -3150,7 +3295,7 @@ class SnakeView @JvmOverloads constructor(
             averageScore = avgScore, averageSteps = avgSteps, averageFood = avgFood,
             trapDeaths = deathTrap, hungerDeaths = deathHunger,
             wallDeaths = deathWall, selfDeaths = deathSelf,
-            beamCalls = beamCalls, beamSelected = beamSelected,
+            beamCalls = beamCalls.get(), beamSelected = beamSelected.get(),
             foodSelected = foodSelectedCount, averageSnakeLength = 0f
         )
         synchronized(autoTuneSnapshots) {
@@ -3286,8 +3431,9 @@ class SnakeView @JvmOverloads constructor(
         val prevSteps = windowAvgSteps(10)
         val recentFood = windowAvgFood(5)
 
-        if (beamCalls == 0L && generation > 5) return "BEAM_NOT_ACTIVE"
-        if (beamCalls > 500L && beamSelected.toFloat() / beamCalls.toFloat() < 0.02f) return "BEAM_TOO_WEAK"
+        // ★ 修复：Beam 诊断使用 beamEligibleCalls，避免误判
+        if (beamEligibleCalls.get() > 100L && beamCalls.get() == 0L) return "BEAM_NOT_ACTIVE"
+        if (beamCalls.get() > 500L && beamSelected.get().toFloat() / beamCalls.get().toFloat() < 0.02f) return "BEAM_TOO_WEAK"
         if (hungerDelta > 3 || recentFood < 3f) return "FOOD_PROBLEM"
         if (trapDelta > 5 || (recentSteps < prevSteps * 0.85f && recentSteps > 0)) return "TRAP_PROBLEM"
         val wallSelfRatio = (deathWall + deathSelf).toFloat() /
@@ -3568,6 +3714,9 @@ class SnakeView @JvmOverloads constructor(
             val qW = weights[0]; val nnW = weights[1]; val foodW = weights[2]
             val safetyW = weights[3]; val beamW = weights[4]; val rollW = weights[5]; val memW = weights[6]
 
+            // ★ 修复：训练线程权重实时同步到 UI（滚动平均）
+            recordTrainingWeights(qW, nnW, foodW, safetyW, beamW, rollW, memW)
+
             val v3TrainCtx: Long = run {
                 val h0 = gSnake.first()
                 val foodDxBucket = ((gFood.x - h0.x) / 3).coerceIn(-5, 5)
@@ -3590,9 +3739,26 @@ class SnakeView @JvmOverloads constructor(
             val rSteps = when { gSnake.size > 60 -> 4; gSnake.size > 25 -> 3; else -> 2 }
             rolloutActive = rSteps > 0; rolloutSteps = rSteps
 
-            val beamResult = if (BEAM_ENABLED && gSnake.size >= BEAM_MIN_LENGTH) beamSearchBestMove() else null
+            // ★ 修复：Beam 使用训练专用方法，传入 gSnake / gDir / gFood
+            val beamResult = if (BEAM_ENABLED && gSnake.size >= BEAM_MIN_LENGTH) {
+                val result = beamSearchBestMoveForTrainingState(
+                    sourceBody = gSnake,
+                    sourceDir = gDir,
+                    targetFood = gFood
+                )
+                if (result == null) {
+                    beamNullResult.incrementAndGet()
+                }
+                result
+            } else {
+                if (BEAM_ENABLED) beamSkippedByLength.incrementAndGet()
+                null
+            }
             val beamMove = beamResult?.first
             val beamValid = beamMove != null && legal.any { it.d == beamMove }
+            if (beamMove != null && !beamValid) {
+                beamInvalidResult.incrementAndGet()
+            }
 
             var best = legal.first(); var bestValue = -Float.MAX_VALUE
             for (candidate in legal) {
@@ -3624,7 +3790,7 @@ class SnakeView @JvmOverloads constructor(
                 if (best.ate || (best.foodDist in 0..3)) foodSelectedCount++
                 if (best.ate) foodCandidateCount++
             } catch (_: Throwable) {}
-            if (beamValid && best.d == beamMove) beamSelected++
+            if (beamValid && best.d == beamMove) beamSelected.incrementAndGet()
             return best
         }
 
