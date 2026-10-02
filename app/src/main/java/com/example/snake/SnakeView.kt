@@ -2687,21 +2687,23 @@ class SnakeView @JvmOverloads constructor(
                 var depthStep = 0
                 while (depthStep < depth - 1 && beam.isNotEmpty()) {
                     val next = ArrayList<BeamNode>()
-                    var stop = false
+                    var limitReached = false
+
                     for (node in beam) {
-                        if (node.dead) continue
-                        if (stop) break
-                        val moves = dirs
-                            .filter { !gIsReverse(it, node.dir) }
-                            .mapNotNull { mv ->
-                                simulateBeamMove(node.body, node.dir, node.food, mv, node.firstAction, node.recentHeadCells)
+                        if (node.dead || limitReached) continue
+                        val validMoves = dirs.filter { !gIsReverse(it, node.dir) }
+                        val moves = ArrayList<BeamNode>()
+                        for (mv in validMoves) {
+                            val simulated = simulateBeamMove(node.body, node.dir, node.food, mv, node.firstAction, node.recentHeadCells)
+                            if (simulated != null) {
+                                moves.add(simulated)
                             }
-                            .sortedByDescending { it.score }
-                            .take(width)
-                        next.addAll(moves)
-                        nodesExpanded += moves.size
+                        }
+                        val topMoves = moves.sortedByDescending { it.score }.take(width)
+                        next.addAll(topMoves)
+                        nodesExpanded += topMoves.size
                         if (nodesExpanded >= BEAM_MAX_NODES) {
-                            stop = true
+                            limitReached = true
                         }
                     }
                     if (next.isEmpty()) {
@@ -2769,7 +2771,12 @@ class SnakeView @JvmOverloads constructor(
             var score = 0f
             score += BEAM_SURVIVAL_WEIGHT
             score += ratio * BEAM_SPACE_WEIGHT
-            if (tailOk) score += BEAM_TAIL_WEIGHT else if (body.size > 8) score -= BEAM_TAIL_WEIGHT * 1.5f
+
+            if (tailOk) {
+                score += BEAM_TAIL_WEIGHT
+            } else if (body.size > 8) {
+                score -= BEAM_TAIL_WEIGHT * 1.5f
+            }
 
             if (ate) {
                 score += 12f * BEAM_FOOD_WEIGHT
@@ -2786,8 +2793,13 @@ class SnakeView @JvmOverloads constructor(
 
             score += safeMoves * 0.5f
             score -= danger * BEAM_DANGER_WEIGHT
-            if (ratio < 0.7f && body.size > 8) score -= 8f
-            if (!tailOk && body.size > 12) score -= 7f
+
+            if (ratio < 0.7f && body.size > 8) {
+                score -= 8f
+            }
+            if (!tailOk && body.size > 12) {
+                score -= 7f
+            }
 
             val nextCell = nextHead.y * cols + nextHead.x
             var loopHits = 0
@@ -3137,8 +3149,7 @@ class SnakeView @JvmOverloads constructor(
             for (i in 0 until total) parDir[i] = null
             var head = 0; var tail = 0; que[tail++] = si; var found = false
             while (head < tail) {
-                val curr = que[head++]; if (curr == ti) { found = true; break }
-                val cx = curr % cols; val cy = curr / cols
+                val curr = que[head++]; val cx = curr % cols; val cy = curr / cols
                 if (cy > 0) { val ni = curr - cols; if (!vis[ni]) { vis[ni] = true; par[ni] = curr; parDir[ni] = P(0, -1); if (tail < total) que[tail++] = ni } }
                 if (cy < rows - 1) { val ni = curr + cols; if (!vis[ni]) { vis[ni] = true; par[ni] = curr; parDir[ni] = P(0, 1); if (tail < total) que[tail++] = ni } }
                 if (cx > 0) { val ni = curr - 1; if (!vis[ni]) { vis[ni] = true; par[ni] = curr; parDir[ni] = P(-1, 0); if (tail < total) que[tail++] = ni } }
