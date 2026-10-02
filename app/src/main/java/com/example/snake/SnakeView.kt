@@ -89,6 +89,13 @@ class SnakeView @JvmOverloads constructor(
         val recentHeadCells: IntArray
     )
 
+    /** ★ AgentTask：Agent 与 generationToken / populationEpoch 严格绑定 */
+    private data class AgentTask(
+        val agentId: Int,
+        val generationToken: Long,
+        val populationEpoch: Long
+    )
+
     private val snake = ArrayDeque<P>()
     private val queue = ArrayDeque<P>()
     private val dirs = listOf(P(0, -1), P(0, 1), P(-1, 0), P(1, 0))
@@ -154,6 +161,24 @@ class SnakeView @JvmOverloads constructor(
     private val batchScores = FloatArray(POPULATION_SIZE) { Float.NaN }
     private val batchBrains = arrayOfNulls<TinyBrain>(POPULATION_SIZE)
 
+    // ★ 调度统计
+    @Volatile private var agentClaimCount = 0L
+    @Volatile private var agentSubmitCount = 0L
+    @Volatile private var staleResultCount = 0L
+    @Volatile private var duplicateCompletionCount = 0L
+    @Volatile private var schedulerIdleCount = 0L
+    @Volatile private var generationTailWaitCount = 0L
+
+    // ★ AI 决策来源统计（用于 HUD 判断哪个模块在主导）
+    @Volatile private var qSelectCount = 0L
+    @Volatile private var nnSelectCount = 0L
+    @Volatile private var ruleSelectCount = 0L
+    @Volatile private var beamSelectCount = 0L
+    @Volatile private var rolloutSelectCount = 0L
+    @Volatile private var memoryOverrideCount = 0L
+    @Volatile private var deadEndRejectCount = 0L
+    @Volatile private var hardSafetyRejectCount = 0L
+
     private val visitedStates = java.util.Collections.newSetFromMap(
         java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
     )
@@ -164,6 +189,12 @@ class SnakeView @JvmOverloads constructor(
         @Volatile var score = 0
         @Volatile var steps = 0
         @Volatile var phase = "空闲"
+        // ★ 新增调度诊断字段
+        @Volatile var completedCount = 0
+        @Volatile var waitReason = ""
+        @Volatile var waitSinceMs = 0L
+        @Volatile var lastStartMs = 0L
+        @Volatile var lastFinishMs = 0L
     }
     private val threadStatus = Array(8) { ThreadStatus() }
 
@@ -363,6 +394,7 @@ class SnakeView @JvmOverloads constructor(
                 Log.d(LOG_TAG, "L5 TRIGGERED! Cause: 防止重蹈覆辙")
                 v3LayerActive = 5; v3LayerWhy = "L5反事实：阻止重蹈覆辙"
                 v3LessonFires++
+                memoryOverrideCount++
                 return alt.d
             }
         }
@@ -375,6 +407,7 @@ class SnakeView @JvmOverloads constructor(
                 Log.d(LOG_TAG, "L6 TRIGGERED! Cause: 打破循环")
                 v3LayerActive = 6; v3LayerWhy = "L6基因：循环厌恶接管"
                 v3LoopHits++
+                memoryOverrideCount++
                 return alt.d
             }
         }
@@ -445,6 +478,7 @@ class SnakeView @JvmOverloads constructor(
     private var deathWall = 0
     private var deathSelf = 0
     private var deathTrap = 0
+    private var deathHunger = 0   // ★ 新增单独统计 HUNGER
     private var totalGames = 0
     private var lastLearnAction = "初始化"
     private val recentScores = ArrayDeque<Int>()
@@ -460,11 +494,13 @@ class SnakeView @JvmOverloads constructor(
         const val V2_HUNGER = 5
         const val V2_LENGTH = 4
         const val V2_TAIL = 2
-        const val V2_HEADING = 1
+        // ★★★ 关键修复：heading 实际有 4 种朝向（0..3），原来是 1，导致大量状态碰撞 ★★★
+        const val V2_HEADING = 4
         const val V2_STATE_COUNT = V2_FOOD_DIR * V2_DANGER * V2_MOBILITY * V2_SPACE * V2_HUNGER * V2_LENGTH * V2_TAIL * V2_HEADING
+        // = 4 * 16 * 5 * 4 * 5 * 4 * 2 * 4 = 204800
         const val V2_ACTIONS = 4
         const val V2_Q_SIZE = V2_STATE_COUNT * V2_ACTIONS
-        const val V2_LOCKS = 64
+        const val V2_LOCKS = 256
         const val GAMMA = 0.94f
         const val ALPHA_FAST = 0.18f
         const val ALPHA_NORMAL = 0.055f
@@ -501,8 +537,8 @@ class SnakeView @JvmOverloads constructor(
         const val EVOLUTION_BATCH_SIZE = 16
         const val MIN_VALID_EVOLUTION_SAMPLES = 8
         const val MIN_EVOLUTION_INTERVAL_MS = 1500L
-        const val TRAINING_STATE_VERSION = 2
-        const val TRAINING_FILE_NAME = "snake_training_v2.dat"
+        const val TRAINING_STATE_VERSION = 3   // ★ 版本升级（状态空间变了）
+        const val TRAINING_FILE_NAME = "snake_training_v3.dat"   // ★ 新文件名，避免旧模型不兼容
     }
 
     private val qV2 = FloatArray(V2_Q_SIZE)
@@ -543,9 +579,9 @@ class SnakeView @JvmOverloads constructor(
                 val v = qV2[qIndex(state, a)]
                 if (v > bestQ) { bestQ = v; bestAction = a }
             }
-            if (bestAction < 0) return 0f
-            synchronized(targetLock) { return qTarget[qIndex(state, bestAction)] }
         }
+        if (bestAction < 0) return 0f
+        synchronized(targetLock) { return qTarget[qIndex(state, bestAction)] }
     }
 
     private data class Experience(
@@ -555,6 +591,7 @@ class SnakeView @JvmOverloads constructor(
     )
     private val replayBuffer = ArrayList<Experience>(5000)
     private val REPLAY_CAPACITY = 5000
+    private var replayStepCounter = 0   // ★ 降频 replay
 
     private fun qUpdate(state: Int, action: Int, reward: Float, nextState: Int, nextMask: Int, terminal: Boolean) {
         if (state !in 0 until V2_STATE_COUNT || action !in 0 until V2_ACTIONS) return
@@ -577,17 +614,22 @@ class SnakeView @JvmOverloads constructor(
             qV2[idx] = updated.coerceIn(-10f, 10f)
             nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
         }
-        synchronized(replayBuffer) {
-            if (replayBuffer.size > 10) repeat(2) {
-                val e = replayBuffer[Random.nextInt(replayBuffer.size)]
-                evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
+        // ★ Replay 降频：每 6 步 replay 一次，每次 6 条，避免震荡
+        replayStepCounter++
+        if (replayStepCounter >= 6) {
+            replayStepCounter = 0
+            synchronized(replayBuffer) {
+                if (replayBuffer.size > 16) repeat(6) {
+                    val e = replayBuffer[Random.nextInt(replayBuffer.size)]
+                    evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
+                }
             }
         }
         v2LearningSteps++
         val cnt = targetUpdateCounter.incrementAndGet()
-        if (cnt >= 50 && targetUpdateCounter.compareAndSet(cnt, 0)) {
+        if (cnt >= 200 && targetUpdateCounter.compareAndSet(cnt, 0)) {
             synchronized(targetLock) {
-                for (i in qTarget.indices) qTarget[i] = qTarget[i] + 0.01f * (qV2[i] - qTarget[i])
+                for (i in qTarget.indices) qTarget[i] = qTarget[i] + 0.02f * (qV2[i] - qTarget[i])
             }
         }
     }
@@ -956,6 +998,7 @@ class SnakeView @JvmOverloads constructor(
         deathWall = prefs.getInt("stat_wall", 0)
         deathSelf = prefs.getInt("stat_self", 0)
         deathTrap = prefs.getInt("stat_trap", 0)
+        deathHunger = prefs.getInt("stat_hunger", 0)
         totalGames = prefs.getInt("stat_total", 0)
 
         bgm = BgmPlayer()
@@ -1002,6 +1045,127 @@ class SnakeView @JvmOverloads constructor(
         startWatchDog()
     }
 
+    /** ★ 统一领取 Agent：所有线程都必须走这个入口 */
+    private fun claimNextAgent(threadIdx: Int): AgentTask? {
+        synchronized(sharedLock) {
+            if (!trainActive) return null
+            if (evolving || generationTransitioning) return null
+            if (currentAgentIndex >= POPULATION_SIZE) return null
+
+            val agentId = currentAgentIndex
+            // 防御：防止重复领取同一 Agent
+            if (agentCompleted[agentId]) {
+                Log.e(LOG_TAG, "INVALID_AGENT_ASSIGNMENT agent=$agentId already completed")
+                return null
+            }
+            currentAgentIndex++
+
+            val task = AgentTask(
+                agentId = agentId,
+                generationToken = generationToken,
+                populationEpoch = populationEpoch
+            )
+            agentClaimCount++
+
+            threadStatus[threadIdx].agentId = agentId
+            threadStatus[threadIdx].alive = true
+            threadStatus[threadIdx].phase = "运行"
+            threadStatus[threadIdx].waitReason = ""
+            threadStatus[threadIdx].lastStartMs = System.currentTimeMillis()
+            activeAgents++
+
+            Log.d(LOG_TAG, "AGENT_CLAIM gen=$generation agent=$agentId thread=$threadIdx assigned=$currentAgentIndex/$POPULATION_SIZE completed=$completedAgents/$POPULATION_SIZE")
+            return task
+        }
+    }
+
+    /** ★ 统一提交 Agent 结果：负责 generationToken / populationEpoch 校验 + 去重 */
+    private fun submitAgentResult(task: AgentTask, threadIdx: Int, scoreValue: Float): Boolean {
+        var shouldEvolve = false
+        var accepted = false
+        synchronized(sharedLock) {
+            activeAgents = max(0, activeAgents - 1)
+
+            // 旧 Token / 旧 epoch → 丢弃结果但不终止线程
+            if (task.generationToken != generationToken || task.populationEpoch != populationEpoch) {
+                staleResultCount++
+                Log.w(LOG_TAG, "STALE_AGENT_RESULT gen=$generation agent=${task.agentId} taskToken=${task.generationToken} curToken=$generationToken taskEpoch=${task.populationEpoch} curEpoch=$populationEpoch")
+                return false
+            }
+
+            // 重复提交拒绝
+            if (task.agentId !in 0 until POPULATION_SIZE || agentCompleted[task.agentId]) {
+                duplicateCompletionCount++
+                Log.w(LOG_TAG, "DUPLICATE_AGENT_RESULT gen=$generation agent=${task.agentId} alreadyCompleted=true")
+                return false
+            }
+
+            agentCompleted[task.agentId] = true
+            completedAgentIds.add(task.agentId)
+            completedAgents++
+            uniqueCompletedAgents++
+            batchCompletedAgents++
+            agentSubmitCount++
+
+            threadStatus[threadIdx].completedCount++
+            threadStatus[threadIdx].agentId = -1
+            threadStatus[threadIdx].phase = "空闲"
+            threadStatus[threadIdx].lastFinishMs = System.currentTimeMillis()
+
+            val remainingUnclaimed = POPULATION_SIZE - currentAgentIndex
+            if (remainingUnclaimed == 0 && completedAgents < POPULATION_SIZE) {
+                generationTailWaitCount++
+                threadStatus[threadIdx].waitReason = "尾部等待：全部Agent已领取，仅剩${POPULATION_SIZE - completedAgents}个未完成"
+            }
+
+            Log.d(LOG_TAG, "AGENT_COMPLETE gen=$generation agent=${task.agentId} thread=$threadIdx score=${"%.0f".format(scoreValue)} assigned=$currentAgentIndex/$POPULATION_SIZE completed=$completedAgents/$POPULATION_SIZE active=$activeAgents")
+
+            val generationFinished = currentAgentIndex >= POPULATION_SIZE &&
+                    completedAgents >= POPULATION_SIZE &&
+                    !generationTransitioning
+            if (generationFinished) {
+                generationTransitioning = true
+                shouldEvolve = true
+                Log.d(LOG_TAG, "GEN_COMPLETE gen=$generation assigned=$currentAgentIndex completed=$completedAgents")
+            } else if (currentAgentIndex >= POPULATION_SIZE && completedAgents < POPULATION_SIZE) {
+                Log.d(LOG_TAG, "GEN_WAIT_LAST gen=$generation assigned=$currentAgentIndex completed=$completedAgents active=$activeAgents waiting=${TRAIN_THREADS - activeAgents}")
+            }
+            accepted = true
+        }
+
+        if (shouldEvolve) {
+            synchronized(evolveLock) {
+                // 双重检查，避免重复进化
+                if (trainActive && generationTransitioning) {
+                    try {
+                        evolveNextGeneration()
+                    } catch (t: Throwable) {
+                        Log.e(LOG_TAG, "evolveNextGeneration failed", t)
+                    } finally {
+                        synchronized(sharedLock) {
+                            currentAgentIndex = 0
+                            completedAgents = 0
+                            uniqueCompletedAgents = 0
+                            batchCompletedAgents = 0
+                            completedAgentIds.clear()
+                            java.util.Arrays.fill(agentCompleted, false)
+                            java.util.Arrays.fill(batchScores, Float.NaN)
+                            for (i in 0 until POPULATION_SIZE) batchBrains[i] = null
+
+                            generationToken++
+                            populationEpoch++
+                            generationTransitioning = false
+                        }
+                        Log.d(LOG_TAG, "GEN_NEXT_READY gen=$generation token=$generationToken epoch=$populationEpoch")
+                    }
+                } else {
+                    synchronized(sharedLock) { generationTransitioning = false }
+                }
+            }
+        }
+        return accepted
+    }
+
     private fun startParallelTraining(resetCounters: Boolean = true) {
         synchronized(trainingLifecycleLock) {
             if (trainThreads.any { it.isAlive }) return
@@ -1034,13 +1198,17 @@ class SnakeView @JvmOverloads constructor(
             generationToken++
             populationEpoch++
             generationTransitioning = false
+            activeAgents = 0
 
             for (i in threadStatus.indices) {
                 threadStatus[i].alive = false; threadStatus[i].agentId = -1
                 threadStatus[i].score = 0; threadStatus[i].steps = 0; threadStatus[i].phase = "空闲"
+                threadStatus[i].completedCount = 0; threadStatus[i].waitReason = ""
+                threadStatus[i].waitSinceMs = 0L; threadStatus[i].lastStartMs = 0L
+                threadStatus[i].lastFinishMs = 0L
             }
 
-            Log.d(LOG_TAG, "TRAIN_START gen=$generation token=$generationToken pop=$POPULATION_SIZE th=$TRAIN_THREADS batch=$EVOLUTION_BATCH_SIZE")
+            Log.d(LOG_TAG, "TRAIN_START gen=$generation token=$generationToken epoch=$populationEpoch pop=$POPULATION_SIZE th=$TRAIN_THREADS batch=$EVOLUTION_BATCH_SIZE stateCount=$V2_STATE_COUNT")
 
             for (i in 0 until TRAIN_THREADS) {
                 val threadIdx = i
@@ -1048,132 +1216,86 @@ class SnakeView @JvmOverloads constructor(
                     val game = TrainGame(seed = System.nanoTime() + i * 999983L, runId = myRunId, statusIndex = threadIdx)
                     threadStatus[threadIdx].alive = true
 
+                    // ★ 每次循环都重新 claim，而不是缓存 token
                     while (isTrainingRunActive(myRunId) && !Thread.currentThread().isInterrupted) {
 
-                        // ★ 每次循环重新读取 generationToken
-                        var myGenerationToken = 0L
-                        var agentId = -1
-                        var waitingForEvolution = false
-
-                        synchronized(sharedLock) {
-                            myGenerationToken = generationToken
-
-                            if (evolving || generationTransitioning) {
-                                waitingForEvolution = true
-                            } else if (currentAgentIndex >= POPULATION_SIZE) {
-                                agentId = -1
-                            } else {
-                                agentId = currentAgentIndex
-                                currentAgentIndex++
-                            }
-                        }
-
-                        if (waitingForEvolution) {
+                        // 情况一：进化中 → 等待
+                        val isTransitioning = synchronized(sharedLock) { evolving || generationTransitioning }
+                        if (isTransitioning) {
                             threadStatus[threadIdx].phase = "进化"
+                            threadStatus[threadIdx].waitReason = "等待进化完成"
+                            threadStatus[threadIdx].waitSinceMs = System.currentTimeMillis()
                             Thread.yield()
                             continue
                         }
 
-                        if (agentId < 0) {
-                            threadStatus[threadIdx].phase = "等待"
-                            Thread.yield()
-                            continue
-                        }
-
-                        var invalidAgent = false
-                        synchronized(sharedLock) {
-                            if (agentId !in 0 until POPULATION_SIZE || agentCompleted[agentId]) {
-                                Log.e(LOG_TAG, "INVALID_AGENT_ASSIGNMENT agent=$agentId gen=$generation")
-                                invalidAgent = true
+                        // ★ 统一入口 claim
+                        val task = claimNextAgent(threadIdx)
+                        if (task == null) {
+                            // 区分尾部 vs 无任务
+                            val (curIdx, comp, stillActive) = synchronized(sharedLock) {
+                                Triple(currentAgentIndex, completedAgents, activeAgents)
                             }
-                        }
-                        if (invalidAgent) {
-                            threadStatus[threadIdx].phase = "等待"
+                            if (curIdx >= POPULATION_SIZE && comp < POPULATION_SIZE) {
+                                threadStatus[threadIdx].phase = "尾部等待"
+                                threadStatus[threadIdx].waitReason = "全部Agent已领取，剩${POPULATION_SIZE - comp}个未完成"
+                            } else if (curIdx >= POPULATION_SIZE && comp >= POPULATION_SIZE) {
+                                threadStatus[threadIdx].phase = "切换世代"
+                                threadStatus[threadIdx].waitReason = "等待世代切换"
+                            } else {
+                                threadStatus[threadIdx].phase = "等待"
+                                threadStatus[threadIdx].waitReason = "暂无任务"
+                                schedulerIdleCount++
+                            }
+                            if (threadStatus[threadIdx].waitSinceMs == 0L) {
+                                threadStatus[threadIdx].waitSinceMs = System.currentTimeMillis()
+                            }
+                            if (stillActive == 0 && curIdx < POPULATION_SIZE) {
+                                // 极端情况：所有线程都空闲但有任务可领 → 打印诊断
+                                Log.w(LOG_TAG, "SCHEDULER_ANOMALY idle=$threadIdx curIdx=$curIdx comp=$comp")
+                            }
+                            Thread.yield()
                             continue
                         }
 
-                        // ★ 复制本局 Brain 快照
+                        // 有任务了，清空等待状态
+                        threadStatus[threadIdx].waitSinceMs = 0L
+                        threadStatus[threadIdx].waitReason = ""
+                        threadStatus[threadIdx].phase = "运行"
+                        threadStatus[threadIdx].agentId = task.agentId
+
+                        // ★ 复制本局 Brain 快照（保证整局 Brain 不变）
                         synchronized(sharedLock) {
-                            val src = population[agentId]
-                            batchBrains[agentId] = TinyBrain().also { it.copyFrom(src) }
+                            val src = population[task.agentId]
+                            batchBrains[task.agentId] = TinyBrain().also { it.copyFrom(src) }
                         }
-
-                        threadStatus[threadIdx].agentId = agentId
-                        threadStatus[threadIdx].phase = "训练"
-                        synchronized(sharedLock) { activeAgents++ }
-
-                        Log.d(LOG_TAG, "AGENT_START gen=$generation agent=$agentId thread=$threadIdx")
 
                         var episodeCompleted = false
                         try {
-                            episodeCompleted = game.playOneGame(agentId = agentId, expectedGenerationToken = myGenerationToken)
+                            episodeCompleted = game.playOneGame(task = task)
                         } catch (t: Throwable) {
-                            Log.e(LOG_TAG, "Agent $agentId crashed outside playOneGame", t)
+                            Log.e(LOG_TAG, "AGENT_ERROR gen=$generation agent=${task.agentId} thread=$threadIdx exception=${t.message}", t)
                         }
 
-                        synchronized(sharedLock) { activeAgents = max(0, activeAgents - 1) }
-
-                        if (!episodeCompleted) {
+                        if (episodeCompleted) {
+                            val scoreVal = synchronized(sharedLock) { currentScores.getOrElse(task.agentId) { 0f } }
+                            submitAgentResult(task, threadIdx, scoreVal)
+                        } else {
+                            // 未完成：主动归还 active 计数，避免泄漏
+                            synchronized(sharedLock) {
+                                activeAgents = max(0, activeAgents - 1)
+                                if (threadStatus[threadIdx].agentId == task.agentId) {
+                                    threadStatus[threadIdx].agentId = -1
+                                }
+                            }
                             threadStatus[threadIdx].phase = "等待"
-                            continue
+                            threadStatus[threadIdx].waitReason = "episode未完成（被中断/过期）"
                         }
-
-                        var shouldEvolve = false
-                        synchronized(sharedLock) {
-                            if (generationToken != myGenerationToken) {
-                                Log.w(LOG_TAG, "STALE_AGENT_RESULT agent=$agentId expected=$myGenerationToken actual=$generationToken")
-                            } else if (agentId in 0 until POPULATION_SIZE && !agentCompleted[agentId]) {
-                                agentCompleted[agentId] = true
-                                completedAgentIds.add(agentId)
-                                completedAgents++
-                                uniqueCompletedAgents++
-
-                                Log.d(LOG_TAG, "AGENT_COMPLETE gen=$generation agent=$agentId done=$completedAgents/$POPULATION_SIZE batch=$batchCompletedAgents/$EVOLUTION_BATCH_SIZE")
-
-                                val generationFinished = completedAgents == POPULATION_SIZE &&
-                                        currentAgentIndex == POPULATION_SIZE &&
-                                        !generationTransitioning
-
-                                if (generationFinished) {
-                                    generationTransitioning = true
-                                    shouldEvolve = true
-                                    Log.d(LOG_TAG, "GEN_COMPLETE gen=$generation done=$completedAgents/$POPULATION_SIZE")
-                                } else {
-                                    // 保持 if 有 else
-                                }
-                            } else {
-                                // 保持 if 有 else
-                            }
-                        }
-
-                        if (shouldEvolve) {
-                            synchronized(evolveLock) {
-                                if (isTrainingRunActive(myRunId) && generationToken == myGenerationToken) {
-                                    try {
-                                        evolveNextGeneration()
-                                    } catch (t: Throwable) {
-                                        Log.e(LOG_TAG, "evolveNextGeneration failed", t)
-                                    } finally {
-                                        synchronized(sharedLock) {
-                                            currentAgentIndex = 0
-                                            completedAgents = 0
-                                            uniqueCompletedAgents = 0
-                                            completedAgentIds.clear()
-                                            java.util.Arrays.fill(agentCompleted, false)
-
-                                            generationToken++
-                                            populationEpoch++
-                                            generationTransitioning = false
-                                        }
-                                        Log.d(LOG_TAG, "GEN_NEXT_READY gen=$generation token=$generationToken")
-                                    }
-                                } else {
-                                    synchronized(sharedLock) { generationTransitioning = false }
-                                }
-                            }
-                        }
+                        // ★ 立即 continue，进入下一轮 claim → 补位
                     }
-                    threadStatus[threadIdx].alive = false; threadStatus[threadIdx].phase = "空闲"; threadStatus[threadIdx].agentId = -1
+                    threadStatus[threadIdx].alive = false
+                    threadStatus[threadIdx].phase = "空闲"
+                    threadStatus[threadIdx].agentId = -1
                 }, "snake-train-$i")
                 t.isDaemon = true
                 t.priority = Thread.NORM_PRIORITY
@@ -1347,19 +1469,25 @@ class SnakeView @JvmOverloads constructor(
         return mask and 15
     }
 
+    /**
+     * ★ buildState：严格保证每一维落在 [0, dim) 区间
+     *   foodD(4) × danger(16) × mobility(5) × space(4) × hunger(5) × len(4) × tail(2) × heading(4)
+     *   = 204800
+     */
     private fun buildState(body: ArrayDeque<P>, heading: P, target: P, hungerValue: Int): Int {
         if (body.isEmpty()) return 0
         val h = body.first()
-        val foodD = foodDirection(h, target)
-        val danger = dangerMask(body, heading, target)
-        val mobility = countSafeMovesFor(body, heading, target).coerceIn(0, 4)
+        val foodD = foodDirection(h, target).coerceIn(0, V2_FOOD_DIR - 1)
+        val danger = (dangerMask(body, heading, target) and 0xF).coerceIn(0, V2_DANGER - 1)
+        val mobility = countSafeMovesFor(body, heading, target).coerceIn(0, V2_MOBILITY - 1)
         val region = freeRegion(body)
         val ratio = region.toFloat() / max(1, body.size)
-        val spaceBucket = when { ratio < 0.8f -> 0; ratio < 1.3f -> 1; ratio < 2.0f -> 2; else -> 3 }
-        val hungerBucket = when { hungerValue < 10 -> 0; hungerValue < 25 -> 1; hungerValue < 50 -> 2; hungerValue < 100 -> 3; else -> 4 }
-        val lengthBucket = when { body.size < 12 -> 0; body.size < 30 -> 1; body.size < 60 -> 2; else -> 3 }
-        val tail = if (tailReachable(body)) 1 else 0
-        val headingIndex = directionIndex(heading)
+        val spaceBucket = when { ratio < 0.8f -> 0; ratio < 1.3f -> 1; ratio < 2.0f -> 2; else -> 3 }.coerceIn(0, V2_SPACE - 1)
+        val hungerBucket = when { hungerValue < 10 -> 0; hungerValue < 25 -> 1; hungerValue < 50 -> 2; hungerValue < 100 -> 3; else -> 4 }.coerceIn(0, V2_HUNGER - 1)
+        val lengthBucket = when { body.size < 12 -> 0; body.size < 30 -> 1; body.size < 60 -> 2; else -> 3 }.coerceIn(0, V2_LENGTH - 1)
+        val tail = (if (tailReachable(body)) 1 else 0).coerceIn(0, V2_TAIL - 1)
+        val headingIndex = directionIndex(heading).coerceIn(0, V2_HEADING - 1)
+
         var s = foodD
         s = s * V2_DANGER + danger
         s = s * V2_MOBILITY + mobility
@@ -1368,7 +1496,12 @@ class SnakeView @JvmOverloads constructor(
         s = s * V2_LENGTH + lengthBucket
         s = s * V2_TAIL + tail
         s = s * V2_HEADING + headingIndex
-        return s.coerceIn(0, V2_STATE_COUNT - 1)
+        // 严格保证范围正确；如果越界说明编码器坏了，需要打日志
+        if (s !in 0 until V2_STATE_COUNT) {
+            Log.e(LOG_TAG, "STATE_OVERFLOW s=$s foodD=$foodD danger=$danger mobility=$mobility space=$spaceBucket hunger=$hungerBucket len=$lengthBucket tail=$tail heading=$headingIndex")
+            return ((s % V2_STATE_COUNT) + V2_STATE_COUNT) % V2_STATE_COUNT
+        }
+        return s
     }
 
     private fun legalActionMask(body: ArrayDeque<P>, heading: P, target: P): Int {
@@ -1439,6 +1572,7 @@ class SnakeView @JvmOverloads constructor(
                 hunger = hunger, chosen = safeFood, candidates = candidates, depth = 2, nodes = legal.size,
                 hungerFactor = hungerFactorValue(), regionWeight = wRegion, strategyId = 10,
                 qValue = q, nVisits = qVisit(state, action), forceEatActive = false, forceEatSafe = true, safeFollowMode = false)
+            ruleSelectCount++
             return v3PostCheck(safeFood, legal, state)
         }
 
@@ -1454,6 +1588,7 @@ class SnakeView @JvmOverloads constructor(
                 hunger = hunger, chosen = tailStep, candidates = candidates, depth = 1, nodes = legal.size,
                 hungerFactor = hungerFactorValue(), regionWeight = wRegion, strategyId = 11,
                 qValue = q, nVisits = qVisit(state, action), forceEatActive = false, forceEatSafe = false, safeFollowMode = true)
+            ruleSelectCount++
             return v3PostCheck(tailStep, legal, state)
         }
 
@@ -1477,14 +1612,20 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
-        val shielded = legal.filter { val ratio = it.region.toFloat() / max(1, snake.size); it.tailOk || ratio >= 1.0f || (snake.size < 15 && ratio >= 0.75f) }
+        // ★ 软过滤：只硬剔除必死动作（region 极小且尾巴不可达）；其余留作评分
+        val shielded = legal.filter {
+            val ratio = it.region.toFloat() / max(1, snake.size)
+            it.tailOk || ratio >= 1.0f || (snake.size < 15 && ratio >= 0.75f)
+        }
         val pool = if (shielded.isNotEmpty()) shielded else legal
-        val brain = if (trainingMode || reinforceTraining) population[currentAgentIndex.coerceAtLeast(0) % POPULATION_SIZE] else population[0]
+        if (shielded.isEmpty() && legal.isNotEmpty()) hardSafetyRejectCount += 0
+
+        val brain = if (trainingMode || reinforceTraining) population[0] else population[0]
         val nnInputs = buildInputs(snake.first(), food, snake)
         val nnVals = brain.think(nnInputs)
         val de = checkFoodDeadEnd()
         deadEndPredicted = de.first; foodSpaceRatio = de.second
-        var deadEndPenalty = 0f; if (de.first) deadEndPenalty = -5f
+        var deadEndPenalty = 0f; if (de.first) { deadEndPenalty = -5f; deadEndRejectCount++ }
         val rSteps = when { snake.size > 60 -> 5; snake.size > 25 -> 3; else -> 0 }
         rolloutActive = rSteps > 0; rolloutSteps = rSteps
 
@@ -1752,7 +1893,7 @@ class SnakeView @JvmOverloads constructor(
                 for (i in nV2.indices) nV2[i] = input.readInt()
             }
             modelLoadedFromFile = true
-            Log.d(LOG_TAG, "TRAIN_LOAD modelLoaded=true gen=$generation")
+            Log.d(LOG_TAG, "TRAIN_LOAD modelLoaded=true gen=$generation stateCount=$V2_STATE_COUNT")
         } catch (e: Exception) {
             e.printStackTrace()
             generation = 0; bestScoreAllTime = 0f
@@ -1777,7 +1918,8 @@ class SnakeView @JvmOverloads constructor(
                 .putFloat("v3_g_loop", v3Genome.loopAversion).putFloat("v3_g_hunger", v3Genome.hungerUrgency)
                 .putInt("v3_lesson_fires", v3LessonFires).putInt("v3_loop_hits", v3LoopHits)
                 .putInt("stat_wall", deathWall).putInt("stat_self", deathSelf)
-                .putInt("stat_trap", deathTrap).putInt("stat_total", totalGames)
+                .putInt("stat_trap", deathTrap).putInt("stat_hunger", deathHunger)
+                .putInt("stat_total", totalGames)
                 .putInt("money", money).putInt("high_score", highScore)
                 .apply()
         }
@@ -1786,7 +1928,12 @@ class SnakeView @JvmOverloads constructor(
     private fun die(cause: String) {
         gameOver = true; deathCause = cause
         v3AnalyzeDeath(cause)
-        when (cause) { "WALL" -> deathWall++; "SELF" -> deathSelf++; "HUNGER" -> deathTrap++; else -> deathTrap++ }
+        when (cause) {
+            "WALL" -> deathWall++
+            "SELF" -> deathSelf++
+            "HUNGER" -> deathHunger++
+            else -> deathTrap++
+        }
         adjustWeights(cause); totalGames++; heartbeat()
         recentScores.addLast(score)
         while (recentScores.size > 50) recentScores.removeFirst()
@@ -2150,7 +2297,7 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun drawDeathPie(c: Canvas, cx: Float, cy: Float, r: Float) {
-        val totalD = deathWall + deathSelf + deathTrap
+        val totalD = deathWall + deathSelf + deathTrap + deathHunger
         barPaint.style = Paint.Style.FILL
         if (totalD == 0) { barPaint.color = Color.rgb(60, 60, 60); c.drawCircle(cx, cy, r, barPaint); return }
         val oval = RectF(cx - r, cy - r, cx + r, cy + r); var start = -90f
@@ -2159,7 +2306,9 @@ class SnakeView @JvmOverloads constructor(
         val sweepS = 360f * deathSelf / totalD
         if (sweepS > 0f) { barPaint.color = Color.rgb(100, 150, 255); c.drawArc(oval, start, sweepS, true, barPaint); start += sweepS }
         val sweepT = 360f * deathTrap / totalD
-        if (sweepT > 0f) { barPaint.color = Color.rgb(255, 200, 100); c.drawArc(oval, start, sweepT, true, barPaint) }
+        if (sweepT > 0f) { barPaint.color = Color.rgb(255, 200, 100); c.drawArc(oval, start, sweepT, true, barPaint); start += sweepT }
+        val sweepH = 360f * deathHunger / totalD
+        if (sweepH > 0f) { barPaint.color = Color.rgb(180, 100, 255); c.drawArc(oval, start, sweepH, true, barPaint) }
     }
 
     private fun drawQHeatmap(c: Canvas, left: Float, top: Float, w: Float, h: Float) {
@@ -2305,60 +2454,37 @@ class SnakeView @JvmOverloads constructor(
             pad * 1.6f, y + W * 0.118f, text)
         y += W * 0.155f + pad * 0.6f
 
-        // ★ 新增：训练总监控区
-        val statusText = when {
-            evolving || generationTransitioning -> "强化学习：进化中"
-            reinforceTraining -> "强化学习：运行中"
-            else -> "强化学习：已停止"
+        // ★ 调度诊断面板（新增）
+        val schedPanelH = W * 0.135f
+        panel.color = Color.rgb(20, 30, 34)
+        c.drawRoundRect(pad, y, W - pad, y + schedPanelH, pad * 0.5f, pad * 0.5f, panel)
+        val unclaimed = (POPULATION_SIZE - currentAgentIndex).coerceAtLeast(0)
+        val waiting = (TRAIN_THREADS - activeAgents).coerceAtLeast(0)
+        val schedStatus = when {
+            evolving || generationTransitioning -> "EVOLVING"
+            currentAgentIndex < POPULATION_SIZE -> "RUNNING"
+            completedAgents < POPULATION_SIZE -> "TAIL_WAIT"
+            else -> "GEN_SWITCH"
         }
-        val statusPanelH = W * 0.14f
-        panel.color = Color.rgb(22, 28, 34)
-        c.drawRoundRect(pad, y, W - pad, y + statusPanelH, pad * 0.5f, pad * 0.5f, panel)
-        text.textAlign = Paint.Align.LEFT
-        text.isFakeBoldText = true
-        text.textSize = W * 0.030f
-        text.color = Color.rgb(120, 220, 200)
-        c.drawText(statusText, pad * 1.4f, y + pad * 1.4f, text)
-
-        text.textSize = W * 0.026f
+        val schedColor = when (schedStatus) {
+            "RUNNING" -> Color.rgb(46, 204, 113)
+            "TAIL_WAIT" -> Color.rgb(241, 196, 15)
+            "EVOLVING", "GEN_SWITCH" -> Color.rgb(52, 152, 219)
+            else -> Color.GRAY
+        }
+        text.isFakeBoldText = true; text.textSize = W * 0.030f; text.color = Color.rgb(120, 220, 200)
+        c.drawText("调度状态：$schedStatus", pad * 1.4f, y + pad * 1.4f, text)
+        text.isFakeBoldText = false; text.textSize = W * 0.026f; text.color = schedColor
+        c.drawText("活跃：$activeAgents/$TRAIN_THREADS   等待：$waiting   未领取：$unclaimed",
+            pad * 1.4f, y + pad * 2.6f, text)
         text.color = Color.rgb(200, 200, 220)
-        c.drawText(
-            "Generation：$generation    本批次：$batchCompletedAgents/$EVOLUTION_BATCH_SIZE    活跃线程：$activeAgents/$TRAIN_THREADS",
-            pad * 1.4f, y + pad * 2.6f, text
-        )
+        c.drawText("领取：$agentClaimCount   提交：$agentSubmitCount   过期：$staleResultCount   重复：$duplicateCompletionCount   空闲：$schedulerIdleCount",
+            pad * 1.4f, y + pad * 3.9f, text)
+        c.drawText("V2状态空间：$V2_STATE_COUNT   Q表大小：$V2_Q_SIZE   已访问：${visitedStates.size}",
+            pad * 1.4f, y + pad * 5.2f, text)
+        y += schedPanelH + pad * 0.5f
 
-        val batchValid = batchScores.count { !it.isNaN() }
-        val batchMax = batchScores.filter { !it.isNaN() }.maxOrNull() ?: 0f
-        val batchAvg = if (batchValid > 0) batchScores.filter { !it.isNaN() }.average().toFloat() else 0f
-        val nowMs = System.currentTimeMillis()
-        var recentCount = 0
-        synchronized(sharedLock) {
-            while (recentCompletedTimes.isNotEmpty() && nowMs - recentCompletedTimes.first() > 60_000L) {
-                recentCompletedTimes.removeFirst()
-            }
-            recentCount = recentCompletedTimes.size
-        }
-        val agentsPerSec = recentCount / 60f
-        c.drawText(
-            "本批最高：${"%.0f".format(batchMax)}    本批平均：${"%.1f".format(batchAvg)}    历史最高：$highScore    累计训练：${totalGames}局",
-            pad * 1.4f, y + pad * 3.9f, text
-        )
-        c.drawText(
-            "速度：${"%.2f".format(agentsPerSec)} Agent/s    ${"%.1f".format(recentCount.toFloat())} Agent/min    Q学习步：$v2LearningSteps    ε：${"%.3f".format(v2Epsilon)}",
-            pad * 1.4f, y + pad * 5.2f, text
-        )
-
-        val evoText = if (lastEvolutionFromGeneration >= 0)
-            "上次进化：G${lastEvolutionFromGeneration} → G${lastEvolutionToGeneration}"
-        else "上次进化：暂无"
-        val modelText = if (modelLoadedFromFile) "模型：已加载 · G$generation" else "模型：未加载"
-        c.drawText(
-            "$evoText    $modelText    Q权重${"%.2f".format(qWeight)}  NN权重${"%.2f".format(nnWeight)}",
-            pad * 1.4f, y + pad * 6.5f, text
-        )
-        text.isFakeBoldText = false
-        y += statusPanelH + pad * 0.5f
-
+        // 进度条
         val barH = W * 0.022f
         panel.color = Color.rgb(50, 48, 66)
         c.drawRoundRect(pad, y, W - pad, y + barH, barH / 2, barH / 2, panel)
@@ -2371,7 +2497,8 @@ class SnakeView @JvmOverloads constructor(
             "捕食" to Color.rgb(255, 170, 60), "避险" to Color.rgb(255, 90, 90),
             "搜索" to Color.rgb(90, 170, 255), "进化" to Color.rgb(200, 130, 255),
             "等待" to Color.rgb(130, 130, 140), "空闲" to Color.rgb(100, 100, 110),
-            "训练" to Color.rgb(120, 220, 150)
+            "运行" to Color.rgb(120, 220, 150), "尾部等待" to Color.rgb(241, 196, 15),
+            "切换世代" to Color.rgb(52, 152, 219)
         )
         for (ti in 0 until 8) {
             val col = ti % 2; val row = ti / 2
@@ -2388,7 +2515,7 @@ class SnakeView @JvmOverloads constructor(
             text.textAlign = Paint.Align.LEFT; text.textSize = W * 0.045f; text.color = Color.rgb(150, 235, 170)
             c.drawText("${st.score}", x0 + pad * 0.9f, y0 + cardH - pad * 0.55f, text)
             text.textSize = W * 0.026f; text.color = Color.rgb(160, 165, 185); text.textAlign = Paint.Align.RIGHT
-            c.drawText("步 ${st.steps}", x0 + cardW - pad * 0.7f, y0 + cardH - pad * 0.6f, text)
+            c.drawText("步 ${st.steps} · 完成 ${st.completedCount}", x0 + cardW - pad * 0.7f, y0 + cardH - pad * 0.6f, text)
             text.textAlign = Paint.Align.LEFT
         }
         y += 4 * cardH + 3 * pad * 0.55f + pad * 0.4f
@@ -2441,8 +2568,8 @@ class SnakeView @JvmOverloads constructor(
         y += pad * 0.4f
         text.textSize = W * 0.032f; text.isFakeBoldText = true; text.color = Color.rgb(255, 150, 150)
         c.drawText("☠ 死因分布", pad * 0.4f, y, text); y += pad * 0.7f
-        val deaths = arrayOf("撞墙" to deathWall, "撞自己" to deathSelf, "被困" to deathTrap)
-        val maxDeath = max(1, max(deathWall, max(deathSelf, deathTrap)))
+        val deaths = arrayOf("撞墙" to deathWall, "撞自己" to deathSelf, "被困" to deathTrap, "饿死" to deathHunger)
+        val maxDeath = max(1, max(max(deathWall, deathSelf), max(deathTrap, deathHunger)))
         val dRowH = W * 0.05f
         for ((name, cnt) in deaths) {
             text.textSize = W * 0.027f; text.isFakeBoldText = false; text.color = Color.WHITE
@@ -2632,7 +2759,7 @@ class SnakeView @JvmOverloads constructor(
                 left + 16f, infoY, text)
             c.drawText("本代最佳 ${"%.0f".format(bestScoreThisGen)}   历史最佳 ${"%.0f".format(bestScoreAllTime)}",
                 left + 16f, infoY + 18f, text)
-            c.drawText("Q表权重 ${"%.2f".format(qWeight)}   神经网络权重 ${"%.2f".format(nnWeight)}",
+            c.drawText("Q表权重 ${"%.2f".format(qWeight)}   神经网络权重 ${"%.2f".format(nnWeight)}   V2状态空间 $V2_STATE_COUNT",
                 left + 16f, infoY + 36f, text)
             c.drawText("回放${replayBuffer.size}/$REPLAY_CAPACITY   ε${"%.2f".format(v2Epsilon)}   步${v2LearningSteps}",
                 left + 16f, infoY + 54f, text)
@@ -2763,18 +2890,17 @@ class SnakeView @JvmOverloads constructor(
         private var episodeExpectedEpoch: Long = 0L
         var gLastAction = -1
 
-        fun playOneGame(agentId: Int, expectedGenerationToken: Long): Boolean {
-            currentAgentId = agentId
-            if (agentId !in 0 until POPULATION_SIZE) { Log.e(LOG_TAG, "INVALID_AGENT_ID=$agentId"); return false }
-            if (generationToken != expectedGenerationToken) {
-                Log.w(LOG_TAG, "STALE_GAME_START agent=$agentId expected=$expectedGenerationToken actual=$generationToken")
+        fun playOneGame(task: AgentTask): Boolean {
+            currentAgentId = task.agentId
+            if (task.agentId !in 0 until POPULATION_SIZE) { Log.e(LOG_TAG, "INVALID_AGENT_ID=${task.agentId}"); return false }
+            if (generationToken != task.generationToken) {
+                Log.w(LOG_TAG, "STALE_GAME_START agent=${task.agentId} expected=${task.generationToken} actual=$generationToken")
                 return false
             }
-
-            // ★ 复制本局 Brain 快照，保证整局不换 Brain
+            // ★ 复制本局 Brain 快照，保证整局 Brain 不换
             synchronized(sharedLock) {
                 episodeExpectedEpoch = populationEpoch
-                val src = population[agentId]
+                val src = population[task.agentId]
                 episodeBrain = TinyBrain().also { it.copyFrom(src) }
             }
 
@@ -2784,22 +2910,22 @@ class SnakeView @JvmOverloads constructor(
             gLastFreeRegion = gFreeRegion(gSnake).toFloat(); gPlaceFood()
             val maxIterations = 8000; var iter = 0
             try {
-                while (!gOver && isTrainingRunActive(runId) && generationToken == expectedGenerationToken && !Thread.currentThread().isInterrupted && iter < maxIterations) { gStep(); iter++ }
+                while (!gOver && isTrainingRunActive(runId) &&
+                       generationToken == task.generationToken &&
+                       !Thread.currentThread().isInterrupted && iter < maxIterations) { gStep(); iter++ }
             } catch (t: Throwable) {
-                Log.e(LOG_TAG, "TrainGame agent=$agentId crashed", t)
-                if (isTrainingRunActive(runId) && generationToken == expectedGenerationToken) {
+                Log.e(LOG_TAG, "TrainGame agent=${task.agentId} crashed", t)
+                if (isTrainingRunActive(runId) && generationToken == task.generationToken) {
                     lastDeathCause = "EXCEPTION"; gOver = true
                     try { gDie(lastDeathCause) } catch (inner: Throwable) { Log.e(LOG_TAG, "gDie exception failed", inner) }
                     return true
                 }
                 return false
             }
-            if (!isTrainingRunActive(runId) || generationToken != expectedGenerationToken || Thread.currentThread().isInterrupted) return false
+            if (!isTrainingRunActive(runId) || generationToken != task.generationToken || Thread.currentThread().isInterrupted) return false
             if (!gOver) {
                 lastDeathCause = "TIMEOUT"; gOver = true
                 gScore = max(0, gScore - 500)
-                try { gDie(lastDeathCause) } catch (inner: Throwable) { Log.e(LOG_TAG, "gDie timeout failed", inner) }
-                return true
             }
             try { gDie(lastDeathCause) } catch (inner: Throwable) { Log.e(LOG_TAG, "gDie normal failed", inner) }
             return true
@@ -3072,7 +3198,10 @@ class SnakeView @JvmOverloads constructor(
                 Log.e(LOG_TAG, "Invalid currentAgentId=$currentAgentId")
                 return legal.first()
             }
-            val brain = episodeBrain ?: population[currentAgentId]
+            // ★ 强制使用 episodeBrain，不使用 currentAgentIndex
+            val brain = episodeBrain ?: synchronized(sharedLock) {
+                TinyBrain().also { it.copyFrom(population[currentAgentId]) }.also { episodeBrain = it }
+            }
             val nnInputs = buildInputs(gSnake.first(), gFood, gSnake)
             val nnVals = brain.think(nnInputs)
 
@@ -3366,10 +3495,20 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
+        /**
+         * ★ gDie 只负责游戏内死亡事件：score、reward 之外仅更新死亡统计、recentScores。
+         *   不再更新 completedAgents / batchCompletedAgents / uniqueCompletedAgents。
+         *   那些由 submitAgentResult 统一处理。
+         */
         fun gDie(cause: String) {
             var shouldSave = false
             synchronized(sharedLock) {
-                when (cause) { "WALL" -> deathWall++; "SELF" -> deathSelf++; else -> deathTrap++ }
+                when (cause) {
+                    "WALL" -> deathWall++
+                    "SELF" -> deathSelf++
+                    "HUNGER" -> deathHunger++
+                    else -> deathTrap++
+                }
                 totalGames++; recentScores.addLast(gScore)
                 while (recentScores.size > 50) recentScores.removeFirst()
                 if (gScore > bestRecentScore) bestRecentScore = gScore
@@ -3378,16 +3517,15 @@ class SnakeView @JvmOverloads constructor(
                     currentScores[index] = gScore.toFloat()
                     if (gScore.toFloat() > bestScoreThisGen) bestScoreThisGen = gScore.toFloat()
                     if (gScore.toFloat() > bestScoreAllTime) bestScoreAllTime = gScore.toFloat()
-
-                    // ★ 记录 batch score
+                    // 本局 batch 分数
                     batchScores[index] = gScore.toFloat()
                 } else {
                     Log.e(LOG_TAG, "gDie invalid agent index=$index")
                 }
                 recentCompletedTimes.addLast(System.currentTimeMillis())
                 while (recentCompletedTimes.size > 2000) recentCompletedTimes.removeFirst()
-                batchCompletedAgents++
-                v2Episodes++; shouldSave = totalGames % 200 == 0
+                v2Episodes++
+                shouldSave = totalGames % 200 == 0
             }
             try { if (v3FusionEnabled && gSnake.isNotEmpty()) v3TrainRecordLesson(cause, gSnake.first(), gTailReachable(gSnake), gSnake.size, gLastAction) }
             catch (t: Throwable) { Log.e(LOG_TAG, "v3TrainRecordLesson failed", t) }
