@@ -50,106 +50,71 @@ class SnakeView @JvmOverloads constructor(
     private data class P(val x: Int, val y: Int)
 
     private data class Candidate(
-        val d: P,
-        val score: Float,
-        val reason: String,
-        val legal: Boolean,
-        val regionScore: Float = 0f,
-        val mobilityScore: Float = 0f,
-        val tailScore: Float = 0f,
-        val foodScore: Float = 0f,
-        val edgeScore: Float = 0f,
-        val spaceScore: Float = 0f,
-        val region: Int = 0,
-        val mobility: Int = 0,
-        val tailOk: Boolean = false,
-        val foodDist: Int = -1,
-        val ate: Boolean = false,
-        val qValue: Float = 0f
+        val d: P, val score: Float, val reason: String, val legal: Boolean,
+        val regionScore: Float = 0f, val mobilityScore: Float = 0f,
+        val tailScore: Float = 0f, val foodScore: Float = 0f,
+        val edgeScore: Float = 0f, val spaceScore: Float = 0f,
+        val region: Int = 0, val mobility: Int = 0,
+        val tailOk: Boolean = false, val foodDist: Int = -1,
+        val ate: Boolean = false, val qValue: Float = 0f
     )
 
     private data class Snapshot(
-        var strategy: String = "V2 AUTO",
-        var reason: String = "初始化",
-        var danger: Int = 1,
-        var region: Int = 1,
-        var spaceRatio: Float = 1f,
-        var tailReachable: Boolean = false,
-        var foodReachable: Boolean = false,
-        var foodDistance: Int = -1,
-        var hunger: Int = 0,
-        var chosen: P = P(0, 0),
+        var strategy: String = "V2 AUTO", var reason: String = "初始化",
+        var danger: Int = 1, var region: Int = 1, var spaceRatio: Float = 1f,
+        var tailReachable: Boolean = false, var foodReachable: Boolean = false,
+        var foodDistance: Int = -1, var hunger: Int = 0, var chosen: P = P(0, 0),
         var candidates: List<Candidate> = emptyList(),
-        var depth: Int = 0,
-        var nodes: Int = 0,
-        var hungerFactor: Float = 1f,
-        var regionWeight: Float = 11f,
-        var strategyId: Int = -1,
-        var qValue: Float = 0f,
-        var nVisits: Int = 0,
-        var forceEatActive: Boolean = false,
-        var forceEatSafe: Boolean = false,
+        var depth: Int = 0, var nodes: Int = 0, var hungerFactor: Float = 1f,
+        var regionWeight: Float = 11f, var strategyId: Int = -1,
+        var qValue: Float = 0f, var nVisits: Int = 0,
+        var forceEatActive: Boolean = false, var forceEatSafe: Boolean = false,
         var safeFollowMode: Boolean = false
     )
 
-    private data class Sim(
+    private data class Sim(val body: ArrayDeque<P>, val ate: Boolean)
+    private data class Particle(var x: Float, var y: Float, var vx: Float, var vy: Float, var life: Float, val color: Int)
+    private data class FloatText(var x: Float, var y: Float, var life: Float, val text: String)
+
+    // ★ Beam Search 节点（未来模拟状态，不引用真实游戏对象）
+    private data class BeamNode(
         val body: ArrayDeque<P>,
-        val ate: Boolean
-    )
-
-    private data class Particle(
-        var x: Float,
-        var y: Float,
-        var vx: Float,
-        var vy: Float,
-        var life: Float,
-        val color: Int
-    )
-
-    private data class FloatText(
-        var x: Float,
-        var y: Float,
-        var life: Float,
-        val text: String
+        val dir: P,
+        val food: P,
+        val score: Float,
+        val steps: Int,
+        val ateFood: Boolean,
+        val dead: Boolean,
+        val loopPenalty: Float,
+        val firstAction: P,
+        val recentHeadCells: IntArray
     )
 
     private val snake = ArrayDeque<P>()
     private val queue = ArrayDeque<P>()
 
-    private val dirs = listOf(
-        P(0, -1),
-        P(0, 1),
-        P(-1, 0),
-        P(1, 0)
-    )
+    private val dirs = listOf(P(0, -1), P(0, 1), P(-1, 0), P(1, 0))
 
     private var dir = P(1, 0)
     private var food = P(5, 5)
-
     private var score = 0
     private var highScore = 0
     private var money = 0
-
     private var gameOver = false
     private var running = false
-
     private var aiMode = 1
     private var forcedStrategy = -1
 
     private var gameSpeed = 220L
     private val gameSpeedMin = 45L
     private val gameSpeedStart = 220L
-
     private var accumulator = 0L
     private var lastFrame = 0L
-
     private var combo = 0
     private var hunger = 0
     private var lastFreeRegion = 0f
-
     private var deathCause = "无"
     private var lastDeathInfo = ""
-
     private var ai = Snapshot(chosen = dir)
 
     private val sharedLock = Any()
@@ -171,8 +136,14 @@ class SnakeView @JvmOverloads constructor(
     @Volatile private var rolloutSteps = 0
     @Volatile private var foodSpaceRatio = 1f
     @Volatile private var evolving = false
-
     @Volatile private var generationTransitioning = false
+
+    // ★ Beam Search 统计
+    @Volatile private var beamCalls = 0L
+    @Volatile private var beamSuccess = 0L
+    @Volatile private var beamSelected = 0L
+    @Volatile private var beamTotalNodes = 0L
+    @Volatile private var beamBestScore = 0f
 
     private val visitedStates = java.util.Collections.newSetFromMap(
         java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
@@ -195,17 +166,9 @@ class SnakeView @JvmOverloads constructor(
     private val evoHistory = java.util.concurrent.ConcurrentLinkedDeque<EvoRecord>()
 
     private val completedAgentIds = HashSet<Int>()
-
-    // ★ 每一代 Agent 是否已经正式结算
     private val agentCompleted = BooleanArray(POPULATION_SIZE)
-
-    // ★ generation token：防止旧代任务污染新代
-    @Volatile
-    private var generationToken = 0L
-
-    // ★ 当前代真正完成过多少个唯一 Agent
-    @Volatile
-    private var uniqueCompletedAgents = 0
+    @Volatile private var generationToken = 0L
+    @Volatile private var uniqueCompletedAgents = 0
 
     private enum class V3Goal(val label: String, val short: String, val color: Int) {
         GET_FOOD("获取食物", "食", Color.rgb(46, 204, 113)),
@@ -217,12 +180,8 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private data class V3Lesson(
-        var badAction: Int,
-        var cause: String,
-        var penalty: Float,
-        var confidence: Float,
-        var occurrences: Int,
-        var altAction: Int
+        var badAction: Int, var cause: String, var penalty: Float,
+        var confidence: Float, var occurrences: Int, var altAction: Int
     )
 
     private class V3FailureMemory(private val capacity: Int = 8000) {
@@ -232,7 +191,6 @@ class SnakeView @JvmOverloads constructor(
         fun remember(ctx: Long, action: Int, cause: String, penalty: Float, alt: Int): V3Lesson {
             val old = memory[ctx]
             return if (old == null) {
-                // ★ 初始置信度 0.30
                 val l = V3Lesson(action, cause, penalty, 0.30f, 1, alt)
                 memory[ctx] = l
                 if (memory.size > capacity) memory.remove(memory.keys.first())
@@ -254,7 +212,6 @@ class SnakeView @JvmOverloads constructor(
             return l.penalty * l.confidence
         }
 
-        // ★ 恢复严格门槛：3 次以上 + 置信度 0.70
         @Synchronized
         fun hardLesson(ctx: Long, action: Int): Boolean {
             val l = memory[ctx] ?: return false
@@ -264,18 +221,13 @@ class SnakeView @JvmOverloads constructor(
         @Synchronized
         fun worstLessonText(): String {
             var best: V3Lesson? = null
-            for (l in memory.values) {
-                if (best == null || l.occurrences > best!!.occurrences) best = l
-            }
+            for (l in memory.values) if (best == null || l.occurrences > best!!.occurrences) best = l
             val b = best ?: return "暂无教训"
             return "死因=${b.cause} 重复${b.occurrences}次 置信=${"%.2f".format(b.confidence)}"
         }
 
-        @Synchronized
-        fun size(): Int = memory.size
-
-        @Synchronized
-        fun clear() = memory.clear()
+        @Synchronized fun size(): Int = memory.size
+        @Synchronized fun clear() = memory.clear()
     }
 
     private class V3StrategyGenome {
@@ -287,15 +239,11 @@ class SnakeView @JvmOverloads constructor(
         var hungerUrgency = 0.80f
         private var backup = floatArrayOf(1.00f, 1.25f, 0.90f, 1.40f, 0.80f, 0.80f)
 
-        fun snapshot() {
-            backup = floatArrayOf(foodPriority, spacePriority, tailPriority, dangerAversion, loopAversion, hungerUrgency)
-        }
-
+        fun snapshot() { backup = floatArrayOf(foodPriority, spacePriority, tailPriority, dangerAversion, loopAversion, hungerUrgency) }
         fun revert() {
             foodPriority = backup[0]; spacePriority = backup[1]; tailPriority = backup[2]
             dangerAversion = backup[3]; loopAversion = backup[4]; hungerUrgency = backup[5]
         }
-
         fun normalize() {
             foodPriority = foodPriority.coerceIn(0.4f, 2.2f)
             spacePriority = spacePriority.coerceIn(0.6f, 2.4f)
@@ -304,7 +252,6 @@ class SnakeView @JvmOverloads constructor(
             loopAversion = loopAversion.coerceIn(0.3f, 2.2f)
             hungerUrgency = hungerUrgency.coerceIn(0.4f, 2.0f)
         }
-
         fun selfAdjust(cause: String) {
             when (cause) {
                 "SELF" -> { spacePriority += 0.05f; dangerAversion += 0.04f; tailPriority += 0.02f }
@@ -314,7 +261,6 @@ class SnakeView @JvmOverloads constructor(
             }
             normalize()
         }
-
         fun evolve() {
             val sigma = 0.06f
             fun noise() = Random.nextFloat() * 2f * sigma - sigma
@@ -322,9 +268,7 @@ class SnakeView @JvmOverloads constructor(
             dangerAversion += noise(); loopAversion += noise(); hungerUrgency += noise()
             normalize()
         }
-
-        fun values(): FloatArray =
-            floatArrayOf(foodPriority, spacePriority, tailPriority, dangerAversion, loopAversion, hungerUrgency)
+        fun values(): FloatArray = floatArrayOf(foodPriority, spacePriority, tailPriority, dangerAversion, loopAversion, hungerUrgency)
     }
 
     @Volatile private var v3FusionEnabled = true
@@ -344,44 +288,26 @@ class SnakeView @JvmOverloads constructor(
     private val v3CtxSalt = 0x5157L
     private val v3TrainCtxSalt = 0x5157L
 
-    fun setV3FusionEnabled(on: Boolean) {
-        v3FusionEnabled = on
-        v3LayerWhy = if (on) "V4融合已接管" else "V2基线模式"
-    }
-
+    fun setV3FusionEnabled(on: Boolean) { v3FusionEnabled = on; v3LayerWhy = if (on) "V4融合已接管" else "V2基线模式" }
     fun isV3FusionEnabled(): Boolean = v3FusionEnabled
 
     private fun v3ActionIndexOf(d: P): Int = dirs.indexOfFirst { it == d }
-
     private fun v3DirLabel(d: P): String = when (d) {
-        P(0, -1) -> "上"
-        P(0, 1) -> "下"
-        P(-1, 0) -> "左"
-        P(1, 0) -> "右"
-        else -> "?"
+        P(0, -1) -> "上"; P(0, 1) -> "下"; P(-1, 0) -> "左"; P(1, 0) -> "右"; else -> "?"
     }
-
     private fun v3RecordHead() {
         val h = snake.firstOrNull() ?: return
         v3RecentHeads.addLast(h.y * cols + h.x)
         while (v3RecentHeads.size > 24) v3RecentHeads.removeFirst()
     }
-
     private fun v3LoopRisk(): Boolean {
         if (v3RecentHeads.size < 8) return false
-        val last8 = if (v3RecentHeads.size > 8)
-            v3RecentHeads.drop(v3RecentHeads.size - 8)
-        else
-            v3RecentHeads
+        val last8 = if (v3RecentHeads.size > 8) v3RecentHeads.drop(v3RecentHeads.size - 8) else v3RecentHeads
         return last8.toSet().size <= 5
     }
-
     private fun v3SelectGoal(): V3Goal {
         if (legalDirectionMask() == 0) return V3Goal.ESCAPE_DANGER
-        if (v3LoopRisk()) {
-            v3LoopHits++
-            return V3Goal.BREAK_LOOP
-        }
+        if (v3LoopRisk()) { v3LoopHits++; return V3Goal.BREAK_LOOP }
         val region = freeRegion(snake)
         val ratio = region.toFloat() / max(1, snake.size)
         val danger = calculateDanger()
@@ -391,21 +317,16 @@ class SnakeView @JvmOverloads constructor(
         if (snake.size >= total * 0.55f) return V3Goal.SURVIVE
         return V3Goal.GET_FOOD
     }
-
     private fun legalDirectionMask(): Int {
         var m = 0
         val head = snake.firstOrNull() ?: return 0
         dirs.forEachIndexed { i, d ->
-            val nx = head.x + d.x
-            val ny = head.y + d.y
-            if (nx in 0 until cols && ny in 0 until rows && !snake.contains(P(nx, ny))) {
-                m = m or (1 shl i)
-            }
+            val nx = head.x + d.x; val ny = head.y + d.y
+            if (nx in 0 until cols && ny in 0 until rows && !snake.contains(P(nx, ny))) m = m or (1 shl i)
         }
         return m
     }
 
-    // ★ 恢复食物方向 / 朝向 / 危险 / 尾巴信息，避免不同局面共享记忆
     private fun v3ContextHash(): Long {
         val head = snake.firstOrNull() ?: return 0L
         val regionBucket = (freeRegion(snake) / 4).coerceIn(0, 60)
@@ -415,41 +336,26 @@ class SnakeView @JvmOverloads constructor(
         val headingBucket = directionIndex(dir)
         val dangerBucket = calculateDanger().coerceIn(1, 5)
         val tailBucket = if (tailReachable(snake)) 1 else 0
-
         var h = 1125899906842597L
-        h = h * 31 + head.x
-        h = h * 31 + head.y
-        h = h * 31 + foodDxBucket
-        h = h * 31 + foodDyBucket
-        h = h * 31 + headingBucket
-        h = h * 31 + dangerBucket
-        h = h * 31 + regionBucket
-        h = h * 31 + lenBucket
-        h = h * 31 + tailBucket
+        h = h * 31 + head.x; h = h * 31 + head.y
+        h = h * 31 + foodDxBucket; h = h * 31 + foodDyBucket
+        h = h * 31 + headingBucket; h = h * 31 + dangerBucket
+        h = h * 31 + regionBucket; h = h * 31 + lenBucket; h = h * 31 + tailBucket
         return h xor v3CtxSalt
     }
 
     private fun v3PostCheck(originalDir: P, legal: List<Candidate>, state: Int): P {
         if (!v3FusionEnabled || legal.size <= 1) return originalDir
-
         val best = legal.firstOrNull { it.d == originalDir } ?: return originalDir
         val ctx = v3ContextHash()
 
         if (v3Memory.hardLesson(ctx, v3ActionIndexOf(originalDir))) {
             val alt = legal
-                .filter {
-                    it.d != originalDir &&
-                    v3ActionIndexOf(it.d) >= 0 &&
-                    !v3Memory.hardLesson(ctx, v3ActionIndexOf(it.d))
-                }
-                .maxByOrNull {
-                    it.region * v3Genome.spacePriority * 10f +
-                    (if (it.tailOk) v3Genome.tailPriority * 40f else 0f)
-                }
+                .filter { it.d != originalDir && v3ActionIndexOf(it.d) >= 0 && !v3Memory.hardLesson(ctx, v3ActionIndexOf(it.d)) }
+                .maxByOrNull { it.region * v3Genome.spacePriority * 10f + (if (it.tailOk) v3Genome.tailPriority * 40f else 0f) }
             if (alt != null && alt.tailOk && alt.region >= best.region * 0.8f) {
                 Log.d(LOG_TAG, "L5 TRIGGERED! Cause: 防止重蹈覆辙")
-                v3LayerActive = 5
-                v3LayerWhy = "L5反事实：阻止重蹈覆辙"
+                v3LayerActive = 5; v3LayerWhy = "L5反事实：阻止重蹈覆辙"
                 v3LessonFires++
                 return alt.d
             }
@@ -461,8 +367,7 @@ class SnakeView @JvmOverloads constructor(
                 .maxByOrNull { it.region * v3Genome.spacePriority + v3Genome.loopAversion * 8f }
             if (alt != null && alt.tailOk && alt.region >= best.region * 0.8f) {
                 Log.d(LOG_TAG, "L6 TRIGGERED! Cause: 打破循环")
-                v3LayerActive = 6
-                v3LayerWhy = "L6基因：循环厌恶接管"
+                v3LayerActive = 6; v3LayerWhy = "L6基因：循环厌恶接管"
                 v3LoopHits++
                 return alt.d
             }
@@ -474,28 +379,16 @@ class SnakeView @JvmOverloads constructor(
         if (!v3FusionEnabled) return
         val chosenAction = v3ActionIndexOf(ai.chosen)
         if (chosenAction < 0) return
-
         val ctx = v3ContextHash()
         val alt = ai.candidates
             .filter { it.legal && it.d != ai.chosen && v3ActionIndexOf(it.d) >= 0 }
             .maxByOrNull { it.region * 10f + (if (it.tailOk) 50f else 0f) }
-
         val severity = when (cause) {
-            "SELF" -> 1.0f
-            "TRAP" -> 0.9f
-            "WALL" -> 0.85f
-            "HUNGER" -> 0.35f
-            else -> 0.5f
+            "SELF" -> 1.0f; "TRAP" -> 0.9f; "WALL" -> 0.85f; "HUNGER" -> 0.35f; else -> 0.5f
         }
-
-        val lesson = v3Memory.remember(
-            ctx, chosenAction, cause, severity,
-            v3ActionIndexOf(alt?.d ?: ai.chosen)
-        )
-
+        val lesson = v3Memory.remember(ctx, chosenAction, cause, severity, v3ActionIndexOf(alt?.d ?: ai.chosen))
         v3Regret = severity * lesson.confidence
-        v3LessonFires++
-        v3LessonFlash = 1f
+        v3LessonFires++; v3LessonFlash = 1f
         v3Genome.selfAdjust(cause)
     }
 
@@ -503,8 +396,7 @@ class SnakeView @JvmOverloads constructor(
         if (!v3FusionEnabled || action < 0) return
         var h = 1125899906842597L
         h = h * 31 + head.x; h = h * 31 + head.y
-        h = h * 31 + len
-        h = h * 31 + (if (tailOk) 1 else 0)
+        h = h * 31 + len; h = h * 31 + (if (tailOk) 1 else 0)
         val ctx = h xor v3TrainCtxSalt
         val severity = when (cause) {
             "SELF" -> 0.9f; "TRAP" -> 0.8f; "WALL" -> 0.7f; else -> 0.3f
@@ -517,17 +409,12 @@ class SnakeView @JvmOverloads constructor(
             v3Genome.snapshot()
             val before = v3GenomeBest
             v3Genome.evolve()
-            if (before > 0f && bestScoreAllTime < before) {
-                v3Genome.revert()
-            } else {
-                v3GenomeBest = bestScoreAllTime
-            }
+            if (before > 0f && bestScoreAllTime < before) v3Genome.revert()
+            else v3GenomeBest = bestScoreAllTime
         }
     }
 
-    // =========================
-    // V2 RULE WEIGHTS
-    // =========================
+    // ===== 权重 =====
     private var wRegion = 11f
     private var wMobility = 35f
     private var wTailGood = 180f
@@ -554,18 +441,11 @@ class SnakeView @JvmOverloads constructor(
     private var deathSelf = 0
     private var deathTrap = 0
     private var totalGames = 0
-
     private var lastLearnAction = "初始化"
-
     private val recentScores = ArrayDeque<Int>()
     private var bestRecentScore = 0
-
-    // ★ 用于修复“连续无进步代数”判断
+    private var generationsWithoutImprovement = 0
     private var previousGenerationBest = Float.NEGATIVE_INFINITY
-
-    // ============================================================
-    // V2 REAL RL CORE
-    // ============================================================
 
     private companion object {
         const val V2_FOOD_DIR = 4
@@ -576,35 +456,43 @@ class SnakeView @JvmOverloads constructor(
         const val V2_LENGTH = 4
         const val V2_TAIL = 2
         const val V2_HEADING = 1
-
-        const val V2_STATE_COUNT =
-            V2_FOOD_DIR * V2_DANGER * V2_MOBILITY * V2_SPACE *
-            V2_HUNGER * V2_LENGTH * V2_TAIL * V2_HEADING
-
+        const val V2_STATE_COUNT = V2_FOOD_DIR * V2_DANGER * V2_MOBILITY * V2_SPACE * V2_HUNGER * V2_LENGTH * V2_TAIL * V2_HEADING
         const val V2_ACTIONS = 4
         const val V2_Q_SIZE = V2_STATE_COUNT * V2_ACTIONS
         const val V2_LOCKS = 64
-
         const val GAMMA = 0.94f
         const val ALPHA_FAST = 0.18f
         const val ALPHA_NORMAL = 0.055f
-
         const val EPS_START = 0.22f
         const val EPS_MIN = 0.015f
-
         const val REWARD_STEP = -0.05f
         const val REWARD_FOOD = 10.0f
         const val REWARD_TAIL = 0.55f
         const val REWARD_DANGER = -0.30f
         const val REWARD_SPACE_DELTA = 0.08f
-
         const val DEATH_WALL = -14.0f
         const val DEATH_SELF = -18.0f
         const val DEATH_TRAP = -20.0f
         const val DEATH_HUNGER = -12.0f
-
         const val LOG_TAG = "SnakeTrain"
         const val HEARTBEAT_TIMEOUT_MS = 7_200_000L
+
+        // ★ Beam Search 参数
+        const val BEAM_ENABLED = true
+        const val BEAM_WIDTH = 3
+        const val BEAM_DEPTH_SHORT = 5
+        const val BEAM_DEPTH_LONG = 7
+        const val BEAM_MIN_LENGTH = 10
+        const val BEAM_MAX_NODES = 80
+        const val BEAM_WEIGHT = 0.30f
+        const val BEAM_FOOD_WEIGHT = 1.0f
+        const val BEAM_SPACE_WEIGHT = 1.2f
+        const val BEAM_TAIL_WEIGHT = 1.1f
+        const val BEAM_SURVIVAL_WEIGHT = 2.0f
+        const val BEAM_DANGER_WEIGHT = 1.5f
+        const val BEAM_LOOP_WEIGHT = 0.8f
+        const val BEAM_LONG_LENGTH = 35
+        const val BEAM_DEPTH_MAX = 8
     }
 
     private val qV2 = FloatArray(V2_Q_SIZE)
@@ -615,15 +503,12 @@ class SnakeView @JvmOverloads constructor(
     private val targetLock = Any()
     private val targetUpdateCounter = java.util.concurrent.atomic.AtomicInteger(0)
 
-    private fun isTrainingRunActive(runId: Long): Boolean =
-        trainActive && trainingRunId == runId
+    private fun isTrainingRunActive(runId: Long): Boolean = trainActive && trainingRunId == runId
 
     private val qLocks = Array(V2_LOCKS) { Any() }
-
     @Volatile private var v2LearningSteps = 0L
     @Volatile private var v2Episodes = 0L
     @Volatile private var v2Epsilon = EPS_START
-
     private var lastV2State = -1
     private var lastV2Action = -1
 
@@ -635,16 +520,13 @@ class SnakeView @JvmOverloads constructor(
         if (state !in 0 until V2_STATE_COUNT || action !in 0 until V2_ACTIONS) return 0f
         return synchronized(qLock(state)) { qV2[qIndex(state, action)] }
     }
-
     private fun qVisit(state: Int, action: Int): Int {
         if (state !in 0 until V2_STATE_COUNT || action !in 0 until V2_ACTIONS) return 0
         return synchronized(qLock(state)) { nV2[qIndex(state, action)] }
     }
-
     private fun qMax(state: Int, legalMask: Int = 15): Float {
         if (state !in 0 until V2_STATE_COUNT) return 0f
-        var bestAction = -1
-        var bestQ = -Float.MAX_VALUE
+        var bestAction = -1; var bestQ = -Float.MAX_VALUE
         synchronized(qLock(state)) {
             for (a in 0 until 4) {
                 if ((legalMask and (1 shl a)) == 0) continue
@@ -652,9 +534,7 @@ class SnakeView @JvmOverloads constructor(
                 if (v > bestQ) { bestQ = v; bestAction = a }
             }
             if (bestAction < 0) return 0f
-            synchronized(targetLock) {
-                return qTarget[qIndex(state, bestAction)]
-            }
+            synchronized(targetLock) { return qTarget[qIndex(state, bestAction)] }
         }
     }
 
@@ -668,20 +548,16 @@ class SnakeView @JvmOverloads constructor(
 
     private fun qUpdate(state: Int, action: Int, reward: Float, nextState: Int, nextMask: Int, terminal: Boolean) {
         if (state !in 0 until V2_STATE_COUNT || action !in 0 until V2_ACTIONS) return
-
         visitedStates.add(state)
         val effectiveReward = reward
         val idx = qIndex(state, action)
         val nextBest = if (terminal) 0f else qMax(nextState, nextMask)
         val oldValue = synchronized(qStateLock(state)) { qV2[idx] }
-        val tdErr = if (terminal) effectiveReward - oldValue
-                    else effectiveReward + GAMMA * nextBest - oldValue
-
+        val tdErr = if (terminal) effectiveReward - oldValue else effectiveReward + GAMMA * nextBest - oldValue
         synchronized(replayBuffer) {
             replayBuffer.add(Experience(state, action, effectiveReward, nextState, nextMask, terminal, tdErr))
             if (replayBuffer.size > REPLAY_CAPACITY) replayBuffer.removeAt(0)
         }
-
         synchronized(qStateLock(state)) {
             val visits = nV2[idx]
             val alpha = if (visits < 12) ALPHA_FAST else ALPHA_NORMAL
@@ -691,23 +567,17 @@ class SnakeView @JvmOverloads constructor(
             qV2[idx] = updated.coerceIn(-10f, 10f)
             nV2[idx] = if (visits < Int.MAX_VALUE) visits + 1 else visits
         }
-
         synchronized(replayBuffer) {
-            if (replayBuffer.size > 10) {
-                repeat(2) {
-                    val e = replayBuffer[Random.nextInt(replayBuffer.size)]
-                    evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
-                }
+            if (replayBuffer.size > 10) repeat(2) {
+                val e = replayBuffer[Random.nextInt(replayBuffer.size)]
+                evoUpdate(e.state, e.action, e.reward, e.nextState, e.nextMask, e.terminal)
             }
         }
-
         v2LearningSteps++
         val cnt = targetUpdateCounter.incrementAndGet()
         if (cnt >= 50 && targetUpdateCounter.compareAndSet(cnt, 0)) {
             synchronized(targetLock) {
-                for (i in qTarget.indices) {
-                    qTarget[i] = qTarget[i] + 0.01f * (qV2[i] - qTarget[i])
-                }
+                for (i in qTarget.indices) qTarget[i] = qTarget[i] + 0.01f * (qV2[i] - qTarget[i])
             }
         }
     }
@@ -730,15 +600,11 @@ class SnakeView @JvmOverloads constructor(
     private fun currentEpsilon(): Float {
         if (!trainingMode && !reinforceTraining) return 0f
         val e = v2Epsilon
-        if (v2LearningSteps > 0L && v2LearningSteps % 4096L == 0L) {
-            v2Epsilon = max(EPS_MIN, v2Epsilon * 0.985f)
-        }
+        if (v2LearningSteps > 0L && v2LearningSteps % 4096L == 0L) v2Epsilon = max(EPS_MIN, v2Epsilon * 0.985f)
         return e
     }
 
-    // =========================
-    // 神经进化大脑 (TinyBrain)
-    // =========================
+    // ===== TinyBrain（8 输入不变）=====
     private inner class TinyBrain {
         var w1 = FloatArray(8 * 32) { Random.nextFloat() * 2f - 1f }
         var w2 = FloatArray(32 * 16) { Random.nextFloat() * 2f - 1f }
@@ -746,23 +612,11 @@ class SnakeView @JvmOverloads constructor(
 
         fun think(inputs: FloatArray): FloatArray {
             val h1 = FloatArray(32)
-            for (i in 0 until 32) {
-                var sum = 0f
-                for (j in 0 until 8) sum += inputs[j] * w1[j * 32 + i]
-                h1[i] = max(0f, sum)
-            }
+            for (i in 0 until 32) { var s = 0f; for (j in 0 until 8) s += inputs[j] * w1[j * 32 + i]; h1[i] = max(0f, s) }
             val h2 = FloatArray(16)
-            for (i in 0 until 16) {
-                var sum = 0f
-                for (j in 0 until 32) sum += h1[j] * w2[j * 16 + i]
-                h2[i] = max(0f, sum)
-            }
+            for (i in 0 until 16) { var s = 0f; for (j in 0 until 32) s += h1[j] * w2[j * 16 + i]; h2[i] = max(0f, s) }
             val outputs = FloatArray(4)
-            for (i in 0 until 4) {
-                var sum = 0f
-                for (j in 0 until 16) sum += h2[j] * w3[j * 4 + i]
-                outputs[i] = sum
-            }
+            for (i in 0 until 4) { var s = 0f; for (j in 0 until 16) s += h2[j] * w3[j * 4 + i]; outputs[i] = s }
             return outputs
         }
 
@@ -771,26 +625,20 @@ class SnakeView @JvmOverloads constructor(
             System.arraycopy(src.w2, 0, w2, 0, w2.size)
             System.arraycopy(src.w3, 0, w3, 0, w3.size)
         }
-
         fun breed(child: TinyBrain) {
             val mut = if (generation < 10) 0.18f else if (generation < 30) 0.10f else 0.05f
             for (i in w1.indices) child.w1[i] = w1[i] + (Random.nextFloat() - 0.5f) * mut
             for (i in w2.indices) child.w2[i] = w2[i] + (Random.nextFloat() - 0.5f) * mut
             for (i in w3.indices) child.w3[i] = w3[i] + (Random.nextFloat() - 0.5f) * mut
         }
-
         fun crossover(other: TinyBrain, child: TinyBrain, dynamicMut: Float) {
-            val s1 = w1.size / 2
-            val s2 = w2.size / 2
-            val s3 = w3.size / 2
+            val s1 = w1.size / 2; val s2 = w2.size / 2; val s3 = w3.size / 2
             System.arraycopy(w1, 0, child.w1, 0, s1)
             System.arraycopy(other.w1, s1, child.w1, s1, w1.size - s1)
             System.arraycopy(w2, 0, child.w2, 0, s2)
             System.arraycopy(other.w2, s2, child.w2, s2, w2.size - s2)
             System.arraycopy(w3, 0, child.w3, 0, s3)
             System.arraycopy(other.w3, s3, child.w3, s3, w3.size - s3)
-
-            // ★ 修复：取 baseMut 和 dynamicMut 的最大值
             val baseMut = if (generation < 10) 0.12f else 0.06f
             val mut = max(baseMut, dynamicMut.coerceIn(0.06f, 0.30f))
             for (i in child.w1.indices) child.w1[i] += (Random.nextFloat() - 0.5f) * mut
@@ -805,36 +653,21 @@ class SnakeView @JvmOverloads constructor(
             v3EvolveGenome()
             generation++
             val scoresCopy = synchronized(sharedLock) { currentScores.copyOf() }
-
-            val sortedIndices = (0 until POPULATION_SIZE)
-                .filter { !scoresCopy[it].isNaN() }
-                .sortedByDescending { scoresCopy[it] }
-
+            val sortedIndices = (0 until POPULATION_SIZE).filter { !scoresCopy[it].isNaN() }.sortedByDescending { scoresCopy[it] }
             val bestBrains = if (sortedIndices.isNotEmpty()) {
-                sortedIndices.take(minOf(10, sortedIndices.size)).map {
-                    TinyBrain().also { copy -> copy.copyFrom(population[it]) }
-                }
+                sortedIndices.take(minOf(10, sortedIndices.size)).map { TinyBrain().also { c -> c.copyFrom(population[it]) } }
             } else {
-                (0 until minOf(10, POPULATION_SIZE)).map {
-                    TinyBrain().also { copy -> copy.copyFrom(population[it]) }
-                }
+                (0 until minOf(10, POPULATION_SIZE)).map { TinyBrain().also { c -> c.copyFrom(population[it]) } }
             }
             if (bestBrains.isEmpty()) return
 
             val generationBest = if (sortedIndices.isNotEmpty()) scoresCopy[sortedIndices[0]] else 0f
-
-            // ★ 修复“连续无进步代数”：用 previousGenerationBest 单独比较
-            if (generationBest > previousGenerationBest + 0.001f) {
-                generationsWithoutImprovement = 0
-            } else {
-                generationsWithoutImprovement++
-            }
+            if (generationBest > previousGenerationBest + 0.001f) generationsWithoutImprovement = 0
+            else generationsWithoutImprovement++
             previousGenerationBest = max(previousGenerationBest, generationBest)
-
             if (generationBest > bestScoreThisGen) bestScoreThisGen = generationBest
             if (generationBest > bestScoreAllTime) bestScoreAllTime = generationBest
 
-            // ★ 动态突变率：多档渐进
             val dynamicMut = when {
                 generationsWithoutImprovement >= 20 -> 0.30f
                 generationsWithoutImprovement >= 10 -> 0.22f
@@ -842,7 +675,6 @@ class SnakeView @JvmOverloads constructor(
                 else -> 0.12f
             }
 
-            // ★ 10 Elite + 25 Crossover + 10 Mutated Elite + 5 Immigrant
             val eliteCount = 10
             val crossoverCount = 25
             val mutatedEliteCount = 10
@@ -851,42 +683,23 @@ class SnakeView @JvmOverloads constructor(
             for (i in 0 until POPULATION_SIZE) {
                 try {
                     when {
-                        i < eliteCount -> {
-                            population[i] = TinyBrain().also {
-                                it.copyFrom(bestBrains[i % bestBrains.size])
-                            }
-                        }
+                        i < eliteCount -> population[i] = TinyBrain().also { it.copyFrom(bestBrains[i % bestBrains.size]) }
                         i < eliteCount + crossoverCount -> {
                             val p1 = bestBrains[Random.nextInt(bestBrains.size)]
                             var p2 = bestBrains[Random.nextInt(bestBrains.size)]
-                            if (bestBrains.size > 1) {
-                                while (p2 === p1) {
-                                    p2 = bestBrains[Random.nextInt(bestBrains.size)]
-                                }
-                            }
-                            val child = TinyBrain()
-                            p1.crossover(p2, child, dynamicMut)
-                            population[i] = child
+                            if (bestBrains.size > 1) while (p2 === p1) p2 = bestBrains[Random.nextInt(bestBrains.size)]
+                            val child = TinyBrain(); p1.crossover(p2, child, dynamicMut); population[i] = child
                         }
                         i < eliteCount + crossoverCount + mutatedEliteCount -> {
                             val parent = bestBrains[Random.nextInt(bestBrains.size)]
-                            val child = TinyBrain()
-                            parent.breed(child)
-                            population[i] = child
+                            val child = TinyBrain(); parent.breed(child); population[i] = child
                         }
-                        else -> {
-                            population[i] = TinyBrain()
-                        }
+                        else -> population[i] = TinyBrain()
                     }
-                } catch (t: Throwable) {
-                    Log.e(LOG_TAG, "breed agent=$i failed", t)
-                    population[i] = TinyBrain()
-                }
+                } catch (t: Throwable) { Log.e(LOG_TAG, "breed agent=$i failed", t); population[i] = TinyBrain() }
             }
 
-            synchronized(sharedLock) {
-                for (i in 0 until POPULATION_SIZE) currentScores[i] = 0f
-            }
+            synchronized(sharedLock) { for (i in 0 until POPULATION_SIZE) currentScores[i] = 0f }
 
             val personality = when {
                 v3Genome.dangerAversion > 1.8f && v3Genome.spacePriority > 1.6f -> "稳健保守型"
@@ -895,29 +708,21 @@ class SnakeView @JvmOverloads constructor(
                 v3Genome.tailPriority > 1.5f -> "追尾保命型"
                 else -> "均衡探索型"
             }
-            evoHistory.addLast(EvoRecord(
-                generation, generationBest,
-                eliteCount, crossoverCount,
-                mutatedEliteCount + immigrantCount,
-                personality, intArrayOf(deathWall, deathSelf, deathTrap),
-                System.currentTimeMillis()
-            ))
+            evoHistory.addLast(EvoRecord(generation, generationBest, eliteCount, crossoverCount,
+                mutatedEliteCount + immigrantCount, personality,
+                intArrayOf(deathWall, deathSelf, deathTrap), System.currentTimeMillis()))
             while (evoHistory.size > 24) evoHistory.pollFirst()
 
-            // ★ 修复：Q/NN 权重范围
             val baseRatio = (generation / 30f).coerceIn(0f, 0.45f)
             val scoreBonus = (generationBest / 25000f).coerceIn(0f, 0.10f)
             nnWeight = (baseRatio + scoreBonus).coerceIn(0f, 0.50f)
             qWeight = (1.0f - nnWeight).coerceIn(0.50f, 1.0f)
             bestScoreThisGen = 0f
 
-            Log.d(LOG_TAG, "EVOLVE generation=$generation best=$generationBest nnW=$nnWeight qW=$qWeight 停滞代数=$generationsWithoutImprovement")
+            Log.d(LOG_TAG, "EVOLVE gen=$generation best=$generationBest nnW=$nnWeight qW=$qWeight stall=$generationsWithoutImprovement")
             Thread { try { saveTrainingState() } catch (_: Exception) {} }.apply { isDaemon = true; start() }
-        } catch (t: Throwable) {
-            Log.e(LOG_TAG, "evolveNextGeneration failed", t)
-        } finally {
-            evolving = false
-        }
+        } catch (t: Throwable) { Log.e(LOG_TAG, "evolveNextGeneration failed", t) }
+        finally { evolving = false }
     }
 
     private fun buildInputs(head: P, target: P, currentBody: ArrayDeque<P>): FloatArray {
@@ -945,28 +750,21 @@ class SnakeView @JvmOverloads constructor(
 
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
-    private val vibrator: Vibrator? =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
-        } else {
-            @Suppress("DEPRECATION")
-            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-        }
+    private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+    } else {
+        @Suppress("DEPRECATION") context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    }
 
-    private val toneGen: ToneGenerator? = try {
-        ToneGenerator(AudioManager.STREAM_MUSIC, 85)
-    } catch (_: Throwable) { null }
+    private val toneGen: ToneGenerator? = try { ToneGenerator(AudioManager.STREAM_MUSIC, 85) } catch (_: Throwable) { null }
 
     private var bgm: BgmPlayer? = null
-
     private var bodyColor = Color.rgb(46, 204, 113)
     private var headColor = Color.rgb(39, 174, 96)
     private var bgColor = Color.BLACK
     private var gridColor = Color.CYAN
     private var rainbowSkin = false
-
     private val hsv = IntArray(360) { Color.HSVToColor(floatArrayOf(it.toFloat(), 1f, 1f)) }
-
     private val particles = mutableListOf<Particle>()
     private val floats = mutableListOf<FloatText>()
 
@@ -992,9 +790,7 @@ class SnakeView @JvmOverloads constructor(
     @Volatile private var watchDogThread: Thread? = null
     @Volatile private var watchdogRestartCount = 0
 
-    private fun heartbeat() {
-        lastHeartbeat = System.currentTimeMillis()
-    }
+    private fun heartbeat() { lastHeartbeat = System.currentTimeMillis() }
 
     private fun startWatchDog() {
         stopWatchDog()
@@ -1006,19 +802,14 @@ class SnakeView @JvmOverloads constructor(
                 val now = System.currentTimeMillis()
                 if (now - lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
                     watchdogRestartCount++
-                    try {
-                        restartTrainingSafely()
-                    } catch (_: Exception) {}
+                    try { restartTrainingSafely() } catch (_: Exception) {}
                     try { Thread.sleep(3000) } catch (_: Exception) {}
                 }
             }
         }.also { it.priority = Thread.MIN_PRIORITY; it.start() }
     }
 
-    private fun stopWatchDog() {
-        watchDogThread?.interrupt()
-        watchDogThread = null
-    }
+    private fun stopWatchDog() { watchDogThread?.interrupt(); watchDogThread = null }
 
     override fun onSaveInstanceState(): Parcelable? {
         val superState = super.onSaveInstanceState()
@@ -1034,31 +825,20 @@ class SnakeView @JvmOverloads constructor(
             val wasReinforce = state.getBoolean("reinforceTraining", false)
             trainingMode = state.getBoolean("trainingMode", false)
             super.onRestoreInstanceState(state.getParcelable("super"))
-            if (wasReinforce) {
-                startParallelTraining(resetCounters = false)
-                startWatchDog()
-            }
-        } else {
-            super.onRestoreInstanceState(state)
-        }
+            if (wasReinforce) { startParallelTraining(resetCounters = false); startWatchDog() }
+        } else super.onRestoreInstanceState(state)
     }
 
     private var renderSkipCounter = 0
     private val reinforceButtonRect = RectF()
     private var lastReinforceTap = 0L
-
     @Volatile private var trainActive = false
     private val trainThreads: MutableList<Thread> = mutableListOf()
     private val TRAIN_THREADS = 8
 
     private val aiPool: ExecutorService = run {
         val cores = Runtime.getRuntime().availableProcessors().coerceIn(4, 8)
-        Executors.newFixedThreadPool(cores) { r ->
-            Thread(r, "snake-ai").apply {
-                isDaemon = true
-                priority = Thread.NORM_PRIORITY
-            }
-        }
+        Executors.newFixedThreadPool(cores) { r -> Thread(r, "snake-ai").apply { isDaemon = true; priority = Thread.NORM_PRIORITY } }
     }
 
     private val tlVisited: ThreadLocal<BooleanArray> = ThreadLocal.withInitial { BooleanArray(cols * rows) }
@@ -1075,39 +855,17 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun hungerForceEat(): Int = when {
-        snake.size < 20 -> 50
-        snake.size < 35 -> 70
-        snake.size < 55 -> 100
-        snake.size < 80 -> 140
-        else -> 200
+        snake.size < 20 -> 50; snake.size < 35 -> 70; snake.size < 55 -> 100; snake.size < 80 -> 140; else -> 200
     }
 
     private fun vibrateEat() {
         if (reinforceTraining || trainingMode) return
-        vibrator?.let {
-            try {
-                if (Build.VERSION.SDK_INT >= 26) {
-                    it.vibrate(VibrationEffect.createOneShot(18, VibrationEffect.DEFAULT_AMPLITUDE))
-                } else {
-                    @Suppress("DEPRECATION")
-                    it.vibrate(18)
-                }
-            } catch (_: Throwable) {}
-        }
+        vibrator?.let { try { if (Build.VERSION.SDK_INT >= 26) it.vibrate(VibrationEffect.createOneShot(18, VibrationEffect.DEFAULT_AMPLITUDE)) else { @Suppress("DEPRECATION") it.vibrate(18) } } catch (_: Throwable) {} }
     }
 
     private fun vibrateDeath() {
         if (reinforceTraining || trainingMode) return
-        vibrator?.let {
-            try {
-                if (Build.VERSION.SDK_INT >= 26) {
-                    it.vibrate(VibrationEffect.createOneShot(120, VibrationEffect.DEFAULT_AMPLITUDE))
-                } else {
-                    @Suppress("DEPRECATION")
-                    it.vibrate(120)
-                }
-            } catch (_: Throwable) {}
-        }
+        vibrator?.let { try { if (Build.VERSION.SDK_INT >= 26) it.vibrate(VibrationEffect.createOneShot(120, VibrationEffect.DEFAULT_AMPLITUDE)) else { @Suppress("DEPRECATION") it.vibrate(120) } } catch (_: Throwable) {} }
     }
 
     private fun playEatSound() {
@@ -1121,16 +879,9 @@ class SnakeView @JvmOverloads constructor(
             if (lastFrame == 0L) lastFrame = ns
             val dt = ((ns - lastFrame) / 1_000_000L).coerceAtMost(100L)
             lastFrame = ns
-
-            if (reinforceTraining) {
-                if ((++renderSkipCounter % 2) == 0) invalidate()
-                Choreographer.getInstance().postFrameCallback(this)
-                return
-            }
-
-            if (gameOver) {
-                restartCountdown = 0L
-            } else {
+            if (reinforceTraining) { if ((++renderSkipCounter % 2) == 0) invalidate(); Choreographer.getInstance().postFrameCallback(this); return }
+            if (gameOver) restartCountdown = 0L
+            else {
                 accumulator += dt
                 var stepCount = 0
                 val maxSteps = if (trainingMode) 10 else Int.MAX_VALUE
@@ -1142,7 +893,6 @@ class SnakeView @JvmOverloads constructor(
                 }
                 if (stepCount >= maxSteps) accumulator = 0L
             }
-
             updateEffects(dt / 16f)
             val shouldRender = if (trainingMode) (++renderSkipCounter % 2) == 0 else true
             if (shouldRender) invalidate()
@@ -1157,7 +907,6 @@ class SnakeView @JvmOverloads constructor(
         aggression = prefs.getFloat("learn_aggression", 1.15f)
         safetyMargin = prefs.getFloat("learn_safety", 1.08f)
         shortcutBonus = prefs.getFloat("learn_shortcut", 0.90f)
-
         wRegion = prefs.getFloat("w_region", wRegion0)
         wMobility = prefs.getFloat("w_mobility", wMobility0)
         wTailGood = prefs.getFloat("w_tail_good", wTailGood0)
@@ -1188,7 +937,6 @@ class SnakeView @JvmOverloads constructor(
 
         v3LessonFires = prefs.getInt("v3_lesson_fires", 0)
         v3LoopHits = prefs.getInt("v3_loop_hits", 0)
-
         deathWall = prefs.getInt("stat_wall", 0)
         deathSelf = prefs.getInt("stat_self", 0)
         deathTrap = prefs.getInt("stat_trap", 0)
@@ -1206,26 +954,14 @@ class SnakeView @JvmOverloads constructor(
 
     fun setTrainingMode(b: Boolean) {
         trainingMode = b
-        if (b) {
-            aiMode = 1
-            bgm?.stop()
-            reset()
-        } else {
-            stopParallelTraining()
-            if (running) bgm?.start()
-            reset()
-        }
+        if (b) { aiMode = 1; bgm?.stop(); reset() }
+        else { stopParallelTraining(); if (running) bgm?.start(); reset() }
         invalidate()
     }
 
     fun setReinforceTraining(enable: Boolean) {
-        if (enable) {
-            startParallelTraining()
-            startWatchDog()
-        } else {
-            stopParallelTraining()
-            stopWatchDog()
-        }
+        if (enable) { startParallelTraining(); startWatchDog() }
+        else { stopParallelTraining(); stopWatchDog() }
         invalidate()
     }
 
@@ -1233,10 +969,7 @@ class SnakeView @JvmOverloads constructor(
     fun isTrainingMode(): Boolean = trainingMode
 
     private fun restartTrainingSafely() {
-        synchronized(sharedLock) {
-            trainActive = false
-            reinforceTraining = false
-        }
+        synchronized(sharedLock) { trainActive = false; reinforceTraining = false }
         val oldThreads = synchronized(trainThreads) { trainThreads.toList() }
         for (t in oldThreads) { try { t.interrupt() } catch (_: Throwable) {} }
         for (t in oldThreads) { try { t.join(500) } catch (_: InterruptedException) { break } }
@@ -1247,7 +980,6 @@ class SnakeView @JvmOverloads constructor(
         startWatchDog()
     }
 
-    // ★ 完整替换：训练调度 + generationToken 隔离
     private fun startParallelTraining(resetCounters: Boolean = true) {
         synchronized(trainingLifecycleLock) {
             if (trainThreads.any { it.isAlive }) return
@@ -1271,191 +1003,93 @@ class SnakeView @JvmOverloads constructor(
                 bestScoreThisGen = 0f
                 completedAgentIds.clear()
                 java.util.Arrays.fill(agentCompleted, false)
-
-                synchronized(sharedLock) {
-                    for (i in 0 until POPULATION_SIZE) {
-                        currentScores[i] = 0f
-                    }
-                }
+                synchronized(sharedLock) { for (i in 0 until POPULATION_SIZE) currentScores[i] = 0f }
             }
 
             generationToken++
             val myGenerationToken = generationToken
-
             generationTransitioning = false
 
             for (i in threadStatus.indices) {
-                threadStatus[i].alive = false
-                threadStatus[i].agentId = -1
-                threadStatus[i].score = 0
-                threadStatus[i].steps = 0
-                threadStatus[i].phase = "空闲"
+                threadStatus[i].alive = false; threadStatus[i].agentId = -1
+                threadStatus[i].score = 0; threadStatus[i].steps = 0; threadStatus[i].phase = "空闲"
             }
 
-            Log.d(
-                LOG_TAG,
-                "GEN_START generation=$generation token=$myGenerationToken " +
-                "run=$myRunId population=$POPULATION_SIZE threads=$TRAIN_THREADS"
-            )
+            Log.d(LOG_TAG, "GEN_START gen=$generation token=$myGenerationToken run=$myRunId pop=$POPULATION_SIZE th=$TRAIN_THREADS")
 
             for (i in 0 until TRAIN_THREADS) {
                 val threadIdx = i
-
                 val t = Thread({
-                    val game = TrainGame(
-                        seed = System.nanoTime() + i * 999983L,
-                        runId = myRunId,
-                        statusIndex = threadIdx
-                    )
-
+                    val game = TrainGame(seed = System.nanoTime() + i * 999983L, runId = myRunId, statusIndex = threadIdx)
                     threadStatus[threadIdx].alive = true
 
-                    while (
-                        isTrainingRunActive(myRunId) &&
-                        !Thread.currentThread().isInterrupted
-                    ) {
-                        if (
-                            evolving ||
-                            generationTransitioning ||
-                            generationToken != myGenerationToken
-                        ) {
-                            threadStatus[threadIdx].phase = "进化"
-                            Thread.yield()
-                            continue
+                    while (isTrainingRunActive(myRunId) && !Thread.currentThread().isInterrupted) {
+                        if (evolving || generationTransitioning || generationToken != myGenerationToken) {
+                            threadStatus[threadIdx].phase = "进化"; Thread.yield(); continue
                         }
 
                         val agentId: Int
-
                         synchronized(sharedLock) {
-                            if (currentAgentIndex >= POPULATION_SIZE) {
-                                agentId = -1
-                            } else {
-                                agentId = currentAgentIndex
-                                currentAgentIndex++
-                            }
+                            if (currentAgentIndex >= POPULATION_SIZE) agentId = -1
+                            else { agentId = currentAgentIndex; currentAgentIndex++ }
                         }
 
-                        if (agentId < 0) {
-                            threadStatus[threadIdx].phase = "等待"
-                            Thread.yield()
-                            continue
-                        }
+                        if (agentId < 0) { threadStatus[threadIdx].phase = "等待"; Thread.yield(); continue }
 
                         synchronized(sharedLock) {
-                            if (agentId !in 0 until POPULATION_SIZE ||
-                                agentCompleted[agentId]) {
-                                Log.e(
-                                    LOG_TAG,
-                                    "INVALID_AGENT_ASSIGNMENT agent=$agentId generation=$generation"
-                                )
+                            if (agentId !in 0 until POPULATION_SIZE || agentCompleted[agentId]) {
+                                Log.e(LOG_TAG, "INVALID_AGENT_ASSIGNMENT agent=$agentId gen=$generation")
                                 continue
                             }
                         }
 
                         threadStatus[threadIdx].agentId = agentId
                         threadStatus[threadIdx].phase = "训练"
-
-                        Log.d(
-                            LOG_TAG,
-                            "AGENT_START generation=$generation agent=$agentId thread=$threadIdx"
-                        )
+                        Log.d(LOG_TAG, "AGENT_START gen=$generation agent=$agentId thread=$threadIdx")
 
                         var episodeCompleted = false
-
                         try {
-                            episodeCompleted = game.playOneGame(
-                                agentId = agentId,
-                                expectedGenerationToken = myGenerationToken
-                            )
-                        } catch (t: Throwable) {
-                            Log.e(LOG_TAG, "Agent $agentId crashed outside playOneGame", t)
-                        }
+                            episodeCompleted = game.playOneGame(agentId = agentId, expectedGenerationToken = myGenerationToken)
+                        } catch (t: Throwable) { Log.e(LOG_TAG, "Agent $agentId crashed outside playOneGame", t) }
 
-                        if (!episodeCompleted) {
-                            threadStatus[threadIdx].phase = "等待"
-                            continue
-                        }
+                        if (!episodeCompleted) { threadStatus[threadIdx].phase = "等待"; continue }
 
                         var shouldEvolve = false
-
                         synchronized(sharedLock) {
                             if (generationToken != myGenerationToken) {
-                                Log.w(
-                                    LOG_TAG,
-                                    "STALE_AGENT_RESULT agent=$agentId " +
-                                    "expectedToken=$myGenerationToken actualToken=$generationToken"
-                                )
-                            } else if (
-                                agentId in 0 until POPULATION_SIZE &&
-                                !agentCompleted[agentId]
-                            ) {
+                                Log.w(LOG_TAG, "STALE_AGENT_RESULT agent=$agentId expected=$myGenerationToken actual=$generationToken")
+                            } else if (agentId in 0 until POPULATION_SIZE && !agentCompleted[agentId]) {
                                 agentCompleted[agentId] = true
                                 completedAgentIds.add(agentId)
                                 completedAgents++
                                 uniqueCompletedAgents++
-
-                                Log.d(
-                                    LOG_TAG,
-                                    "AGENT_COMPLETE generation=$generation " +
-                                    "agent=$agentId completed=$completedAgents/$POPULATION_SIZE"
-                                )
-
-                                if (
-                                    completedAgents == POPULATION_SIZE &&
-                                    currentAgentIndex == POPULATION_SIZE &&
-                                    !generationTransitioning
-                                ) {
+                                Log.d(LOG_TAG, "AGENT_COMPLETE gen=$generation agent=$agentId done=$completedAgents/$POPULATION_SIZE")
+                                if (completedAgents == POPULATION_SIZE && currentAgentIndex == POPULATION_SIZE && !generationTransitioning) {
                                     generationTransitioning = true
                                     shouldEvolve = true
-
-                                    Log.d(
-                                        LOG_TAG,
-                                        "GEN_COMPLETE generation=$generation " +
-                                        "completed=$completedAgents/$POPULATION_SIZE"
-                                    )
+                                    Log.d(LOG_TAG, "GEN_COMPLETE gen=$generation done=$completedAgents/$POPULATION_SIZE")
                                 }
                             }
                         }
 
                         if (shouldEvolve) {
                             synchronized(evolveLock) {
-                                if (
-                                    isTrainingRunActive(myRunId) &&
-                                    generationToken == myGenerationToken
-                                ) {
-                                    try {
-                                        evolveNextGeneration()
-                                    } catch (t: Throwable) {
-                                        Log.e(LOG_TAG, "evolveNextGeneration failed", t)
-                                    } finally {
+                                if (isTrainingRunActive(myRunId) && generationToken == myGenerationToken) {
+                                    try { evolveNextGeneration() } catch (t: Throwable) { Log.e(LOG_TAG, "evolveNextGeneration failed", t) }
+                                    finally {
                                         synchronized(sharedLock) {
-                                            currentAgentIndex = 0
-                                            completedAgents = 0
-                                            uniqueCompletedAgents = 0
-                                            completedAgentIds.clear()
-                                            java.util.Arrays.fill(agentCompleted, false)
-
-                                            generationToken++
-                                            generationTransitioning = false
+                                            currentAgentIndex = 0; completedAgents = 0; uniqueCompletedAgents = 0
+                                            completedAgentIds.clear(); java.util.Arrays.fill(agentCompleted, false)
+                                            generationToken++; generationTransitioning = false
                                         }
-
-                                        Log.d(LOG_TAG, "GEN_NEXT_READY generation=$generation")
+                                        Log.d(LOG_TAG, "GEN_NEXT_READY gen=$generation")
                                     }
-                                } else {
-                                    synchronized(sharedLock) {
-                                        generationTransitioning = false
-                                    }
-                                }
+                                } else synchronized(sharedLock) { generationTransitioning = false }
                             }
                         }
                     }
-
-                    threadStatus[threadIdx].alive = false
-                    threadStatus[threadIdx].phase = "空闲"
-                    threadStatus[threadIdx].agentId = -1
-
+                    threadStatus[threadIdx].alive = false; threadStatus[threadIdx].phase = "空闲"; threadStatus[threadIdx].agentId = -1
                 }, "snake-train-$i")
-
                 t.isDaemon = true
                 t.priority = Thread.NORM_PRIORITY
                 t.start()
@@ -1467,15 +1101,8 @@ class SnakeView @JvmOverloads constructor(
     private fun stopParallelTraining() {
         val threadsToJoin: List<Thread>
         synchronized(trainingLifecycleLock) {
-            if (!trainActive && trainThreads.none { it.isAlive }) {
-                reinforceTraining = false
-                trainingMode = false
-                return
-            }
-            trainingRunId++
-            trainActive = false
-            reinforceTraining = false
-            trainingMode = false
+            if (!trainActive && trainThreads.none { it.isAlive }) { reinforceTraining = false; trainingMode = false; return }
+            trainingRunId++; trainActive = false; reinforceTraining = false; trainingMode = false
             threadsToJoin = trainThreads.toList()
         }
         for (t in threadsToJoin) { try { t.interrupt() } catch (_: Throwable) {} }
@@ -1548,15 +1175,13 @@ class SnakeView @JvmOverloads constructor(
     }
 
     fun pause() {
-        running = false
-        bgm?.stop()
+        running = false; bgm?.stop()
         Choreographer.getInstance().removeFrameCallback(frame)
     }
 
     private fun updateGame() {
         if (gameOver) return
         heartbeat()
-
         if (hunger >= hungerKillLimit) { die("HUNGER"); return }
         if (aiMode != 0) { queue.clear(); queue.add(chooseMove()) }
         if (queue.isNotEmpty()) {
@@ -1564,32 +1189,23 @@ class SnakeView @JvmOverloads constructor(
             if (!isReverse(requested, dir) && legalDirection(requested)) dir = requested
         }
         if (dir == P(0, 0)) return
-
         val oldState = buildState(snake, dir, food, hunger)
         val oldAction = dirs.indexOfFirst { it == dir }.coerceAtLeast(0)
         val nh = P(snake.first().x + dir.x, snake.first().y + dir.y)
-
         if (!inside(nh)) { qTerminalFromMove(oldState, oldAction, DEATH_WALL); die("WALL"); return }
-
         val ate = nh == food
         val body = snake.toList()
         val hitIndex = body.indexOf(nh)
         val tail = snake.last()
-
         if (hitIndex >= 0 && !(nh == tail && !ate)) {
             val sim = simulateOn(ArrayDeque(snake), dir)
             val region = freeRegion(sim.body)
             val cause = if (region < max(2, (snake.size * safetyMargin).toInt())) "TRAP" else "SELF"
             val reward = if (cause == "TRAP") DEATH_TRAP else DEATH_SELF
-            qTerminalFromMove(oldState, oldAction, reward)
-            die(cause)
-            return
+            qTerminalFromMove(oldState, oldAction, reward); die(cause); return
         }
-
-        snake.addFirst(nh)
-        v3RecordHead()
+        snake.addFirst(nh); v3RecordHead()
         var reward = REWARD_STEP
-
         if (ate) {
             val comboBonus = min(combo, 30) * 3
             val gain = 10 + comboBonus + snake.size
@@ -1612,21 +1228,17 @@ class SnakeView @JvmOverloads constructor(
             val hungerPenalty = -(hunger * hunger * 0.001f).coerceAtMost(0.15f)
             reward += hungerPenalty
         }
-
         val nextState = buildState(snake, dir, food, hunger)
         val nextMask = legalActionMask(snake, dir, food)
         qUpdate(oldState, oldAction, reward, nextState, nextMask, false)
         lastV2State = nextState; lastV2Action = oldAction
     }
 
-    private fun directionIndex(d: P): Int = when (d) {
-        P(0, -1) -> 0; P(0, 1) -> 1; P(-1, 0) -> 2; else -> 3
-    }
+    private fun directionIndex(d: P): Int = when (d) { P(0, -1) -> 0; P(0, 1) -> 1; P(-1, 0) -> 2; else -> 3 }
 
     private fun foodDirection(head: P, target: P): Int {
         val dx = target.x - head.x; val dy = target.y - head.y
-        return if (abs(dx) >= abs(dy)) { if (dx >= 0) 3 else 2 }
-        else { if (dy >= 0) 1 else 0 }
+        return if (abs(dx) >= abs(dy)) { if (dx >= 0) 3 else 2 } else { if (dy >= 0) 1 else 0 }
     }
 
     private fun dangerMask(body: ArrayDeque<P>, heading: P, target: P): Int {
@@ -1658,18 +1270,11 @@ class SnakeView @JvmOverloads constructor(
         val mobility = countSafeMovesFor(body, heading, target).coerceIn(0, 4)
         val region = freeRegion(body)
         val ratio = region.toFloat() / max(1, body.size)
-        val spaceBucket = when {
-            ratio < 0.8f -> 0; ratio < 1.3f -> 1; ratio < 2.0f -> 2; else -> 3
-        }
-        val hungerBucket = when {
-            hungerValue < 10 -> 0; hungerValue < 25 -> 1; hungerValue < 50 -> 2; hungerValue < 100 -> 3; else -> 4
-        }
-        val lengthBucket = when {
-            body.size < 12 -> 0; body.size < 30 -> 1; body.size < 60 -> 2; else -> 3
-        }
+        val spaceBucket = when { ratio < 0.8f -> 0; ratio < 1.3f -> 1; ratio < 2.0f -> 2; else -> 3 }
+        val hungerBucket = when { hungerValue < 10 -> 0; hungerValue < 25 -> 1; hungerValue < 50 -> 2; hungerValue < 100 -> 3; else -> 4 }
+        val lengthBucket = when { body.size < 12 -> 0; body.size < 30 -> 1; body.size < 60 -> 2; else -> 3 }
         val tail = if (tailReachable(body)) 1 else 0
         val headingIndex = directionIndex(heading)
-
         var s = foodD
         s = s * V2_DANGER + danger
         s = s * V2_MOBILITY + mobility
@@ -1696,21 +1301,16 @@ class SnakeView @JvmOverloads constructor(
         return mask
     }
 
-    private fun qTerminalFromMove(state: Int, action: Int, reward: Float) {
-        qUpdate(state, action, reward, state, 0, true)
-    }
+    private fun qTerminalFromMove(state: Int, action: Int, reward: Float) { qUpdate(state, action, reward, state, 0, true) }
 
     private fun selectV2Action(state: Int, legal: List<Candidate>, training: Boolean): Candidate {
         if (legal.isEmpty()) return Candidate(dir, -1e9f, "无合法动作", false)
         if (forcedStrategy >= 0) return bestSurvivalStep(legal)
-
         val epsilon = if (training) currentEpsilon() else 0f
         if (training && Random.nextFloat() < epsilon) {
             val safe = legal.filter { it.tailOk || it.region >= max(5, snake.size / 2) }
-            return if (safe.isNotEmpty()) safe[Random.nextInt(safe.size)]
-            else legal[Random.nextInt(legal.size)]
+            return if (safe.isNotEmpty()) safe[Random.nextInt(safe.size)] else legal[Random.nextInt(legal.size)]
         }
-
         var best = legal.first(); var bestValue = -Float.MAX_VALUE
         for (candidate in legal) {
             val action = dirs.indexOfFirst { it == candidate.d }
@@ -1722,9 +1322,7 @@ class SnakeView @JvmOverloads constructor(
                 candidate.region >= snake.size -> 0.35f
                 else -> -1.5f
             }
-            val foodBonus = if (candidate.ate) 4.0f
-                            else if (candidate.foodDist >= 0) 0.7f / (candidate.foodDist + 1)
-                            else 0f
+            val foodBonus = if (candidate.ate) 4.0f else if (candidate.foodDist >= 0) 0.7f / (candidate.foodDist + 1) else 0f
             val visitBonus = 0.12f / kotlin.math.sqrt((visits + 1).toFloat())
             val value = q + safetyBonus + foodBonus + visitBonus
             if (value > bestValue) { bestValue = value; best = candidate.copy(qValue = q) }
@@ -1734,69 +1332,46 @@ class SnakeView @JvmOverloads constructor(
 
     private fun chooseMove(): P {
         aiStepStartNs = System.nanoTime(); aiStepBudgetNs = budgetFor(gameSpeed)
-        if (v3FusionEnabled) {
-            val v3g = v3SelectGoal(); v3Goal = v3g; v3GoalCounter[v3g.ordinal]++
-        }
-
+        if (v3FusionEnabled) { val v3g = v3SelectGoal(); v3Goal = v3g; v3GoalCounter[v3g.ordinal]++ }
         val futures: List<Future<Candidate>> = dirs.map { d -> aiPool.submit(Callable { evaluate(d) }) }
-        val candidates = futures.map {
-            try { it.get() } catch (_: Throwable) { Candidate(P(0, 0), -1e9f, "AI异常", false) }
-        }
-
+        val candidates = futures.map { try { it.get() } catch (_: Throwable) { Candidate(P(0, 0), -1e9f, "AI异常", false) } }
         val legal = candidates.filter { it.legal }
-        if (legal.isEmpty()) {
-            ai = Snapshot(strategy = "NO MOVE", reason = "四个方向都无法前进", danger = 5, chosen = dir, candidates = candidates)
-            return dir
-        }
-
+        if (legal.isEmpty()) { ai = Snapshot(strategy = "NO MOVE", reason = "四个方向都无法前进", danger = 5, chosen = dir, candidates = candidates); return dir }
         val danger = calculateDanger()
         val regionNow = freeRegion(snake)
         val foodDistNow = distance(snake.first(), food, snake, true)
         val state = buildState(snake, dir, food, hunger)
 
-        // L1
         val safeFood = findSafeFoodStep()
         if (safeFood != null) {
             val action = dirs.indexOfFirst { it == safeFood }.coerceAtLeast(0)
             val q = qRead(state, action)
             lastV2State = state; lastV2Action = action
             v3LayerActive = 1; v3LayerWhy = "L1安全食物层(硬安全)"
-            ai = Snapshot(
-                strategy = "V2 SAFE FOOD", reason = "安全路径可吃食物，吃后尾巴仍可达",
-                danger = danger, region = regionNow,
-                spaceRatio = regionNow.toFloat() / max(1, snake.size),
-                tailReachable = tailReachable(snake), foodReachable = true,
-                foodDistance = foodDistNow, hunger = hunger, chosen = safeFood,
-                candidates = candidates, depth = 2, nodes = legal.size,
-                hungerFactor = hungerFactorValue(), regionWeight = wRegion,
-                strategyId = 10, qValue = q, nVisits = qVisit(state, action),
-                forceEatActive = false, forceEatSafe = true, safeFollowMode = false
-            )
+            ai = Snapshot(strategy = "V2 SAFE FOOD", reason = "安全路径可吃食物，吃后尾巴仍可达",
+                danger = danger, region = regionNow, spaceRatio = regionNow.toFloat() / max(1, snake.size),
+                tailReachable = tailReachable(snake), foodReachable = true, foodDistance = foodDistNow,
+                hunger = hunger, chosen = safeFood, candidates = candidates, depth = 2, nodes = legal.size,
+                hungerFactor = hungerFactorValue(), regionWeight = wRegion, strategyId = 10,
+                qValue = q, nVisits = qVisit(state, action), forceEatActive = false, forceEatSafe = true, safeFollowMode = false)
             return v3PostCheck(safeFood, legal, state)
         }
 
-        // L2
         val tailStep = followTailStep(legal)
         if (tailStep != null && hunger < hungerForceEat()) {
             val action = dirs.indexOfFirst { it == tailStep }.coerceAtLeast(0)
             val q = qRead(state, action)
             lastV2State = state; lastV2Action = action
             v3LayerActive = 2; v3LayerWhy = "L2尾巴追踪层(空间循环)"
-            ai = Snapshot(
-                strategy = "V2 TAIL", reason = "食物路线风险较高，沿尾巴保持循环空间",
-                danger = danger, region = regionNow,
-                spaceRatio = regionNow.toFloat() / max(1, snake.size),
-                tailReachable = true, foodReachable = foodDistNow >= 0,
-                foodDistance = foodDistNow, hunger = hunger, chosen = tailStep,
-                candidates = candidates, depth = 1, nodes = legal.size,
-                hungerFactor = hungerFactorValue(), regionWeight = wRegion,
-                strategyId = 11, qValue = q, nVisits = qVisit(state, action),
-                forceEatActive = false, forceEatSafe = false, safeFollowMode = true
-            )
+            ai = Snapshot(strategy = "V2 TAIL", reason = "食物路线风险较高，沿尾巴保持循环空间",
+                danger = danger, region = regionNow, spaceRatio = regionNow.toFloat() / max(1, snake.size),
+                tailReachable = true, foodReachable = foodDistNow >= 0, foodDistance = foodDistNow,
+                hunger = hunger, chosen = tailStep, candidates = candidates, depth = 1, nodes = legal.size,
+                hungerFactor = hungerFactorValue(), regionWeight = wRegion, strategyId = 11,
+                qValue = q, nVisits = qVisit(state, action), forceEatActive = false, forceEatSafe = false, safeFollowMode = true)
             return v3PostCheck(tailStep, legal, state)
         }
 
-        // L3
         val forceThreshold = hungerForceEat()
         if (hunger >= forceThreshold && foodDistNow >= 0) {
             val safeFoodCandidates = legal.filter { it.tailOk && it.foodDist >= 0 }
@@ -1805,51 +1380,32 @@ class SnakeView @JvmOverloads constructor(
                 val action = dirs.indexOfFirst { it == selected.d }.coerceAtLeast(0)
                 lastV2State = state; lastV2Action = action
                 v3LayerActive = 3; v3LayerWhy = "L3饥饿压制层(强制进食)"
-                ai = Snapshot(
-                    strategy = "V2 HUNGER", reason = "饥饿压力提高食物收益，但仍受安全屏蔽",
-                    danger = max(danger, 3), region = regionNow,
-                    spaceRatio = regionNow.toFloat() / max(1, snake.size),
-                    tailReachable = selected.tailOk, foodReachable = true,
-                    foodDistance = selected.foodDist, hunger = hunger, chosen = selected.d,
+                ai = Snapshot(strategy = "V2 HUNGER", reason = "饥饿压力提高食物收益，但仍受安全屏蔽",
+                    danger = max(danger, 3), region = regionNow, spaceRatio = regionNow.toFloat() / max(1, snake.size),
+                    tailReachable = selected.tailOk, foodReachable = true, foodDistance = selected.foodDist,
+                    hunger = hunger, chosen = selected.d,
                     candidates = candidates.map { if (it.d == selected.d) it.copy(qValue = qRead(state, action)) else it },
-                    depth = 1, nodes = legal.size,
-                    hungerFactor = hungerFactorValue(), regionWeight = wRegion,
-                    strategyId = 12, qValue = qRead(state, action),
-                    nVisits = qVisit(state, action),
-                    forceEatActive = true, forceEatSafe = true, safeFollowMode = false
-                )
+                    depth = 1, nodes = legal.size, hungerFactor = hungerFactorValue(), regionWeight = wRegion,
+                    strategyId = 12, qValue = qRead(state, action), nVisits = qVisit(state, action),
+                    forceEatActive = true, forceEatSafe = true, safeFollowMode = false)
                 return v3PostCheck(selected.d, legal, state)
             }
         }
 
-        // L4
-        val shielded = legal.filter {
-            val ratio = it.region.toFloat() / max(1, snake.size)
-            it.tailOk || ratio >= 1.0f || (snake.size < 15 && ratio >= 0.75f)
-        }
+        val shielded = legal.filter { val ratio = it.region.toFloat() / max(1, snake.size); it.tailOk || ratio >= 1.0f || (snake.size < 15 && ratio >= 0.75f) }
         val pool = if (shielded.isNotEmpty()) shielded else legal
-
-        val brain = if (trainingMode || reinforceTraining)
-            population[currentAgentIndex.coerceAtLeast(0) % POPULATION_SIZE]
-        else population[0]
-
+        val brain = if (trainingMode || reinforceTraining) population[currentAgentIndex.coerceAtLeast(0) % POPULATION_SIZE] else population[0]
         val nnInputs = buildInputs(snake.first(), food, snake)
         val nnVals = brain.think(nnInputs)
-
         val de = checkFoodDeadEnd()
         deadEndPredicted = de.first; foodSpaceRatio = de.second
-        var deadEndPenalty = 0f
-        if (de.first) deadEndPenalty = -5f
-
-        val rSteps = when {
-            snake.size > 60 -> 5; snake.size > 25 -> 3; else -> 0
-        }
+        var deadEndPenalty = 0f; if (de.first) deadEndPenalty = -5f
+        val rSteps = when { snake.size > 60 -> 5; snake.size > 25 -> 3; else -> 0 }
         rolloutActive = rSteps > 0; rolloutSteps = rSteps
 
         var best = pool.first(); var bestValue = -Float.MAX_VALUE
         for (candidate in pool) {
-            val action = dirs.indexOfFirst { it == candidate.d }
-            if (action < 0) continue
+            val action = dirs.indexOfFirst { it == candidate.d }; if (action < 0) continue
             val q = qRead(state, action); val nn = nnVals[action]; val rule = candidate.score
             val rolloutScore = if (rSteps > 0) rolloutN(candidate.d, rSteps) else 0f
             val mixed = qWeight * q + nnWeight * nn * 5f + rule * 0.001f + deadEndPenalty + rolloutScore * 0.5f
@@ -1859,35 +1415,24 @@ class SnakeView @JvmOverloads constructor(
         val action = dirs.indexOfFirst { it == best.d }.coerceAtLeast(0)
         lastV2State = state; lastV2Action = action
         v3LayerActive = 4; v3LayerWhy = "L4混合决策(Q+NN+规则)"
-
-        ai = Snapshot(
-            strategy = "V4混合进化 (Q+NN+记忆)", reason = "规则过滤后，Q表与NN选出最优动作",
-            danger = danger, region = regionNow,
-            spaceRatio = regionNow.toFloat() / max(1, snake.size),
-            tailReachable = tailReachable(snake), foodReachable = foodDistNow >= 0,
-            foodDistance = foodDistNow, hunger = hunger, chosen = best.d,
-            candidates = candidates.map { if (it.d == best.d) it.copy(qValue = qRead(state, action)) else it },
-            depth = 1, nodes = pool.size,
-            hungerFactor = hungerFactorValue(), regionWeight = wRegion,
-            strategyId = 20, qValue = qRead(state, action),
-            nVisits = qVisit(state, action),
-            forceEatActive = false, forceEatSafe = false, safeFollowMode = false
-        )
+        ai = Snapshot(strategy = "V4混合进化 (Q+NN+记忆)", reason = "规则过滤后，Q表与NN选出最优动作",
+            danger = danger, region = regionNow, spaceRatio = regionNow.toFloat() / max(1, snake.size),
+            tailReachable = tailReachable(snake), foodReachable = foodDistNow >= 0, foodDistance = foodDistNow,
+            hunger = hunger, chosen = best.d, candidates = candidates.map { if (it.d == best.d) it.copy(qValue = qRead(state, action)) else it },
+            depth = 1, nodes = pool.size, hungerFactor = hungerFactorValue(), regionWeight = wRegion,
+            strategyId = 20, qValue = qRead(state, action), nVisits = qVisit(state, action),
+            forceEatActive = false, forceEatSafe = false, safeFollowMode = false)
         return v3PostCheck(best.d, legal, state)
     }
 
-    private fun hungerFactorValue(): Float = when {
-        hunger >= 60 -> 4f; hunger >= 30 -> 2.5f; hunger >= 15 -> 1.6f; else -> 1f
-    }
+    private fun hungerFactorValue(): Float = when { hunger >= 60 -> 4f; hunger >= 30 -> 2.5f; hunger >= 15 -> 1.6f; else -> 1f }
 
     private fun followTailStep(legal: List<Candidate>): P? {
         if (snake.size < 2) return null
         val path = shortestPath(snake.first(), snake.last(), snake, allowTail = true) ?: return null
         if (path.isEmpty()) return null
-        val step = path.first()
-        if (legal.none { it.d == step }) return null
-        val sim = simulate(snake.first(), step)
-        if (sim.body.isEmpty()) return null
+        val step = path.first(); if (legal.none { it.d == step }) return null
+        val sim = simulate(snake.first(), step); if (sim.body.isEmpty()) return null
         if (!tailReachable(sim.body)) return null
         val r = freeRegion(sim.body)
         if (r < 3 && snake.size < total - 5) return null
@@ -1897,15 +1442,13 @@ class SnakeView @JvmOverloads constructor(
     private fun findSafeFoodStep(): P? {
         val path = shortestPath(snake.first(), food, snake, allowTail = true) ?: return null
         if (path.isEmpty()) return null
-        val simBody = ArrayDeque(snake)
-        var ate = false
+        val simBody = ArrayDeque(snake); var ate = false
         for (step in path) {
             val nh = P(simBody.first().x + step.x, simBody.first().y + step.y)
             if (!inside(nh)) return null
             val willEat = nh == food
             if (simBody.contains(nh) && !(nh == simBody.last() && !willEat)) return null
-            simBody.addFirst(nh)
-            if (!willEat) simBody.removeLast() else ate = true
+            simBody.addFirst(nh); if (!willEat) simBody.removeLast() else ate = true
         }
         if (!ate) return null
         if (!tailReachable(simBody)) return null
@@ -1915,10 +1458,7 @@ class SnakeView @JvmOverloads constructor(
         if (len > 120 && freeLeft < 10) return null
         if (len > 90 && freeLeft < 14) return null
         if (len > 60 && freeLeft < 20) return null
-        if (len <= 60 && freeLeft >= 20) {
-            val r = freeRegion(simBody)
-            if (r < max(4, freeLeft / 3)) return null
-        }
+        if (len <= 60 && freeLeft >= 20) { val r = freeRegion(simBody); if (r < max(4, freeLeft / 3)) return null }
         return path.first()
     }
 
@@ -1928,10 +1468,8 @@ class SnakeView @JvmOverloads constructor(
         val tailW = (wTailGood / wTailGood0).coerceIn(0.8f, 1.2f)
         val spaceW = (wSpace / wSpace0).coerceIn(0.8f, 1.2f)
         val foodW = (wFoodNear / wFoodNear0).coerceIn(0.8f, 1.2f)
-
         for (cand in legal) {
-            val sim = simulate(snake.first(), cand.d)
-            if (sim.body.isEmpty()) continue
+            val sim = simulate(snake.first(), cand.d); if (sim.body.isEmpty()) continue
             val nh = sim.body.first(); val r = freeRegion(sim.body)
             val t = tailReachable(sim.body); val mob = countSafeMoves(sim.body)
             val freeLeft = total - sim.body.size
@@ -1942,16 +1480,10 @@ class SnakeView @JvmOverloads constructor(
             if (freeLeft > 0) sc += (r.toFloat() / freeLeft) * 15000f * spaceW
             sc += mob * 500f
             var bodyAdj = 0
-            for (d in dirs) {
-                val p = P(nh.x + d.x, nh.y + d.y)
-                if (bodySet.contains(p) || sim.body.contains(p)) bodyAdj++
-            }
+            for (d in dirs) { val p = P(nh.x + d.x, nh.y + d.y); if (bodySet.contains(p) || sim.body.contains(p)) bodyAdj++ }
             sc += bodyAdj * 600f
             val dToTail = distance(nh, tailPos, sim.body, true)
-            if (dToTail >= 0) {
-                sc += 8000f / (dToTail + 1)
-                if (dToTail > 6) sc -= (dToTail - 6) * 150f
-            }
+            if (dToTail >= 0) { sc += 8000f / (dToTail + 1); if (dToTail > 6) sc -= (dToTail - 6) * 150f }
             val fd = distance(nh, food, sim.body, true)
             if (fd >= 0) sc += (500f * foodW) / (fd + 1)
             if (len >= 100) sc += r * 300f
@@ -1975,23 +1507,18 @@ class SnakeView @JvmOverloads constructor(
         val foodDist = distance(sim.body.first(), food, sim.body, true)
         val ate = sim.ate; val mobility = countSafeMoves(sim.body)
         val hungerFactor = hungerFactorValue()
-        val lenBoost = if (snake.size >= safeFollowLength)
-            (snake.size.toFloat() / safeFollowLength).coerceIn(1f, 3f) else 1f
-
+        val lenBoost = if (snake.size >= safeFollowLength) (snake.size.toFloat() / safeFollowLength).coerceIn(1f, 3f) else 1f
         val regionScoreVal = region * wRegion * lenBoost
         val mobilityScoreVal = mobility * wMobility
         val tailScoreVal = if (tail) wTailGood * lenBoost else wTailBad * lenBoost
-        var foodScoreVal = if (foodDist >= 0) hungerFactor * aggression * (wFoodNear / (foodDist + 1))
-                           else -450f * hungerFactor
+        var foodScoreVal = if (foodDist >= 0) hungerFactor * aggression * (wFoodNear / (foodDist + 1)) else -450f * hungerFactor
         if (ate) foodScoreVal += wFoodAte * aggression
-
         var eatPenalty = 0f
         if (ate) {
             val afterSize = sim.body.size
             val needSpace = (afterSize * safetyMargin).toInt() + 2
-            if (!tail || region < needSpace) {
-                eatPenalty = -7500f - snake.size * 100f
-            } else {
+            if (!tail || region < needSpace) eatPenalty = -7500f - snake.size * 100f
+            else {
                 val after = ArrayDeque(sim.body)
                 val dx = after.last().x - after.first().x
                 val dy = after.last().y - after.first().y
@@ -2003,71 +1530,38 @@ class SnakeView @JvmOverloads constructor(
                 if (follow != null && canSim(after, follow)) {
                     val next = simulateOn(after, follow)
                     val r2 = freeRegion(next.body); val t2 = tailReachable(next.body)
-                    if (!t2 || r2 < (afterSize * 1.2f).toInt()) {
-                        eatPenalty = -4500f - snake.size * 60f
-                    }
+                    if (!t2 || r2 < (afterSize * 1.2f).toInt()) eatPenalty = -4500f - snake.size * 60f
                 }
             }
         }
-
-        val edge = min(min(sim.body.first().x, cols - 1 - sim.body.first().x),
-                       min(sim.body.first().y, rows - 1 - sim.body.first().y))
+        val edge = min(min(sim.body.first().x, cols - 1 - sim.body.first().x), min(sim.body.first().y, rows - 1 - sim.body.first().y))
         val edgeScoreVal = -max(0, 2 - edge) * wEdge
         val spacePenalty = max(0f, snake.size * safetyMargin - region.toFloat())
         val spaceScoreVal = -spacePenalty * wSpace
-        val totalScore = regionScoreVal + mobilityScoreVal + tailScoreVal +
-                         foodScoreVal + edgeScoreVal + spaceScoreVal + eatPenalty
-
+        val totalScore = regionScoreVal + mobilityScoreVal + tailScoreVal + foodScoreVal + edgeScoreVal + spaceScoreVal + eatPenalty
         val reason = when {
             ate && eatPenalty < 0 -> "吃完会困死，避开"
             ate -> "马上吃到食物"
             tail -> "保持尾巴可达"
             else -> "扩大可用空间"
         }
-
-        return Candidate(
-            d = d, score = totalScore, reason = reason, legal = true,
-            regionScore = regionScoreVal, mobilityScore = mobilityScoreVal,
-            tailScore = tailScoreVal, foodScore = foodScoreVal,
-            edgeScore = edgeScoreVal, spaceScore = spaceScoreVal,
-            region = region, mobility = mobility, tailOk = tail,
-            foodDist = foodDist, ate = ate
-        )
+        return Candidate(d = d, score = totalScore, reason = reason, legal = true,
+            regionScore = regionScoreVal, mobilityScore = mobilityScoreVal, tailScore = tailScoreVal,
+            foodScore = foodScoreVal, edgeScore = edgeScoreVal, spaceScore = spaceScoreVal,
+            region = region, mobility = mobility, tailOk = tail, foodDist = foodDist, ate = ate)
     }
 
     private fun clampW(v: Float, lo: Float, hi: Float): Float = v.coerceIn(lo, hi)
 
     private fun adjustWeights(cause: String) {
-        val beforeEdge = wEdge; val beforeTail = wTailGood
-        val beforeSpace = wSpace; val beforeFood = wFoodNear
+        val beforeEdge = wEdge; val beforeTail = wTailGood; val beforeSpace = wSpace; val beforeFood = wFoodNear
         val beforeAgg = aggression; val beforeSafety = safetyMargin
-
         when (cause) {
-            "WALL" -> {
-                wEdge = clampW(wEdge * 1.03f, wEdge0 * 0.9f, wEdge0 * 1.1f)
-                aggression = clampW(aggression * 0.99f, 0.95f, 1.35f)
-            }
-            "SELF" -> {
-                wTailGood = clampW(wTailGood * 1.03f, wTailGood0 * 0.9f, wTailGood0 * 1.1f)
-                wTailBad = clampW(wTailBad * 1.02f, wTailBad0 * 1.1f, wTailBad0 * 0.9f)
-                safetyMargin = clampW(safetyMargin * 1.01f, 1.0f, 1.20f)
-            }
-            "TRAP" -> {
-                wSpace = clampW(wSpace * 1.04f, wSpace0 * 0.9f, wSpace0 * 1.1f)
-                wRegion = clampW(wRegion * 1.02f, wRegion0 * 0.9f, wRegion0 * 1.1f)
-                safetyMargin = clampW(safetyMargin * 1.01f, 1.0f, 1.20f)
-                aggression = clampW(aggression * 1.005f, 0.95f, 1.35f)
-                wFoodAte = clampW(wFoodAte * 1.02f, wFoodAte0 * 0.9f, wFoodAte0 * 1.1f)
-            }
-            "HUNGER" -> {
-                wFoodNear = clampW(wFoodNear * 1.04f, wFoodNear0 * 0.9f, wFoodNear0 * 1.1f)
-                wFoodAte = clampW(wFoodAte * 1.03f, wFoodAte0 * 0.9f, wFoodAte0 * 1.1f)
-                aggression = clampW(aggression * 1.02f, 0.95f, 1.35f)
-                wSpace = clampW(wSpace * 0.98f, wSpace0 * 0.9f, wSpace0 * 1.1f)
-                safetyMargin = clampW(safetyMargin * 0.99f, 1.0f, 1.20f)
-            }
+            "WALL" -> { wEdge = clampW(wEdge * 1.03f, wEdge0 * 0.9f, wEdge0 * 1.1f); aggression = clampW(aggression * 0.99f, 0.95f, 1.35f) }
+            "SELF" -> { wTailGood = clampW(wTailGood * 1.03f, wTailGood0 * 0.9f, wTailGood0 * 1.1f); wTailBad = clampW(wTailBad * 1.02f, wTailBad0 * 1.1f, wTailBad0 * 0.9f); safetyMargin = clampW(safetyMargin * 1.01f, 1.0f, 1.20f) }
+            "TRAP" -> { wSpace = clampW(wSpace * 1.04f, wSpace0 * 0.9f, wSpace0 * 1.1f); wRegion = clampW(wRegion * 1.02f, wRegion0 * 0.9f, wRegion0 * 1.1f); safetyMargin = clampW(safetyMargin * 1.01f, 1.0f, 1.20f); aggression = clampW(aggression * 1.005f, 0.95f, 1.35f); wFoodAte = clampW(wFoodAte * 1.02f, wFoodAte0 * 0.9f, wFoodAte0 * 1.1f) }
+            "HUNGER" -> { wFoodNear = clampW(wFoodNear * 1.04f, wFoodNear0 * 0.9f, wFoodNear0 * 1.1f); wFoodAte = clampW(wFoodAte * 1.03f, wFoodAte0 * 0.9f, wFoodAte0 * 1.1f); aggression = clampW(aggression * 1.02f, 0.95f, 1.35f); wSpace = clampW(wSpace * 0.98f, wSpace0 * 0.9f, wSpace0 * 1.1f); safetyMargin = clampW(safetyMargin * 0.99f, 1.0f, 1.20f) }
         }
-
         wRegion = wRegion * 0.95f + wRegion0 * 0.05f
         wMobility = wMobility * 0.95f + wMobility0 * 0.05f
         wEdge = wEdge * 0.95f + wEdge0 * 0.05f
@@ -2075,7 +1569,6 @@ class SnakeView @JvmOverloads constructor(
         wFoodNear = wFoodNear * 0.95f + wFoodNear0 * 0.05f
         wTailGood = wTailGood * 0.95f + wTailGood0 * 0.05f
         wFoodAte = wFoodAte * 0.95f + wFoodAte0 * 0.05f
-
         lastLearnAction = when (cause) {
             "WALL" -> "边界${"%.0f→%.0f".format(beforeEdge, wEdge)} 攻${"%.2f→%.2f".format(beforeAgg, aggression)}"
             "SELF" -> "尾+${"%.0f→%.0f".format(beforeTail, wTailGood)} 安全${"%.2f→%.2f".format(beforeSafety, safetyMargin)}"
@@ -2088,18 +1581,15 @@ class SnakeView @JvmOverloads constructor(
     private fun saveTrainingState() {
         try {
             val file = context.getFileStreamPath("snake_training.dat")
-            val genCopy: Int; val scoreCopy: Float; val qCopy: FloatArray
-            val nCopy: IntArray; val popCopy: List<TinyBrain>
+            val genCopy: Int; val scoreCopy: Float; val qCopy: FloatArray; val nCopy: IntArray; val popCopy: List<TinyBrain>
             synchronized(sharedLock) {
                 genCopy = generation; scoreCopy = bestScoreAllTime
                 qCopy = qV2.copyOf(); nCopy = nV2.copyOf()
-                popCopy = population.map { brain ->
-                    TinyBrain().apply {
-                        System.arraycopy(brain.w1, 0, w1, 0, brain.w1.size)
-                        System.arraycopy(brain.w2, 0, w2, 0, brain.w2.size)
-                        System.arraycopy(brain.w3, 0, w3, 0, brain.w3.size)
-                    }
-                }
+                popCopy = population.map { b -> TinyBrain().apply {
+                    System.arraycopy(b.w1, 0, w1, 0, b.w1.size)
+                    System.arraycopy(b.w2, 0, w2, 0, b.w2.size)
+                    System.arraycopy(b.w3, 0, w3, 0, b.w3.size)
+                } }
             }
             DataOutputStream(BufferedOutputStream(FileOutputStream(file))).use { out ->
                 out.writeInt(genCopy); out.writeFloat(scoreCopy)
@@ -2140,20 +1630,17 @@ class SnakeView @JvmOverloads constructor(
     private fun saveLearning() {
         synchronized(sharedLock) {
             prefs.edit()
-                .putFloat("learn_aggression", aggression)
-                .putFloat("learn_safety", safetyMargin)
+                .putFloat("learn_aggression", aggression).putFloat("learn_safety", safetyMargin)
+                .putFloat("learn_shortcut", shortcutBonus)
                 .putFloat("w_region", wRegion).putFloat("w_mobility", wMobility)
                 .putFloat("w_tail_good", wTailGood).putFloat("w_tail_bad", wTailBad)
                 .putFloat("w_food_near", wFoodNear).putFloat("w_food_ate", wFoodAte)
                 .putFloat("w_edge", wEdge).putFloat("w_space", wSpace)
-                .putFloat("v3_g_food", v3Genome.foodPriority)
-                .putFloat("v3_g_space", v3Genome.spacePriority)
-                .putFloat("v3_g_tail", v3Genome.tailPriority)
-                .putFloat("v3_g_danger", v3Genome.dangerAversion)
-                .putFloat("v3_g_loop", v3Genome.loopAversion)
-                .putFloat("v3_g_hunger", v3Genome.hungerUrgency)
-                .putInt("v3_lesson_fires", v3LessonFires)
-                .putInt("v3_loop_hits", v3LoopHits)
+                .putString("last_learn_action", lastLearnAction)
+                .putFloat("v3_g_food", v3Genome.foodPriority).putFloat("v3_g_space", v3Genome.spacePriority)
+                .putFloat("v3_g_tail", v3Genome.tailPriority).putFloat("v3_g_danger", v3Genome.dangerAversion)
+                .putFloat("v3_g_loop", v3Genome.loopAversion).putFloat("v3_g_hunger", v3Genome.hungerUrgency)
+                .putInt("v3_lesson_fires", v3LessonFires).putInt("v3_loop_hits", v3LoopHits)
                 .putInt("stat_wall", deathWall).putInt("stat_self", deathSelf)
                 .putInt("stat_trap", deathTrap).putInt("stat_total", totalGames)
                 .putInt("money", money).putInt("high_score", highScore)
@@ -2164,15 +1651,11 @@ class SnakeView @JvmOverloads constructor(
     private fun die(cause: String) {
         gameOver = true; deathCause = cause
         v3AnalyzeDeath(cause)
-        when (cause) {
-            "WALL" -> deathWall++; "SELF" -> deathSelf++
-            "HUNGER" -> deathTrap++; else -> deathTrap++
-        }
-        adjustWeights(cause); totalGames++
+        when (cause) { "WALL" -> deathWall++; "SELF" -> deathSelf++; "HUNGER" -> deathTrap++; else -> deathTrap++ }
+        adjustWeights(cause); totalGames++; heartbeat()
         recentScores.addLast(score)
         while (recentScores.size > 50) recentScores.removeFirst()
         if (score > bestRecentScore) bestRecentScore = score
-
         aggression = when (cause) {
             "WALL" -> max(0.9f, aggression * 0.99f)
             "SELF" -> max(0.9f, aggression * 0.995f)
@@ -2185,19 +1668,15 @@ class SnakeView @JvmOverloads constructor(
         aggression = aggression * 0.95f + 1.15f * 0.05f
         safetyMargin = safetyMargin.coerceIn(1.0f, 1.20f)
         aggression = aggression.coerceIn(0.95f, 1.35f)
-
-        lastDeathInfo = "死因=$cause 长度=${snake.size} 分=$score " +
-                        "空间=${ai.region} 需求=${(snake.size * safetyMargin).toInt()}"
+        lastDeathInfo = "死因=$cause 长度=${snake.size} 分=$score 空间=${ai.region} 需求=${(snake.size * safetyMargin).toInt()}"
         saveLearning()
-
         if (trainingMode) { reset(); return }
         flash = 1f; vibrateDeath(); restartCountdown = 0L; invalidate()
     }
 
     private fun simulate(head: P, d: P): Sim = simulateOn(ArrayDeque(snake), d)
     private fun simulateOn(src: ArrayDeque<P>, d: P): Sim {
-        val b = ArrayDeque(src)
-        if (b.isEmpty()) return Sim(b, false)
+        val b = ArrayDeque(src); if (b.isEmpty()) return Sim(b, false)
         val nh = P(b.first().x + d.x, b.first().y + d.y)
         if (!inside(nh)) return Sim(b, false)
         val ate = nh == food
@@ -2217,9 +1696,7 @@ class SnakeView @JvmOverloads constructor(
                 var space = 0
                 for (sd in dirs) {
                     val sx = nh.x + sd.x; val sy = nh.y + sd.y
-                    if (sx in 0 until cols && sy in 0 until rows) {
-                        if (!body.any { it.x == sx && it.y == sy }) space++
-                    }
+                    if (sx in 0 until cols && sy in 0 until rows) { if (!body.any { it.x == sx && it.y == sy }) space++ }
                 }
                 if (space > bestSpace) { bestSpace = space; bestNext = d }
             }
@@ -2231,8 +1708,7 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun simulateForBody(src: ArrayDeque<P>, d: P, target: P): Sim {
-        val b = ArrayDeque(src)
-        if (b.isEmpty()) return Sim(b, false)
+        val b = ArrayDeque(src); if (b.isEmpty()) return Sim(b, false)
         val nh = P(b.first().x + d.x, b.first().y + d.y)
         if (!inside(nh)) return Sim(b, false)
         val ate = nh == target
@@ -2249,14 +1725,14 @@ class SnakeView @JvmOverloads constructor(
         return !body.contains(nh) || (nh == body.last() && !ate)
     }
 
-    private fun legalDirection(d: P): Boolean =
-        d != P(0, 0) && !isReverse(d, dir) && canSim(snake, d)
-
+    private fun legalDirection(d: P): Boolean = d != P(0, 0) && !isReverse(d, dir) && canSim(snake, d)
     private fun isReverse(a: P, b: P): Boolean = a.x == -b.x && a.y == -b.y
+
     private fun directionOfFirst(body: ArrayDeque<P>): P {
         if (body.size < 2) return dir
         return P(body.elementAt(0).x - body.elementAt(1).x, body.elementAt(0).y - body.elementAt(1).y)
     }
+
     private fun inside(p: P): Boolean = p.x in 0 until cols && p.y in 0 until rows
 
     private fun shortestPath(start: P, target: P, body: Collection<P>, allowTail: Boolean): List<P>? {
@@ -2266,10 +1742,7 @@ class SnakeView @JvmOverloads constructor(
         val parent = IntArray(total) { -1 }; val parentDir = arrayOfNulls<P>(total)
         java.util.Arrays.fill(visited, 0, total, false)
         for (p in body) { if (!inside(p)) continue; visited[p.y * cols + p.x] = true }
-        if (allowTail && body.isNotEmpty()) {
-            val last = body.last()
-            if (inside(last)) visited[last.y * cols + last.x] = false
-        }
+        if (allowTail && body.isNotEmpty()) { val last = body.last(); if (inside(last)) visited[last.y * cols + last.x] = false }
         val startIndex = start.y * cols + start.x; val targetIndex = target.y * cols + target.x
         visited[startIndex] = true
         var head = 0; var tail = 0; queue[tail++] = startIndex; var found = false
@@ -2322,10 +1795,7 @@ class SnakeView @JvmOverloads constructor(
         val visited = tlVisited.get(); val queue = tlQueue.get()
         java.util.Arrays.fill(visited, 0, total, false)
         for (p in body) { if (!inside(p)) continue; visited[p.y * cols + p.x] = true }
-        if (allowTail && body.isNotEmpty()) {
-            val last = body.last()
-            if (inside(last)) visited[last.y * cols + last.x] = false
-        }
+        if (allowTail && body.isNotEmpty()) { val last = body.last(); if (inside(last)) visited[last.y * cols + last.x] = false }
         val startIndex = start.y * cols + start.x; visited[startIndex] = true
         var head = 0; var tail = 0; queue[tail++] = startIndex; var dist = 0
         while (head < tail) {
@@ -2358,8 +1828,7 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    private fun tailReachable(body: ArrayDeque<P>): Boolean =
-        if (body.isEmpty()) false else distance(body.first(), body.last(), body, true) >= 0
+    private fun tailReachable(body: ArrayDeque<P>): Boolean = if (body.isEmpty()) false else distance(body.first(), body.last(), body, true) >= 0
 
     private fun checkFoodDeadEnd(): Pair<Boolean, Float> {
         if (snake.isEmpty()) return Pair(false, 10f)
@@ -2392,17 +1861,12 @@ class SnakeView @JvmOverloads constructor(
 
     private fun placeFood() {
         val free = ArrayList<P>()
-        for (x in 0 until cols) for (y in 0 until rows) {
-            val p = P(x, y); if (!snake.contains(p)) free.add(p)
-        }
+        for (x in 0 until cols) for (y in 0 until rows) { val p = P(x, y); if (!snake.contains(p)) free.add(p) }
         if (free.isNotEmpty()) food = free[Random.nextInt(free.size)]
     }
 
     private fun spawnFoodEffect(p: P) {
-        repeat(14) {
-            particles.add(Particle(p.x.toFloat(), p.y.toFloat(),
-                Random.nextFloat() - 0.5f, Random.nextFloat() - 0.5f, 1f, Color.YELLOW))
-        }
+        repeat(14) { particles.add(Particle(p.x.toFloat(), p.y.toFloat(), Random.nextFloat() - 0.5f, Random.nextFloat() - 0.5f, 1f, Color.YELLOW)) }
         floats.add(FloatText(p.x.toFloat(), p.y.toFloat(), 1f, "+10"))
     }
 
@@ -2428,14 +1892,8 @@ class SnakeView @JvmOverloads constructor(
 
     override fun onDraw(c: Canvas) {
         super.onDraw(c)
-        if (reinforceTraining) {
-            c.drawColor(Color.BLACK); text.textAlign = Paint.Align.LEFT
-            drawTrainingDashboard(c); return
-        }
-        if (trainingMode) {
-            c.drawColor(Color.BLACK); text.textAlign = Paint.Align.LEFT
-            drawDebug(c); return
-        }
+        if (reinforceTraining) { c.drawColor(Color.BLACK); text.textAlign = Paint.Align.LEFT; drawTrainingDashboard(c); return }
+        if (trainingMode) { c.drawColor(Color.BLACK); text.textAlign = Paint.Align.LEFT; drawDebug(c); return }
         c.drawColor(bgColor)
         gridPaint.color = gridColor; gridPaint.style = Paint.Style.STROKE; gridPaint.strokeWidth = 1f
         for (i in 0..cols) c.drawLine(ox + i * cell, oy, ox + i * cell, oy + rows * cell, gridPaint)
@@ -2458,8 +1916,7 @@ class SnakeView @JvmOverloads constructor(
         for (i in 0 until list.size - 1) {
             val a = list[i]; val b = list[i + 1]
             snakePaint.color = if (rainbowSkin) hsv[(i * 23 + score) % 360] else bodyColor
-            c.drawLine(ox + (a.x + 0.5f) * cell, oy + (a.y + 0.5f) * cell,
-                       ox + (b.x + 0.5f) * cell, oy + (b.y + 0.5f) * cell, snakePaint)
+            c.drawLine(ox + (a.x + 0.5f) * cell, oy + (a.y + 0.5f) * cell, ox + (b.x + 0.5f) * cell, oy + (b.y + 0.5f) * cell, snakePaint)
         }
         val h = snake.first()
         headPaint.color = headColor
@@ -2467,18 +1924,14 @@ class SnakeView @JvmOverloads constructor(
         val ex = when { dir.x > 0 -> 0.12f; dir.x < 0 -> -0.12f; else -> 0f }
         val ey = when { dir.y > 0 -> 0.12f; dir.y < 0 -> -0.12f; else -> 0f }
         paint.color = Color.WHITE
-        c.drawCircle(ox + (h.x + 0.5f) * cell + cell * (0.13f + ex),
-                     oy + (h.y + 0.5f) * cell + cell * (0.13f + ey), cell * 0.075f, paint)
-        c.drawCircle(ox + (h.x + 0.5f) * cell - cell * (0.13f - ex),
-                     oy + (h.y + 0.5f) * cell - cell * (0.13f - ey), cell * 0.075f, paint)
+        c.drawCircle(ox + (h.x + 0.5f) * cell + cell * (0.13f + ex), oy + (h.y + 0.5f) * cell + cell * (0.13f + ey), cell * 0.075f, paint)
+        c.drawCircle(ox + (h.x + 0.5f) * cell - cell * (0.13f - ex), oy + (h.y + 0.5f) * cell - cell * (0.13f - ey), cell * 0.075f, paint)
     }
 
     private fun drawParticles(c: Canvas) {
         particles.forEach {
-            paint.color = Color.argb((it.life * 255).toInt().coerceIn(0, 255),
-                Color.red(it.color), Color.green(it.color), Color.blue(it.color))
-            c.drawCircle(ox + (it.x + 0.5f) * cell, oy + (it.y + 0.5f) * cell,
-                         max(2f, cell * 0.05f), paint)
+            paint.color = Color.argb((it.life * 255).toInt().coerceIn(0, 255), Color.red(it.color), Color.green(it.color), Color.blue(it.color))
+            c.drawCircle(ox + (it.x + 0.5f) * cell, oy + (it.y + 0.5f) * cell, max(2f, cell * 0.05f), paint)
         }
         text.textAlign = Paint.Align.CENTER; text.textSize = cell * 0.3f
         floats.forEach {
@@ -2504,10 +1957,8 @@ class SnakeView @JvmOverloads constructor(
     private fun drawWeightBars(c: Canvas, left: Float, top: Float, w: Float, h: Float) {
         val names = listOf("区域", "机动", "尾+", "尾-", "食近", "食吃", "边界", "空间")
         val values = floatArrayOf(
-            wRegion / wRegion0, wMobility / wMobility0,
-            wTailGood / wTailGood0, wTailBad / wTailBad0,
-            wFoodNear / wFoodNear0, wFoodAte / wFoodAte0,
-            wEdge / wEdge0, wSpace / wSpace0
+            wRegion / wRegion0, wMobility / wMobility0, wTailGood / wTailGood0, wTailBad / wTailBad0,
+            wFoodNear / wFoodNear0, wFoodAte / wFoodAte0, wEdge / wEdge0, wSpace / wSpace0
         )
         val barW = w / names.size; val maxRatio = 2.0f
         names.forEachIndexed { i, name ->
@@ -2548,9 +1999,7 @@ class SnakeView @JvmOverloads constructor(
         val scores = recentScores.toList(); val maxScore = scores.max().coerceAtLeast(1)
         val stepX = w / (scores.size - 1).coerceAtLeast(1)
         val areaPath = Path(); areaPath.moveTo(left, top + h)
-        scores.forEachIndexed { i, s ->
-            areaPath.lineTo(left + i * stepX, top + h - h * (s.toFloat() / maxScore))
-        }
+        scores.forEachIndexed { i, s -> areaPath.lineTo(left + i * stepX, top + h - h * (s.toFloat() / maxScore)) }
         areaPath.lineTo(left + w, top + h); areaPath.close()
         barPaint.color = Color.argb(60, 120, 255, 180); c.drawPath(areaPath, barPaint)
         val linePath = Path()
@@ -2583,20 +2032,16 @@ class SnakeView @JvmOverloads constructor(
         barPaint.style = Paint.Style.FILL; barPaint.color = Color.rgb(35, 35, 35)
         c.drawRect(left, top, left + w, top + h, barPaint)
         val sampleList = visitedStates.take(100); var maxAbs = 0.001f
-        for (s in sampleList) { for (a in 0 until 4) { val qv = qRead(s, a); if (abs(qv) > maxAbs) maxAbs = abs(qv) } }
+        for (s in sampleList) for (a in 0 until 4) { val qv = qRead(s, a); if (abs(qv) > maxAbs) maxAbs = abs(qv) }
         for (i in 0 until 100) {
             val px = left + (i % grid) * cellW; val py = top + (i / grid) * cellH
-            if (i >= sampleList.size) { barPaint.color = Color.rgb(30, 30, 35) }
+            if (i >= sampleList.size) barPaint.color = Color.rgb(30, 30, 35)
             else {
                 val s = sampleList[i]; var bestQ = -Float.MAX_VALUE
                 for (a in 0 until 4) { val qv = qRead(s, a); if (qv > bestQ) bestQ = qv }
                 val t = (bestQ / maxAbs).coerceIn(-1f, 1f)
-                barPaint.color = if (t >= 0f) {
-                    Color.rgb((60 * (1f - t)).toInt(), (60 + 195 * t).toInt(), 60)
-                } else {
-                    val nt = -t
-                    Color.rgb((60 + 195 * nt).toInt(), (60 * (1f - nt)).toInt(), (60 * (1f - nt)).toInt())
-                }
+                barPaint.color = if (t >= 0f) Color.rgb((60 * (1f - t)).toInt(), (60 + 195 * t).toInt(), 60)
+                else { val nt = -t; Color.rgb((60 + 195 * nt).toInt(), (60 * (1f - nt)).toInt(), (60 * (1f - nt)).toInt()) }
             }
             c.drawRect(px, py, px + cellW - 1f, py + cellH - 1f, barPaint)
         }
@@ -2608,19 +2053,15 @@ class SnakeView @JvmOverloads constructor(
         panel.color = Color.argb(232, 0, 0, 0)
         c.drawRoundRect(left, top, left + w, top + panelH, 22f, 22f, panel)
         val pulse = 0.55f + 0.45f * kotlin.math.sin(System.currentTimeMillis() / 160f)
-
         text.isFakeBoldText = true; text.textSize = 15f; text.color = Color.rgb(255, 200, 100)
         text.textAlign = Paint.Align.LEFT
         c.drawText("【V4融合 · AI层级链】", left + 16f, top + 24f, text)
-
         text.isFakeBoldText = true; text.textSize = 14f; val goalColor = v3Goal.color
-        text.color = Color.argb((90 + 165 * pulse).toInt().coerceIn(0, 255),
-            (goalColor shr 16) and 0xFF, (goalColor shr 8) and 0xFF, goalColor and 0xFF)
+        text.color = Color.argb((90 + 165 * pulse).toInt().coerceIn(0, 255), (goalColor shr 16) and 0xFF, (goalColor shr 8) and 0xFF, goalColor and 0xFF)
         c.drawText("目标: ${v3Goal.label}", left + w - 210f, top + 24f, text)
         text.textSize = 12f
         text.color = if (v3FusionEnabled) Color.rgb(46, 204, 113) else Color.rgb(120, 120, 120)
         c.drawText(if (v3FusionEnabled) "融合:开" else "融合:关", left + w - 70f, top + 24f, text)
-
         val layerNames = arrayOf("L1安全食物", "L2尾巴", "L3饥饿", "L4混合", "L5反事实", "L6基因")
         val layerColors = intArrayOf(
             Color.rgb(46, 204, 113), Color.rgb(155, 89, 182), Color.rgb(230, 126, 34),
@@ -2631,10 +2072,8 @@ class SnakeView @JvmOverloads constructor(
         for (i in 0 until 6) {
             val cx = left + 16f + i * (chipW + chipGap)
             val active = (v3LayerActive == i + 1) && v3FusionEnabled
-            panel.color = if (active) {
-                Color.argb((120 + 135 * pulse).toInt().coerceIn(0, 255),
-                    (layerColors[i] shr 16) and 0xFF, (layerColors[i] shr 8) and 0xFF, layerColors[i] and 0xFF)
-            } else Color.rgb(30, 30, 40)
+            panel.color = if (active) Color.argb((120 + 135 * pulse).toInt().coerceIn(0, 255), (layerColors[i] shr 16) and 0xFF, (layerColors[i] shr 8) and 0xFF, layerColors[i] and 0xFF)
+            else Color.rgb(30, 30, 40)
             c.drawRoundRect(cx, chipY, cx + chipW, chipY + chipH, 8f, 8f, panel)
             text.isFakeBoldText = active; text.textSize = 10f
             text.color = if (active) Color.WHITE else Color.rgb(140, 140, 150)
@@ -2642,16 +2081,11 @@ class SnakeView @JvmOverloads constructor(
             c.drawText(layerNames[i], cx + chipW / 2f, chipY + chipH / 2f + 4f, text)
         }
         text.textAlign = Paint.Align.LEFT
-
         text.isFakeBoldText = false; text.textSize = 12f; text.color = Color.rgb(180, 190, 205)
-        val whyLine = if (v3FusionEnabled) {
-            if (v3Regret > 0.01f) "$v3LayerWhy  遗憾=${"%.2f".format(v3Regret)}" else v3LayerWhy
-        } else "V3层级已关闭，运行V2基线决策"
+        val whyLine = if (v3FusionEnabled) { if (v3Regret > 0.01f) "$v3LayerWhy  遗憾=${"%.2f".format(v3Regret)}" else v3LayerWhy } else "V3层级已关闭，运行V2基线决策"
         c.drawText(whyLine, left + 16f, top + 76f, text)
-
         text.isFakeBoldText = true; text.textSize = 13f; text.color = Color.rgb(255, 150, 255)
         c.drawText("【V3基因柱状图】", left + 16f, top + 98f, text)
-
         val geneNames = arrayOf("食", "空", "尾", "危", "循", "饿")
         val gv = v3Genome.values()
         val geneColors = intArrayOf(
@@ -2675,45 +2109,40 @@ class SnakeView @JvmOverloads constructor(
             c.drawText(String.format("%.2f", gv[i]), bx + geneBarW / 2f, geneBaseY - bh - 3f, text)
         }
         text.textAlign = Paint.Align.LEFT
-
         val infoX = left + w * 0.60f
         text.isFakeBoldText = false; text.textSize = 12f; text.color = Color.rgb(180, 190, 205)
         c.drawText("失败记忆: ${v3Memory.size()} 条", infoX, top + 118f, text)
         c.drawText("教训触发: ${v3LessonFires} 次", infoX, top + 136f, text)
         c.drawText("循环打断: ${v3LoopHits} 次", infoX, top + 154f, text)
-
+        // ★ Beam 统计
+        c.drawText("Beam 命中: $beamSelected/$beamCalls", infoX, top + 172f, text)
         text.textSize = 12f
         if (v3LessonFlash > 0.01f) {
             val a = (v3LessonFlash * 255f).toInt().coerceIn(0, 255)
             text.isFakeBoldText = true
             text.color = Color.argb(a, 255, 90 + ((60 * pulse).toInt()), 40)
-            c.drawText("⚠ 新教训已写入: ${v3Memory.worstLessonText()}", left + 16f, top + 186f, text)
+            c.drawText("⚠ 新教训已写入: ${v3Memory.worstLessonText()}", left + 16f, top + 196f, text)
         } else {
             text.isFakeBoldText = false; text.color = Color.rgb(130, 135, 145)
-            c.drawText("最近教训: ${v3Memory.worstLessonText()}", left + 16f, top + 186f, text)
+            c.drawText("最近教训: ${v3Memory.worstLessonText()}", left + 16f, top + 196f, text)
         }
-
         text.isFakeBoldText = true; text.textSize = 13f; text.color = Color.rgb(255, 150, 255)
-        c.drawText("【V3目标分布饼图】", left + 16f, top + 214f, text)
-
-        val pieCx = left + w - 64f; val pieCy = top + 196f; val pieR = 42f
+        c.drawText("【V3目标分布饼图】", left + 16f, top + 224f, text)
+        val pieCx = left + w - 64f; val pieCy = top + 206f; val pieR = 42f
         val totalCnt = v3GoalCounter.sum()
-        if (totalCnt <= 0) {
-            panel.color = Color.rgb(30, 30, 40); c.drawCircle(pieCx, pieCy, pieR, panel)
-        } else {
+        if (totalCnt <= 0) { panel.color = Color.rgb(30, 30, 40); c.drawCircle(pieCx, pieCy, pieR, panel) }
+        else {
             var startAngle = -90f
             for (g in V3Goal.values()) {
                 val cnt = v3GoalCounter[g.ordinal]; if (cnt <= 0) continue
                 val sweep = cnt * 360f / totalCnt
                 panel.color = g.color
-                c.drawArc(pieCx - pieR, pieCy - pieR, pieCx + pieR, pieCy + pieR,
-                    startAngle, sweep, true, panel)
+                c.drawArc(pieCx - pieR, pieCy - pieR, pieCx + pieR, pieCy + pieR, startAngle, sweep, true, panel)
                 startAngle += sweep
             }
             panel.color = Color.argb(232, 0, 0, 0); c.drawCircle(pieCx, pieCy, pieR * 0.45f, panel)
         }
-
-        text.isFakeBoldText = false; text.textSize = 11f; var ly = top + 232f
+        text.isFakeBoldText = false; text.textSize = 11f; var ly = top + 242f
         for (g in V3Goal.values()) {
             val cnt = v3GoalCounter[g.ordinal]
             val pct = if (totalCnt > 0) cnt * 100 / totalCnt else 0
@@ -2727,7 +2156,6 @@ class SnakeView @JvmOverloads constructor(
 
     private fun drawTrainingDashboard(c: Canvas) {
         val W = width.toFloat(); val pad = W * 0.022f; var y = pad
-
         panel.color = Color.rgb(28, 24, 48)
         c.drawRoundRect(pad, y, W - pad, y + W * 0.155f, pad * 0.7f, pad * 0.7f, panel)
         text.textAlign = Paint.Align.LEFT; text.isFakeBoldText = true
@@ -2742,7 +2170,6 @@ class SnakeView @JvmOverloads constructor(
         c.drawText("已分配 $currentAgentIndex/$POPULATION_SIZE   已完成 $completedAgents/$POPULATION_SIZE   总局数 $totalGames",
             pad * 1.6f, y + W * 0.118f, text)
         y += W * 0.155f + pad * 0.6f
-
         val barH = W * 0.022f
         panel.color = Color.rgb(50, 48, 66)
         c.drawRoundRect(pad, y, W - pad, y + barH, barH / 2, barH / 2, panel)
@@ -2750,7 +2177,6 @@ class SnakeView @JvmOverloads constructor(
         panel.color = Color.rgb(80, 220, 150)
         if (frac > 0.01f) c.drawRoundRect(pad, y, pad + (W - 2 * pad) * frac, y + barH, barH / 2, barH / 2, panel)
         y += barH + pad
-
         val cardW = (W - 3 * pad) / 2f; val cardH = W * 0.118f
         val phaseColor = mapOf(
             "捕食" to Color.rgb(255, 170, 60), "避险" to Color.rgb(255, 90, 90),
@@ -2767,8 +2193,7 @@ class SnakeView @JvmOverloads constructor(
             paint.color = phaseColor[st.phase] ?: Color.GRAY
             c.drawCircle(x0 + pad * 0.8f, y0 + pad * 0.9f, pad * 0.32f, paint)
             text.textSize = W * 0.029f; text.isFakeBoldText = true; text.color = Color.WHITE
-            c.drawText("线程$ti · Agent ${if (st.agentId >= 0) st.agentId else "-"}",
-                x0 + pad * 1.5f, y0 + pad * 1.15f, text)
+            c.drawText("线程$ti · Agent ${if (st.agentId >= 0) st.agentId else "-"}", x0 + pad * 1.5f, y0 + pad * 1.15f, text)
             text.textAlign = Paint.Align.RIGHT; text.color = paint.color
             c.drawText(st.phase, x0 + cardW - pad * 0.7f, y0 + pad * 1.15f, text)
             text.textAlign = Paint.Align.LEFT; text.textSize = W * 0.045f; text.color = Color.rgb(150, 235, 170)
@@ -2778,12 +2203,11 @@ class SnakeView @JvmOverloads constructor(
             text.textAlign = Paint.Align.LEFT
         }
         y += 4 * cardH + 3 * pad * 0.55f + pad * 0.4f
-
         val metrics = arrayOf(
             "本代最佳" to "%.0f".format(bestScoreThisGen), "历史最佳" to "%.0f".format(bestScoreAllTime),
             "Q权重" to "%.2f".format(qWeight), "NN权重" to "%.2f".format(nnWeight),
             "回放" to "${replayBuffer.size}", "ε" to "%.3f".format(v2Epsilon),
-            "学习步" to "$v2LearningSteps", "已分配" to "$currentAgentIndex"
+            "学习步" to "$v2LearningSteps", "Beam" to "$beamSelected/$beamCalls"
         )
         val mW = (W - 5 * pad) / 4f; val mH = W * 0.105f
         for (mi in metrics.indices) {
@@ -2797,10 +2221,8 @@ class SnakeView @JvmOverloads constructor(
             c.drawText(metrics[mi].second, x0 + pad * 0.5f, y0 + mH - pad * 0.5f, text)
         }
         y += 2 * mH + pad * 0.5f + pad
-
         text.textSize = W * 0.034f; text.isFakeBoldText = true; text.color = Color.rgb(200, 170, 255)
         c.drawText("🧪 进化繁殖历程", pad * 0.4f, y, text); y += pad * 0.7f
-
         val fullHistory = evoHistory.toList()
         val history = if (fullHistory.size > 10) fullHistory.drop(fullHistory.size - 10) else fullHistory
         val rowH = W * 0.052f
@@ -2815,11 +2237,7 @@ class SnakeView @JvmOverloads constructor(
             val barX = pad * 2.6f; val barW = W * 0.46f; val bh2 = rowH * 0.42f
             val total = (rec.eliteN + rec.crossN + rec.breedN).coerceAtLeast(1)
             var bx = barX
-            val seg = arrayOf(
-                rec.eliteN to Color.rgb(70, 220, 130),
-                rec.crossN to Color.rgb(80, 150, 255),
-                rec.breedN to Color.rgb(255, 160, 70)
-            )
+            val seg = arrayOf(rec.eliteN to Color.rgb(70, 220, 130), rec.crossN to Color.rgb(80, 150, 255), rec.breedN to Color.rgb(255, 160, 70))
             for ((cnt, col) in seg) {
                 val wseg = barW * (cnt.toFloat() / total)
                 if (wseg > 0.5f) { panel.color = col; c.drawRect(bx, y, bx + wseg, y + bh2, panel) }
@@ -2832,7 +2250,6 @@ class SnakeView @JvmOverloads constructor(
             text.textAlign = Paint.Align.LEFT; y += rowH + pad * 0.18f
         }
         y += pad * 0.4f
-
         text.textSize = W * 0.032f; text.isFakeBoldText = true; text.color = Color.rgb(255, 150, 150)
         c.drawText("☠ 死因分布", pad * 0.4f, y, text); y += pad * 0.7f
         val deaths = arrayOf("撞墙" to deathWall, "撞自己" to deathSelf, "被困" to deathTrap)
@@ -2852,7 +2269,6 @@ class SnakeView @JvmOverloads constructor(
             y += dRowH + pad * 0.15f
         }
         y += pad * 0.3f
-
         val bottom0 = y
         panel.color = Color.rgb(20, 30, 34)
         c.drawRoundRect(pad, bottom0, W - pad, height - pad, pad * 0.6f, pad * 0.6f, panel)
@@ -2882,11 +2298,9 @@ class SnakeView @JvmOverloads constructor(
         border.color = Color.argb(60, 46, 204, 113); border.style = Paint.Style.STROKE; border.strokeWidth = 1.5f
         c.drawRoundRect(left, top, left + w, top + h, 22f, 22f, border)
         text.textAlign = Paint.Align.LEFT; text.isFakeBoldText = true; text.textSize = 26f; text.color = Color.WHITE
-        c.drawText(if (reinforceTraining) "混合进化中 · 世代 $generation" else ai.strategy,
-            left + 16f, top + 36f, text)
+        c.drawText(if (reinforceTraining) "混合进化中 · 世代 $generation" else ai.strategy, left + 16f, top + 36f, text)
         text.isFakeBoldText = false; text.textSize = 14f; text.color = Color.YELLOW
-        c.drawText(if (reinforceTraining) "规则过滤 + Q表 + 神经网络 自我迭代" else ai.reason,
-            left + 16f, top + 58f, text)
+        c.drawText(if (reinforceTraining) "规则过滤 + Q表 + 神经网络 自我迭代" else ai.reason, left + 16f, top + 58f, text)
         val gaugeCX = left + 58f; val gaugeCY = top + 116f
         if (reinforceTraining) {
             val progRatio = completedAgents.toFloat() / POPULATION_SIZE
@@ -2912,7 +2326,6 @@ class SnakeView @JvmOverloads constructor(
         c.drawText("近50均分 ${"%.0f".format(avg)}   最佳 $bestRecentScore", left + 118f, top + 110f, text)
         val threadInfo = if (reinforceTraining) "${trainThreads.size} 线程" else "单局"
         c.drawText("模式 $threadInfo   主蛇长 ${snake.size}   Q覆盖${visitedStates.size}", left + 118f, top + 134f, text)
-
         if (reinforceTraining) {
             barPaint.style = Paint.Style.FILL; var meterY = top + 155f; val meterW = w - 32f
             text.textSize = 9f; text.color = Color.rgb(200, 180, 255)
@@ -2947,13 +2360,11 @@ class SnakeView @JvmOverloads constructor(
             barPaint.color = Color.rgb(46, 204, 113)
             c.drawRoundRect(left + 16f + meterW * qWeight, meterY + 12f, left + 16f + meterW, meterY + 19f, 3f, 3f, barPaint)
         }
-
         val wbY = top + 250f
         text.isFakeBoldText = true; text.textSize = 14f; text.color = Color.rgb(255, 200, 100)
         c.drawText("【权重柱状图】", left + 16f, wbY, text)
         text.isFakeBoldText = false
         drawWeightBars(c, left + 16f, wbY + 8f, w - 32f, 66f)
-
         val learnY = top + 290f
         text.isFakeBoldText = true; text.textSize = 14f; text.color = Color.rgb(255, 150, 255)
         c.drawText("【V2学习】", left + 16f, learnY, text)
@@ -2961,7 +2372,6 @@ class SnakeView @JvmOverloads constructor(
         c.drawText("训练中", left + 118f, learnY, text)
         val barStartX = left + 118f; val barEndX = left + w - 16f; val barW = barEndX - barStartX
         var barY = top + 318f
-
         if (!reinforceTraining) {
             text.isFakeBoldText = true; text.textSize = 14f; text.color = Color.rgb(255, 200, 100)
             c.drawText("【四方向安全 / Q】", left + 16f, barY, text)
@@ -2999,8 +2409,7 @@ class SnakeView @JvmOverloads constructor(
                 }
                 barY += 28f
             }
-        } else { barY = top + 318f }
-
+        } else barY = top + 318f
         val chartY = barY + 20f; val chartH = 72f
         val curveX = left + 16f; val curveW = (w - 32f) * 0.55f
         text.isFakeBoldText = true; text.textSize = 14f; text.color = Color.rgb(120, 255, 180)
@@ -3016,25 +2425,19 @@ class SnakeView @JvmOverloads constructor(
         c.drawText("W $deathWall", pieCX + 42f, pieCY - 16f, text)
         text.color = Color.rgb(100, 150, 255); c.drawText("S $deathSelf", pieCX + 42f, pieCY + 4f, text)
         text.color = Color.rgb(255, 200, 100); c.drawText("T $deathTrap", pieCX + 42f, pieCY + 24f, text)
-
         val heatY = chartY + chartH + 30f
         text.textAlign = Paint.Align.LEFT; text.isFakeBoldText = true; text.textSize = 14f; text.color = Color.rgb(200, 180, 255)
         c.drawText("【V2 Q表热度】", left + 16f, heatY, text)
         text.isFakeBoldText = false
         drawQHeatmap(c, left + 16f, heatY + 8f, w - 32f, 66f)
-
         val infoY = heatY + 8f + 66f + 22f
         var visited = 0; var sumQ = 0f; var cntQ = 0
         val sampleStep = max(1, V2_STATE_COUNT / 400)
-        for (s in 0 until V2_STATE_COUNT step sampleStep) {
-            for (a in 0 until 4) {
-                val idx = qIndex(s, a)
-                if (nV2[idx] > 0) { visited++; sumQ += qV2[idx]; cntQ++ }
-            }
+        for (s in 0 until V2_STATE_COUNT step sampleStep) for (a in 0 until 4) {
+            val idx = qIndex(s, a); if (nV2[idx] > 0) { visited++; sumQ += qV2[idx]; cntQ++ }
         }
         val avgQ = if (cntQ > 0) sumQ / cntQ else 0f
         text.textSize = 14f; text.color = Color.WHITE; text.textAlign = Paint.Align.LEFT
-
         if (reinforceTraining) {
             c.drawText("世代 $generation   已分配 $currentAgentIndex/$POPULATION_SIZE   已完成 $completedAgents/$POPULATION_SIZE   Q覆盖${visitedStates.size}",
                 left + 16f, infoY, text)
@@ -3044,7 +2447,10 @@ class SnakeView @JvmOverloads constructor(
                 left + 16f, infoY + 36f, text)
             c.drawText("回放${replayBuffer.size}/$REPLAY_CAPACITY   ε${"%.2f".format(v2Epsilon)}   步${v2LearningSteps}",
                 left + 16f, infoY + 54f, text)
-            // ★ 条件修复：0.5 -> 0.45
+            // ★ Beam 统计
+            val avgBeamNodes = if (beamCalls > 0) beamTotalNodes.toFloat() / beamCalls else 0f
+            c.drawText("Beam 命中$beamSelected 调用$beamCalls 成功$beamSuccess 节点$beamTotalNodes 均$avgBeamNodes",
+                left + 16f, infoY + 72f, text)
             val learnStatus = when {
                 generation < 3 -> "🧬 初始化种群，随机试错中..."
                 v2Epsilon > 0.15f -> "🔍 探索阶段：尝试新策略"
@@ -3054,38 +2460,35 @@ class SnakeView @JvmOverloads constructor(
                 else -> "📊 正常进化中..."
             }
             text.textSize = 13f; text.isFakeBoldText = true; text.color = Color.rgb(100, 220, 255)
-            c.drawText(learnStatus, left + 16f, infoY + 74f, text)
+            c.drawText(learnStatus, left + 16f, infoY + 92f, text)
             if (deadEndPredicted) {
                 text.color = Color.rgb(255, 80, 80)
-                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
+                c.drawText("⚠️ 死局预判！食物周围空间仅 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 112f, text)
             } else {
                 text.color = Color.rgb(80, 200, 120)
-                c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 94f, text)
+                c.drawText("✅ 食物空间 ${"%.1f".format(foodSpaceRatio)}x 蛇长", left + 16f, infoY + 112f, text)
             }
             text.color = if (rolloutActive) Color.rgb(180, 180, 255) else Color.rgb(100, 100, 120)
             c.drawText(if (rolloutActive) "🔮 前瞻模拟${rolloutSteps}步（蛇长${snake.size}）" else "🔮 前瞻模拟：蛇短不启用",
-                left + 16f, infoY + 112f, text)
+                left + 16f, infoY + 130f, text)
             text.isFakeBoldText = false; text.color = Color.WHITE; text.textSize = 14f
         } else {
             c.drawText("局数 $totalGames   近50均分 ${"%.0f".format(avg)}   最佳 $bestRecentScore", left + 16f, infoY, text)
             c.drawText("V2覆盖 $visited   平均Q ${"%.2f".format(avgQ)}   学习步 $v2LearningSteps", left + 16f, infoY + 18f, text)
             c.drawText("ε ${"%.3f".format(v2Epsilon)}   攻击x${"%.2f".format(aggression)}   安全x${"%.2f".format(safetyMargin)}", left + 16f, infoY + 36f, text)
         }
-
         if (gameOver && !reinforceTraining) {
             text.color = Color.RED; text.isFakeBoldText = true; text.textSize = 16f
             c.drawText("死亡原因：$deathCause", left + 16f, infoY + 62f, text)
             text.isFakeBoldText = false
         }
-
         val btnW = 160f; val btnH = 42f
         val btnLeft = left + w - btnW - 16f; val btnTop = infoY + 48f
         reinforceButtonRect.set(btnLeft, btnTop, btnLeft + btnW, btnTop + btnH)
         val btnColor = if (reinforceTraining) Color.rgb(231, 76, 60) else Color.rgb(46, 204, 113)
         panel.color = btnColor; c.drawRoundRect(reinforceButtonRect, 12f, 12f, panel)
         text.textAlign = Paint.Align.CENTER; text.isFakeBoldText = true; text.textSize = 18f; text.color = Color.WHITE
-        c.drawText(if (reinforceTraining) "停止进化" else "神经进化",
-            reinforceButtonRect.centerX(), reinforceButtonRect.centerY() + 7f, text)
+        c.drawText(if (reinforceTraining) "停止进化" else "神经进化", reinforceButtonRect.centerX(), reinforceButtonRect.centerY() + 7f, text)
         text.isFakeBoldText = false; text.textAlign = Paint.Align.LEFT
     }
 
@@ -3112,28 +2515,22 @@ class SnakeView @JvmOverloads constructor(
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 if (reinforceButtonRect.contains(e.x, e.y)) {
                     val now = System.currentTimeMillis()
-                    if (now - lastReinforceTap > 400L) {
-                        lastReinforceTap = now
-                        setReinforceTraining(!reinforceTraining)
-                    }
+                    if (now - lastReinforceTap > 400L) { lastReinforceTap = now; setReinforceTraining(!reinforceTraining) }
                     return true
                 }
                 if (reinforceTraining) return true
                 if (gameOver) { reset(); return true }
                 if (aiMode != 0) return true
                 if (snake.isEmpty()) return true
-
                 val dx = e.x - touchStartX; val dy = e.y - touchStartY
                 val useSwipe = abs(dx) > 24f || abs(dy) > 24f
                 val d = if (useSwipe) {
-                    if (abs(dx) > abs(dy)) P(if (dx > 0) 1 else -1, 0)
-                    else P(0, if (dy > 0) 1 else -1)
+                    if (abs(dx) > abs(dy)) P(if (dx > 0) 1 else -1, 0) else P(0, if (dy > 0) 1 else -1)
                 } else {
                     val hx = ox + (snake.first().x + 0.5f) * cell
                     val hy = oy + (snake.first().y + 0.5f) * cell
                     val rdx = e.x - hx; val rdy = e.y - hy
-                    if (abs(rdx) > abs(rdy)) P(if (rdx > 0) 1 else -1, 0)
-                    else P(0, if (rdy > 0) 1 else -1)
+                    if (abs(rdx) > abs(rdy)) P(if (rdx > 0) 1 else -1, 0) else P(0, if (rdy > 0) 1 else -1)
                 }
                 if (!isReverse(d, dir)) { queue.clear(); queue.add(d) }
                 return true
@@ -3143,8 +2540,7 @@ class SnakeView @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
-        stopParallelTraining()
-        stopWatchDog()
+        stopParallelTraining(); stopWatchDog()
         super.onDetachedFromWindow()
         bgm?.stop()
         try { toneGen?.release() } catch (_: Throwable) {}
@@ -3177,98 +2573,46 @@ class SnakeView @JvmOverloads constructor(
         val par = IntArray(total)
         val parDir = arrayOfNulls<P>(total)
 
-        // ★ 改成 -1，防止被当成 0 号 agent
         private var currentAgentId = -1
         var gLastAction = -1
 
-        // ★ 新签名：返回 Boolean 并接收 expectedGenerationToken
-        fun playOneGame(
-            agentId: Int,
-            expectedGenerationToken: Long
-        ): Boolean {
+        fun playOneGame(agentId: Int, expectedGenerationToken: Long): Boolean {
             currentAgentId = agentId
-
-            if (agentId !in 0 until POPULATION_SIZE) {
-                Log.e(LOG_TAG, "INVALID_AGENT_ID=$agentId")
-                return false
-            }
-
+            if (agentId !in 0 until POPULATION_SIZE) { Log.e(LOG_TAG, "INVALID_AGENT_ID=$agentId"); return false }
             if (generationToken != expectedGenerationToken) {
-                Log.w(
-                    LOG_TAG,
-                    "STALE_GAME_START agent=$agentId " +
-                    "expected=$expectedGenerationToken actual=$generationToken"
-                )
+                Log.w(LOG_TAG, "STALE_GAME_START agent=$agentId expected=$expectedGenerationToken actual=$generationToken")
                 return false
             }
-
-            gSnake.clear()
-            gSnake.add(P(7, 7))
-            gSnake.add(P(6, 7))
-            gSnake.add(P(5, 7))
-
-            gDir = P(1, 0)
-            gScore = 0
-            gHunger = 0
-            gCombo = 0
-            gSteps = 0
-            gOver = false
-            gLastAction = -1
+            gSnake.clear(); gSnake.add(P(7, 7)); gSnake.add(P(6, 7)); gSnake.add(P(5, 7))
+            gDir = P(1, 0); gScore = 0; gHunger = 0; gCombo = 0; gSteps = 0; gOver = false; gLastAction = -1
             lastDeathCause = "UNKNOWN"
-
-            gLastFreeRegion = gFreeRegion(gSnake).toFloat()
-            gPlaceFood()
-
-            val maxIterations = 8000
-            var iter = 0
-
+            gLastFreeRegion = gFreeRegion(gSnake).toFloat(); gPlaceFood()
+            val maxIterations = 8000; var iter = 0
             try {
-                while (
-                    !gOver &&
-                    isTrainingRunActive(runId) &&
-                    generationToken == expectedGenerationToken &&
-                    !Thread.currentThread().isInterrupted &&
-                    iter < maxIterations
-                ) {
-                    gStep()
-                    iter++
-                }
+                while (!gOver && isTrainingRunActive(runId) && generationToken == expectedGenerationToken && !Thread.currentThread().isInterrupted && iter < maxIterations) { gStep(); iter++ }
             } catch (t: Throwable) {
                 Log.e(LOG_TAG, "TrainGame agent=$agentId crashed", t)
                 if (isTrainingRunActive(runId) && generationToken == expectedGenerationToken) {
-                    lastDeathCause = "EXCEPTION"
-                    gOver = true
+                    lastDeathCause = "EXCEPTION"; gOver = true
                     try { gDie(lastDeathCause) } catch (inner: Throwable) { Log.e(LOG_TAG, "gDie exception failed", inner) }
                     return true
                 }
                 return false
             }
-
-            if (
-                !isTrainingRunActive(runId) ||
-                generationToken != expectedGenerationToken ||
-                Thread.currentThread().isInterrupted
-            ) {
-                return false
-            }
-
+            if (!isTrainingRunActive(runId) || generationToken != expectedGenerationToken || Thread.currentThread().isInterrupted) return false
             if (!gOver) {
-                lastDeathCause = "TIMEOUT"
-                gOver = true
+                lastDeathCause = "TIMEOUT"; gOver = true
                 gScore = max(0, gScore - 500)
                 try { gDie(lastDeathCause) } catch (inner: Throwable) { Log.e(LOG_TAG, "gDie timeout failed", inner) }
                 return true
             }
-
             try { gDie(lastDeathCause) } catch (inner: Throwable) { Log.e(LOG_TAG, "gDie normal failed", inner) }
             return true
         }
 
         fun gPlaceFood() {
             val free = ArrayList<P>(total)
-            for (x in 0 until cols) for (y in 0 until rows) {
-                val p = P(x, y); if (!gSnake.contains(p)) free.add(p)
-            }
+            for (x in 0 until cols) for (y in 0 until rows) { val p = P(x, y); if (!gSnake.contains(p)) free.add(p) }
             if (free.isNotEmpty()) gFood = free[rng.nextInt(free.size)]
         }
 
@@ -3314,24 +2658,188 @@ class SnakeView @JvmOverloads constructor(
 
         private fun gTerminal(state: Int, action: Int, reward: Float) { qUpdate(state, action, reward, state, 0, true) }
 
-        // ★ 新版本：不硬 return，安全食物/尾巴只加分
+        // ★ Beam Search 主函数：从当前状态向前搜索，返回 (firstAction, score) 或 null
+        private fun beamSearchBestMove(): Pair<P, Float>? {
+            if (!BEAM_ENABLED) return null
+            if (gSnake.isEmpty()) return null
+            if (gSnake.size < BEAM_MIN_LENGTH) return null
+
+            beamCalls++
+
+            try {
+                val depth = when {
+                    gSnake.size >= 50 -> BEAM_DEPTH_MAX
+                    gSnake.size >= BEAM_LONG_LENGTH -> BEAM_DEPTH_LONG
+                    else -> BEAM_DEPTH_SHORT
+                }.coerceAtMost(BEAM_DEPTH_MAX)
+
+                val width = if (gSnake.size >= BEAM_LONG_LENGTH) 4 else BEAM_WIDTH
+
+                val initialMoves = dirs
+                    .map { d -> gEvaluate(d) }
+                    .filter { it.legal }
+                    .sortedByDescending { it.score }
+                    .take(width)
+
+                if (initialMoves.isEmpty()) return null
+
+                var beam = ArrayList<BeamNode>()
+                var nodesExpanded = 0
+                val startHeads = IntArray(4) { -1 }
+
+                for (candidate in initialMoves) {
+                    val node = simulateBeamMove(gSnake, gDir, gFood, candidate.d, candidate.d, startHeads)
+                    if (node != null) { beam.add(node); nodesExpanded++ }
+                }
+
+                if (beam.isEmpty()) return null
+
+                repeat(depth - 1) {
+                    if (beam.isEmpty()) return@repeat
+                    val next = ArrayList<BeamNode>()
+                    var stop = false
+                    for (node in beam) {
+                        if (node.dead) continue
+                        if (stop) break
+                        val moves = dirs
+                            .filter { !gIsReverse(it, node.dir) }
+                            .mapNotNull { mv ->
+                                simulateBeamMove(node.body, node.dir, node.food, mv, node.firstAction, node.recentHeadCells)
+                            }
+                            .sortedByDescending { it.score }
+                            .take(width)
+                        next.addAll(moves)
+                        nodesExpanded += moves.size
+                        if (nodesExpanded >= BEAM_MAX_NODES) stop = true
+                    }
+                    if (next.isEmpty()) { beam = ArrayList(); return@repeat }
+                    beam = ArrayList(next.sortedByDescending { it.score }.take(width))
+                }
+
+                if (beam.isEmpty()) return null
+                val best = beam.filter { !it.dead }.maxByOrNull { it.score }
+                    ?: beam.maxByOrNull { it.score }
+                    ?: return null
+
+                beamSuccess++
+                beamTotalNodes += nodesExpanded
+                beamBestScore = best.score
+
+                return Pair(best.firstAction, best.score)
+            } catch (t: Throwable) {
+                Log.e(LOG_TAG, "Beam search failed", t)
+                return null
+            }
+        }
+
+        // ★ Beam 单步模拟：不改真实状态
+        private fun simulateBeamMove(
+            sourceBody: ArrayDeque<P>,
+            sourceDir: P,
+            targetFood: P,
+            move: P,
+            firstAction: P,
+            prevHeads: IntArray
+        ): BeamNode? {
+            if (sourceBody.isEmpty()) return null
+            if (gIsReverse(move, sourceDir)) return null
+
+            val body = ArrayDeque<P>()
+            for (p in sourceBody) body.addLast(p)
+
+            val head = body.first()
+            val nextHead = P(head.x + move.x, head.y + move.y)
+
+            if (!gInside(nextHead)) {
+                return BeamNode(body, move, targetFood, -100f, 1, false, true, 0f, firstAction, prevHeads)
+            }
+
+            val ate = nextHead == targetFood
+            val hitBody = body.contains(nextHead)
+
+            if (hitBody && !(nextHead == body.last() && !ate)) {
+                return BeamNode(body, move, targetFood, -100f, 1, false, true, 0f, firstAction, prevHeads)
+            }
+
+            body.addFirst(nextHead)
+            if (!ate) body.removeLast()
+
+            val region = gFreeRegion(body)
+            val ratio = region.toFloat() / max(1, body.size)
+            val tailOk = gTailReachable(body)
+            val safeMoves = gCountSafeMoves(body)
+            val foodDistance = gDistance(body.first(), targetFood, body, true).let { if (it < 0) 999 else it }
+            val danger = calculateBeamDanger(body, move, targetFood)
+
+            var score = 0f
+            score += BEAM_SURVIVAL_WEIGHT
+            score += ratio * BEAM_SPACE_WEIGHT
+            if (tailOk) score += BEAM_TAIL_WEIGHT else if (body.size > 8) score -= BEAM_TAIL_WEIGHT * 1.5f
+
+            if (ate) {
+                score += 12f * BEAM_FOOD_WEIGHT
+                val afterRegion = gFreeRegion(body)
+                val afterTail = gTailReachable(body)
+                val afterSafe = gCountSafeMoves(body)
+                if (afterRegion < body.size * 0.8f) score -= 15f
+                if (!afterTail && body.size > 12) score -= 12f
+                if (afterSafe <= 1) score -= 8f
+            } else {
+                val foodProgress = 1f / (foodDistance + 1f)
+                score += foodProgress * 8f * BEAM_FOOD_WEIGHT
+            }
+
+            score += safeMoves * 0.5f
+            score -= danger * BEAM_DANGER_WEIGHT
+            if (ratio < 0.7f && body.size > 8) score -= 8f
+            if (!tailOk && body.size > 12) score -= 7f
+
+            val nextCell = nextHead.y * cols + nextHead.x
+            var loopHits = 0
+            for (h in prevHeads) if (h == nextCell) loopHits++
+            if (loopHits > 0) {
+                score -= BEAM_LOOP_WEIGHT * loopHits
+                if (loopHits >= 2) score -= BEAM_LOOP_WEIGHT
+            }
+
+            val newHeads = IntArray(4) { -1 }
+            newHeads[0] = nextCell
+            for (i in 1..3) newHeads[i] = prevHeads[i - 1]
+
+            return BeamNode(body, move, targetFood, score, 1, ate, false, loopHits.toFloat(), firstAction, newHeads)
+        }
+
+        private fun calculateBeamDanger(body: ArrayDeque<P>, heading: P, target: P): Float {
+            if (body.isEmpty()) return 5f
+            val head = body.first()
+            var danger = 0f
+            for (d in dirs) {
+                if (gIsReverse(d, heading)) continue
+                val np = P(head.x + d.x, head.y + d.y)
+                if (!gInside(np)) { danger += 1f; continue }
+                val ate = np == target
+                if (body.contains(np) && !(np == body.last() && !ate)) danger += 1f
+            }
+            val safeMoves = gCountSafeMoves(body)
+            if (safeMoves <= 1) danger += 2f
+            if (safeMoves == 0) danger += 5f
+            return danger.coerceIn(0f, 5f)
+        }
+
+        // ★ 软评分：安全食物/尾巴加 bonus，不再硬 return
         fun gChooseMove(state: Int): P {
             val cands = dirs.map { gEvaluate(it) }
             val legal = cands.filter { it.legal }
-
             if (legal.isEmpty()) return gDir
             if (legal.size == 1) return legal.first().d
 
             val safeFood = gFindSafeFoodStep()
-            val tailStep =
-                if (gHunger < gHungerForceEat()) gFollowTailStep(legal) else null
-
+            val tailStep = if (gHunger < gHungerForceEat()) gFollowTailStep(legal) else null
             val threshold = gHungerForceEat()
 
             val candidatePool = when {
                 gHunger >= threshold -> {
-                    val safeFoodCandidates =
-                        legal.filter { it.tailOk && it.foodDist >= 0 }
+                    val safeFoodCandidates = legal.filter { it.tailOk && it.foodDist >= 0 }
                     if (safeFoodCandidates.isNotEmpty()) safeFoodCandidates else legal
                 }
                 else -> {
@@ -3353,96 +2861,75 @@ class SnakeView @JvmOverloads constructor(
             return gSelectAction(state, boosted).d
         }
 
-        // ★ 归一化 Q / NN / Rule / Rollout / Memory / DeadEnd
+        // ★ Beam 融入 gSelectAction 统一评分
         private fun gSelectAction(state: Int, legal: List<Candidate>): Candidate {
             if (legal.size == 1) return legal.first()
             if (rng.nextFloat() < currentEpsilon()) {
                 val safe = legal.filter { it.tailOk || it.region >= max(5, gSnake.size / 2) }
                 return if (safe.isNotEmpty()) safe[rng.nextInt(safe.size)] else legal[rng.nextInt(legal.size)]
             }
-            val brain = population[currentAgentId.coerceAtLeast(0) % POPULATION_SIZE]
+            if (currentAgentId !in 0 until POPULATION_SIZE) {
+                Log.e(LOG_TAG, "Invalid currentAgentId=$currentAgentId")
+                return legal.first()
+            }
+            val brain = population[currentAgentId]
             val nnInputs = buildInputs(gSnake.first(), gFood, gSnake)
             val nnVals = brain.think(nnInputs)
 
-            // ★ 训练版哈希同步：加食物方向 / 朝向 / 危险 / 尾巴
             val v3TrainCtx: Long = run {
                 val h0 = gSnake.first()
                 val foodDxBucket = ((gFood.x - h0.x) / 3).coerceIn(-5, 5)
                 val foodDyBucket = ((gFood.y - h0.y) / 3).coerceIn(-5, 5)
                 val regionBucket = (gFreeRegion(gSnake) / 4).coerceIn(0, 60)
                 val lenBucket = (gSnake.size / 8).coerceIn(0, 30)
-                val headingBucket = when (gDir) {
-                    P(0, -1) -> 0
-                    P(0, 1) -> 1
-                    P(-1, 0) -> 2
-                    else -> 3
-                }
+                val headingBucket = when (gDir) { P(0, -1) -> 0; P(0, 1) -> 1; P(-1, 0) -> 2; else -> 3 }
                 val dangerBucket = gCalculateDanger().coerceIn(1, 5)
                 val tailBucket = if (gTailReachable(gSnake)) 1 else 0
-
                 var hh = 1125899906842597L
-                hh = hh * 31 + h0.x
-                hh = hh * 31 + h0.y
-                hh = hh * 31 + foodDxBucket
-                hh = hh * 31 + foodDyBucket
-                hh = hh * 31 + headingBucket
-                hh = hh * 31 + dangerBucket
-                hh = hh * 31 + regionBucket
-                hh = hh * 31 + lenBucket
-                hh = hh * 31 + tailBucket
+                hh = hh * 31 + h0.x; hh = hh * 31 + h0.y
+                hh = hh * 31 + foodDxBucket; hh = hh * 31 + foodDyBucket
+                hh = hh * 31 + headingBucket; hh = hh * 31 + dangerBucket
+                hh = hh * 31 + regionBucket; hh = hh * 31 + lenBucket; hh = hh * 31 + tailBucket
                 hh xor v3TrainCtxSalt
             }
-
             val de = gCheckFoodDeadEnd()
-            deadEndPredicted = de.first
-            foodSpaceRatio = de.second
-            var deadEndPenalty = 0f
-            if (de.first) deadEndPenalty = -5f
+            deadEndPredicted = de.first; foodSpaceRatio = de.second
+            var deadEndPenalty = 0f; if (de.first) deadEndPenalty = -5f
+            val rSteps = when { gSnake.size > 60 -> 5; gSnake.size > 25 -> 3; else -> 0 }
+            rolloutActive = rSteps > 0; rolloutSteps = rSteps
 
-            val rSteps = when {
-                gSnake.size > 60 -> 5
-                gSnake.size > 25 -> 3
-                else -> 0
-            }
-            rolloutActive = rSteps > 0
-            rolloutSteps = rSteps
+            val beamResult = if (BEAM_ENABLED && gSnake.size >= BEAM_MIN_LENGTH) beamSearchBestMove() else null
+            val beamMove = beamResult?.first
+            val beamValid = beamMove != null && legal.any { it.d == beamMove }
 
-            var best = legal.first()
-            var bestValue = -Float.MAX_VALUE
-
+            var best = legal.first(); var bestValue = -Float.MAX_VALUE
             for (candidate in legal) {
-                val a = dirs.indexOfFirst { it == candidate.d }
-                if (a < 0) continue
-
-                val q = qRead(state, a)
-                val nn = nnVals[a]
-                val rule = candidate.score
-
+                val a = dirs.indexOfFirst { it == candidate.d }; if (a < 0) continue
+                val q = qRead(state, a); val nn = nnVals[a]; val rule = candidate.score
                 val rolloutScore = if (rSteps > 0) gRolloutN(candidate.d, rSteps) else 0f
-                val v3TrainPenalty =
-                    v3Memory.penaltyFor(v3TrainCtx, a) * (if (v3FusionEnabled) 45f else 0f)
-
-                // ★ 归一化所有模块
+                val v3TrainPenalty = v3Memory.penaltyFor(v3TrainCtx, a) * (if (v3FusionEnabled) 45f else 0f)
                 val qNorm = (q / 10f).coerceIn(-1f, 1f)
                 val nnNorm = kotlin.math.tanh(nn * 0.25f).coerceIn(-1f, 1f)
                 val ruleNorm = kotlin.math.tanh(rule / 1000f).coerceIn(-1f, 1f)
                 val rolloutNorm = kotlin.math.tanh(rolloutScore / 30f).coerceIn(-1f, 1f)
                 val memoryNorm = kotlin.math.tanh(v3TrainPenalty / 10f).coerceIn(-1f, 1f)
                 val deadNorm = deadEndPenalty.coerceIn(-1f, 0f)
-
-                val mixed =
-                    qWeight * qNorm +
-                    nnWeight * nnNorm +
-                    0.35f * ruleNorm +
-                    0.25f * rolloutNorm +
-                    0.35f * memoryNorm +
-                    0.25f * deadNorm
-
-                if (mixed > bestValue) {
-                    bestValue = mixed
-                    best = candidate.copy(qValue = q)
-                }
+                val beamNorm = if (beamValid && candidate.d == beamMove) {
+                    kotlin.math.tanh(beamResult!!.second / 20f).coerceIn(-1f, 1f)
+                } else 0f
+                val mixed = qWeight * qNorm + nnWeight * nnNorm +
+                            0.30f * ruleNorm + 0.20f * rolloutNorm +
+                            0.25f * memoryNorm + 0.20f * deadNorm +
+                            BEAM_WEIGHT * beamNorm
+                if (mixed > bestValue) { bestValue = mixed; best = candidate.copy(qValue = q) }
             }
+
+            if (beamValid && best.d == beamMove) beamSelected++
+
+            if (beamCalls > 0L && beamCalls % 100L == 0L && currentAgentId == 0) {
+                Log.d(LOG_TAG, "Beam: calls=$beamCalls success=$beamSuccess selected=$beamSelected nodes=$beamTotalNodes best=$beamBestScore")
+            }
+
             return best
         }
 
@@ -3466,47 +2953,34 @@ class SnakeView @JvmOverloads constructor(
             return Pair(ratio < 1.2f, ratio)
         }
 
-        // ★ 新评分：空间 + 机动 + 尾巴 + 吃食物，带折扣
+        // ★ 多因素 rollout
         private fun gRolloutN(startDir: P, maxSteps: Int): Float {
-            var body = ArrayDeque(gSnake)
-            var dir = startDir
-            var score = 0f
+            var body = ArrayDeque(gSnake); var dir = startDir; var score = 0f
             for (step in 0 until maxSteps) {
                 if (body.isEmpty()) return score - 50f
-                var bestNext: P? = null
-                var bestSpace = -1
+                var bestNext: P? = null; var bestSpace = -1
                 for (d in dirs) {
                     val nh = P(body.first().x + d.x, body.first().y + d.y)
                     if (!gInside(nh)) continue
-                    val isTail = nh == body.last()
-                    if (body.contains(nh) && !isTail) continue
+                    val isTail = nh == body.last(); if (body.contains(nh) && !isTail) continue
                     var space = 0
                     for (sd in dirs) {
                         val sx = nh.x + sd.x; val sy = nh.y + sd.y
-                        if (sx in 0 until cols && sy in 0 until rows) {
-                            if (!body.any { it.x == sx && it.y == sy }) space++
-                        }
+                        if (sx in 0 until cols && sy in 0 until rows) if (!body.any { it.x == sx && it.y == sy }) space++
                     }
                     if (space > bestSpace) { bestSpace = space; bestNext = d }
                 }
                 if (bestNext == null) return score - 50f
-                val sim = gSimulateOn(body, bestNext)
-                body = sim.body
-
-                // ★ 多因子评分
-                val region = gFreeRegion(body)
-                val tailOk = gTailReachable(body)
-                val mobility = gCountSafeMoves(body)
+                val sim = gSimulateOn(body, bestNext); body = sim.body
+                val region = gFreeRegion(body); val tailOk = gTailReachable(body); val mobility = gCountSafeMoves(body)
                 val spaceRatio = region.toFloat() / max(1, body.size)
                 score += spaceRatio.coerceIn(0f, 6f) * 0.8f
                 score += mobility * 0.5f
-                if (tailOk) score += 1.5f
-                else if (body.size > 10) score -= 3.0f
+                if (tailOk) score += 1.5f else if (body.size > 10) score -= 3.0f
                 if (sim.ate) score += 8f
                 val fd = gDistance(body.first(), gFood, body, true)
                 if (fd >= 0) score += 3.0f / (fd + 1)
                 score *= 0.92f
-
                 dir = bestNext
             }
             return score
@@ -3515,10 +2989,7 @@ class SnakeView @JvmOverloads constructor(
         private fun gBuildState(): Int = buildState(gSnake, gDir, gFood, gHunger)
         private fun gLegalMask(): Int = legalActionMask(gSnake, gDir, gFood)
 
-        fun gHungerForceEat(): Int = when {
-            gSnake.size < 20 -> 50; gSnake.size < 35 -> 70
-            gSnake.size < 55 -> 100; gSnake.size < 80 -> 140; else -> 200
-        }
+        fun gHungerForceEat(): Int = when { gSnake.size < 20 -> 50; gSnake.size < 35 -> 70; gSnake.size < 55 -> 100; gSnake.size < 80 -> 140; else -> 200 }
 
         fun gFollowTailStep(legal: List<Candidate>): P? {
             if (gSnake.size < 2) return null
@@ -3565,28 +3036,19 @@ class SnakeView @JvmOverloads constructor(
             var eatPenalty = 0f
             if (ate) {
                 val afterSize = sim.body.size; val needSpace = (afterSize * safetyMargin).toInt() + 2
-                if (!tail || region < needSpace) {
-                    eatPenalty = -7500f - gSnake.size * 100f
-                } else {
+                if (!tail || region < needSpace) eatPenalty = -7500f - gSnake.size * 100f
+                else {
                     val after = ArrayDeque(sim.body)
-                    val dx = after.last().x - after.first().x
-                    val dy = after.last().y - after.first().y
-                    val follow = when {
-                        abs(dx) >= abs(dy) && dx != 0 -> P(if (dx > 0) 1 else -1, 0)
-                        dy != 0 -> P(0, if (dy > 0) 1 else -1)
-                        else -> null
-                    }
+                    val dx = after.last().x - after.first().x; val dy = after.last().y - after.first().y
+                    val follow = when { abs(dx) >= abs(dy) && dx != 0 -> P(if (dx > 0) 1 else -1, 0); dy != 0 -> P(0, if (dy > 0) 1 else -1); else -> null }
                     if (follow != null && canSim(after, follow)) {
                         val next = simulateOn(after, follow)
                         val r2 = freeRegion(next.body); val t2 = tailReachable(next.body)
-                        if (!t2 || r2 < (afterSize * 1.2f).toInt()) {
-                            eatPenalty = -4500f - gSnake.size * 60f
-                        }
+                        if (!t2 || r2 < (afterSize * 1.2f).toInt()) eatPenalty = -4500f - gSnake.size * 60f
                     }
                 }
             }
-            val edge = min(min(sim.body.first().x, cols - 1 - sim.body.first().x),
-                           min(sim.body.first().y, rows - 1 - sim.body.first().y))
+            val edge = min(min(sim.body.first().x, cols - 1 - sim.body.first().x), min(sim.body.first().y, rows - 1 - sim.body.first().y))
             val edgeScore = -max(0, 2 - edge) * wEdge
             val spacePenalty = max(0f, gSnake.size * safetyMargin - region.toFloat())
             val spaceScore = -spacePenalty * wSpace
@@ -3670,8 +3132,7 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
-        fun gTailReachable(body: ArrayDeque<P>): Boolean =
-            if (body.isEmpty()) false else gDistance(body.first(), body.last(), body, true) >= 0
+        fun gTailReachable(body: ArrayDeque<P>): Boolean = if (body.isEmpty()) false else gDistance(body.first(), body.last(), body, true) >= 0
 
         fun gShortestPath(start: P, target: P, body: Collection<P>, allowTail: Boolean): List<P>? {
             if (start == target) return emptyList()
@@ -3706,36 +3167,26 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
-        // ★ gDie：用 agentId 直接当索引，避免 % 掩盖重复
+        // ★ gDie 修复：不用 %，不用 max
         fun gDie(cause: String) {
             var shouldSave = false
             synchronized(sharedLock) {
-                when (cause) {
-                    "WALL" -> deathWall++; "SELF" -> deathSelf++; else -> deathTrap++
-                }
-                totalGames++
-                recentScores.addLast(gScore)
+                when (cause) { "WALL" -> deathWall++; "SELF" -> deathSelf++; else -> deathTrap++ }
+                totalGames++; recentScores.addLast(gScore)
                 while (recentScores.size > 50) recentScores.removeFirst()
                 if (gScore > bestRecentScore) bestRecentScore = gScore
-
                 val index = currentAgentId
                 if (index in 0 until POPULATION_SIZE) {
-                    // ★ 每代每 Agent 只有一局，直接写入
                     currentScores[index] = gScore.toFloat()
                     if (gScore.toFloat() > bestScoreThisGen) bestScoreThisGen = gScore.toFloat()
                     if (gScore.toFloat() > bestScoreAllTime) bestScoreAllTime = gScore.toFloat()
                 } else {
                     Log.e(LOG_TAG, "gDie invalid agent index=$index")
                 }
-
-                v2Episodes++
-                shouldSave = totalGames % 200 == 0
+                v2Episodes++; shouldSave = totalGames % 200 == 0
             }
-            try {
-                if (v3FusionEnabled && gSnake.isNotEmpty()) {
-                    v3TrainRecordLesson(cause, gSnake.first(), gTailReachable(gSnake), gSnake.size, gLastAction)
-                }
-            } catch (t: Throwable) { Log.e(LOG_TAG, "v3TrainRecordLesson failed", t) }
+            try { if (v3FusionEnabled && gSnake.isNotEmpty()) v3TrainRecordLesson(cause, gSnake.first(), gTailReachable(gSnake), gSnake.size, gLastAction) }
+            catch (t: Throwable) { Log.e(LOG_TAG, "v3TrainRecordLesson failed", t) }
             adjustWeights(cause)
             safetyMargin = (safetyMargin * 0.95f + 1.08f * 0.05f).coerceIn(1.0f, 1.20f)
             aggression = (aggression * 0.95f + 1.15f * 0.05f).coerceIn(0.95f, 1.35f)
@@ -3758,15 +3209,9 @@ class SnakeView @JvmOverloads constructor(
                 try {
                     val sr = 22050; val pcm = generateMelody(sr)
                     val track = AudioTrack.Builder()
-                        .setAudioAttributes(AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_GAME)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
-                        .setAudioFormat(AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(sr)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                        .setBufferSizeInBytes(pcm.size * 2)
-                        .setTransferMode(AudioTrack.MODE_STATIC).build()
+                        .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                        .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sr).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                        .setBufferSizeInBytes(pcm.size * 2).setTransferMode(AudioTrack.MODE_STATIC).build()
                     track.write(pcm, 0, pcm.size)
                     if (Build.VERSION.SDK_INT >= 23) track.setLoopPoints(0, pcm.size, -1)
                     audioTrack = track
@@ -3800,7 +3245,7 @@ class SnakeView @JvmOverloads constructor(
             val out = ArrayList<Short>()
             for ((freq, durMs) in notes) {
                 val n = durMs * sampleRate / 1000
-                if (freq == N || freq <= 0f) { repeat(n) { out.add(0) } }
+                if (freq == N || freq <= 0f) repeat(n) { out.add(0) }
                 else {
                     val period = (sampleRate / freq).toInt().coerceAtLeast(1)
                     for (i in 0 until n) {
