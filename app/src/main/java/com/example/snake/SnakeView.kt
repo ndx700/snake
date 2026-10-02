@@ -122,7 +122,6 @@ class SnakeView @JvmOverloads constructor(
         val body: ArrayDeque<P>, val dir: P, val food: P, val score: Float,
         val steps: Int, val ateFood: Boolean, val dead: Boolean,
         val loopPenalty: Float, val firstAction: P, val recentHeadCells: IntArray,
-        // ★ V9：缓存已经算好的特征，避免后续重复 BFS
         val region: Int = 0,
         val tailReachable: Boolean = false,
         val safeMoves: Int = 0,
@@ -212,7 +211,6 @@ class SnakeView @JvmOverloads constructor(
     private val beamEligibleCalls = AtomicLong(0)
     private val replayUpdateCount = AtomicLong(0)
 
-    // ★ V9：性能监控
     private val featureCalls = AtomicLong(0)
     private val featureCacheHits = AtomicLong(0)
     private val beamNodeEvaluations = AtomicLong(0)
@@ -456,6 +454,9 @@ class SnakeView @JvmOverloads constructor(
     private val v3CtxSalt = 0x5157L
     private val v3TrainCtxSalt = 0x5157L
 
+    private var deathFeedbackCount = 0
+    private val DEATH_FEEDBACK_MAX_PER_GEN = 20
+
     fun setV3FusionEnabled(on: Boolean) { v3FusionEnabled = on; v3LayerWhy = if (on) "V4融合已接管" else "V2基线模式" }
     fun isV3FusionEnabled(): Boolean = v3FusionEnabled
 
@@ -543,7 +544,32 @@ class SnakeView @JvmOverloads constructor(
         val lesson = v3Memory.remember(ctx, chosenAction, cause, severity, v3ActionIndexOf(alt?.d ?: ai.chosen))
         v3Regret = severity * lesson.confidence
         v3LessonFires++; v3LessonFlash = 1f
-        v3Genome.selfAdjust(cause)
+    }
+
+    private fun applyDeathFeedback(cause: String) {
+        if (!v3FusionEnabled) return
+        if (deathFeedbackCount >= DEATH_FEEDBACK_MAX_PER_GEN) return
+        when (cause) {
+            "WALL" -> {
+                v3Genome.dangerAversion += 0.025f
+                v3Genome.tailPriority += 0.015f
+            }
+            "SELF" -> {
+                v3Genome.spacePriority += 0.030f
+                v3Genome.dangerAversion += 0.025f
+            }
+            "TRAP" -> {
+                v3Genome.spacePriority += 0.025f
+                v3Genome.dangerAversion += 0.035f
+                v3Genome.tailPriority += 0.015f
+            }
+            "HUNGER" -> {
+                v3Genome.foodPriority += 0.025f
+                v3Genome.hungerUrgency += 0.035f
+            }
+        }
+        v3Genome.normalize()
+        deathFeedbackCount++
     }
 
     private fun v3TrainRecordLesson(cause: String, head: P, tailOk: Boolean, len: Int, action: Int) {
@@ -642,7 +668,6 @@ class SnakeView @JvmOverloads constructor(
 
         const val REWARD_STEP = -0.015f
         const val REWARD_FOOD = 8.0f
-        // ★ V9：小幅提升食物距离奖励，从 0.04 到 0.08，避免 "朝食物移动" 信号太弱
         const val REWARD_FOOD_DISTANCE_IMPROVE = 0.08f
         const val REWARD_SPACE_DELTA = 0.05f
         const val REWARD_TAIL = 0.03f
@@ -681,6 +706,9 @@ class SnakeView @JvmOverloads constructor(
         const val HUNGER_WARNING = 0.60f
         const val HUNGER_HIGH = 0.75f
         const val HUNGER_CRITICAL = 0.88f
+
+        const val PREF_REINFORCE_MODE = "reinforce_mode"
+        const val PREF_SCORE_HISTORY = "score_history"
     }
 
     private val qV2 = FloatArray(V2_Q_SIZE)
@@ -874,6 +902,9 @@ class SnakeView @JvmOverloads constructor(
     private fun evolveNextGeneration() {
         evolving = true
         try {
+            // 世代切换：清零死亡反馈限额
+            deathFeedbackCount = 0
+
             v3EvolveGenome()
             generation++
 
@@ -1015,6 +1046,7 @@ class SnakeView @JvmOverloads constructor(
 
     private var trainingMode = false
     private var reinforceTraining = false
+    @Volatile private var preserveReinforceOnDetach = false
 
     @Volatile private var lastHeartbeat = 0L
     @Volatile private var watchDogThread: Thread? = null
@@ -1055,7 +1087,7 @@ class SnakeView @JvmOverloads constructor(
             val wasReinforce = state.getBoolean("reinforceTraining", false)
             trainingMode = state.getBoolean("trainingMode", false)
             super.onRestoreInstanceState(state.getParcelable("super"))
-            if (wasReinforce) { startParallelTraining(resetCounters = false); startWatchDog() }
+            if (wasReinforce) { setReinforceTraining(true) }
         } else super.onRestoreInstanceState(state)
     }
 
@@ -1126,7 +1158,7 @@ class SnakeView @JvmOverloads constructor(
             updateEffects(dt / 16f)
             val shouldRender = if (trainingMode) (++renderSkipCounter % 2) == 0 else true
             if (shouldRender) invalidate()
-            Choreographer.getInstance().postFrameCallback(this)
+            Choreographer.getInstance().postFrameCallback(frame)
         }
     }
 
@@ -1173,6 +1205,8 @@ class SnakeView @JvmOverloads constructor(
         deathHunger = prefs.getInt("stat_hunger", 0)
         totalGames = prefs.getInt("stat_total", 0)
 
+        loadScoreHistory()
+
         bgm = BgmPlayer()
         updateCurrentSkin()
         updateCurrentBoard()
@@ -1197,8 +1231,33 @@ class SnakeView @JvmOverloads constructor(
     }
 
     fun setReinforceTraining(enable: Boolean) {
-        if (enable) { startParallelTraining(); startWatchDog() }
-        else { stopParallelTraining(); stopWatchDog() }
+        if (enable) {
+            // 幂等：已经在跑就不重复启动
+            synchronized(trainingLifecycleLock) {
+                if (reinforceTraining && trainActive && trainThreads.any { it.isAlive }) {
+                    preserveReinforceOnDetach = true
+                    invalidate()
+                    return
+                }
+            }
+
+            preserveReinforceOnDetach = true
+            reinforceTraining = true
+            trainingMode = true
+            aiMode = 1
+
+            startParallelTraining(resetCounters = false)
+            startWatchDog()
+
+            prefs.edit().putBoolean(PREF_REINFORCE_MODE, true).apply()
+        } else {
+            preserveReinforceOnDetach = false
+
+            stopWatchDog()
+            stopParallelTraining()
+
+            prefs.edit().putBoolean(PREF_REINFORCE_MODE, false).apply()
+        }
         invalidate()
     }
 
@@ -1869,6 +1928,29 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
+    private fun saveScoreHistory() {
+        try {
+            val snapshot = synchronized(sharedLock) { recentScores.toList() }
+            val joined = snapshot.joinToString(",")
+            prefs.edit().putString(PREF_SCORE_HISTORY, joined).apply()
+        } catch (_: Throwable) {}
+    }
+
+    private fun loadScoreHistory() {
+        try {
+            val raw = prefs.getString(PREF_SCORE_HISTORY, "") ?: return
+            if (raw.isBlank()) return
+            val parts = raw.split(",")
+            recentScores.clear()
+            for (p in parts) {
+                val v = p.trim().toIntOrNull() ?: continue
+                recentScores.addLast(v)
+                while (recentScores.size > 50) recentScores.removeFirst()
+                if (v > bestRecentScore) bestRecentScore = v
+            }
+        } catch (_: Throwable) {}
+    }
+
     private fun saveLearning() {
         synchronized(sharedLock) {
             prefs.edit()
@@ -1889,11 +1971,13 @@ class SnakeView @JvmOverloads constructor(
                 .putInt("money", money).putInt("high_score", highScore)
                 .apply()
         }
+        saveScoreHistory()
     }
 
     private fun die(cause: String) {
         gameOver = true; deathCause = cause
         v3AnalyzeDeath(cause)
+        applyDeathFeedback(cause)
         when (cause) {
             "WALL" -> deathWall++
             "SELF" -> deathSelf++
@@ -2236,6 +2320,59 @@ class SnakeView @JvmOverloads constructor(
         text.textAlign = Paint.Align.LEFT
     }
 
+    private fun getRecentScoresSnapshot(): List<Int> {
+        synchronized(sharedLock) { return recentScores.toList() }
+    }
+
+    private fun movingAverage5(): List<Float> {
+        val scores = getRecentScoresSnapshot()
+        if (scores.isEmpty()) return emptyList()
+        val result = ArrayList<Float>()
+        for (i in scores.indices) {
+            val start = max(0, i - 4)
+            var sum = 0f
+            for (j in start..i) sum += scores[j]
+            result.add(sum / (i - start + 1))
+        }
+        return result
+    }
+
+    private fun recentAverage(count: Int): Float {
+        val scores = getRecentScoresSnapshot()
+        if (scores.isEmpty()) return 0f
+        val start = max(0, scores.size - count)
+        var sum = 0f
+        for (i in start until scores.size) sum += scores[i]
+        return sum / max(1, scores.size - start)
+    }
+
+    private fun recentVolatility(): Float {
+        val scores = getRecentScoresSnapshot()
+        if (scores.size < 2) return 0f
+        val avg = scores.average().toFloat()
+        if (avg <= 0f) return 0f
+        var variance = 0f
+        for (s in scores) {
+            val d = s - avg
+            variance += d * d
+        }
+        variance /= scores.size
+        val std = kotlin.math.sqrt(variance)
+        return (std / avg).coerceIn(0f, 10f)
+    }
+
+    private fun recentScoreTrend(): String {
+        val scores = getRecentScoresSnapshot()
+        if (scores.size < 10) return "WARMUP"
+        val recent = scores.takeLast(5).average()
+        val previous = scores.drop(scores.size - 10).take(5).average()
+        return when {
+            recent > previous * 1.08 -> "↑ IMPROVING"
+            recent < previous * 0.92 -> "↓ DEGRADING"
+            else -> "→ STABLE"
+        }
+    }
+
     private fun drawLearningCurve(c: Canvas, left: Float, top: Float, w: Float, h: Float) {
         barPaint.style = Paint.Style.FILL; barPaint.color = Color.rgb(25, 25, 25)
         c.drawRect(left, top, left + w, top + h, barPaint)
@@ -2258,6 +2395,22 @@ class SnakeView @JvmOverloads constructor(
         val curvePaint = Paint(Paint.ANTI_ALIAS_FLAG)
         curvePaint.style = Paint.Style.STROKE; curvePaint.strokeWidth = 3f
         curvePaint.color = Color.rgb(120, 255, 180); c.drawPath(linePath, curvePaint)
+
+        // 5 局移动平均折线
+        val ma = movingAverage5()
+        if (ma.size >= 2) {
+            val maPath = Path()
+            ma.forEachIndexed { i, v ->
+                val x = left + i * stepX
+                val y = top + h - h * (v / maxScore)
+                if (i == 0) maPath.moveTo(x, y) else maPath.lineTo(x, y)
+            }
+            val maPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+            maPaint.style = Paint.Style.STROKE; maPaint.strokeWidth = 2f
+            maPaint.color = Color.rgb(255, 200, 80)
+            c.drawPath(maPath, maPaint)
+        }
+
         text.textSize = 12f; text.color = Color.LTGRAY
         c.drawText("max $maxScore", left + 5f, top + 14f, text)
     }
@@ -2406,19 +2559,28 @@ class SnakeView @JvmOverloads constructor(
     private fun drawTrainingDashboard(c: Canvas) {
         val W = width.toFloat(); val pad = W * 0.022f; var y = pad
         panel.color = Color.rgb(28, 24, 48)
-        c.drawRoundRect(pad, y, W - pad, y + W * 0.155f, pad * 0.7f, pad * 0.7f, panel)
+        c.drawRoundRect(pad, y, W - pad, y + W * 0.19f, pad * 0.7f, pad * 0.7f, panel)
+
         text.textAlign = Paint.Align.LEFT; text.isFakeBoldText = true
-        text.textSize = W * 0.062f; text.color = Color.rgb(150, 230, 255)
-        c.drawText("🧬 第 $generation 代", pad * 1.6f, y + W * 0.068f, text)
-        text.textSize = W * 0.034f
+        text.textSize = W * 0.052f; text.color = Color.rgb(150, 230, 255)
+        c.drawText("🧬 强化训练", pad * 1.6f, y + W * 0.058f, text)
+
+        text.textSize = W * 0.038f; text.color = Color.rgb(200, 230, 255)
+        c.drawText("第 $generation 代", pad * 1.6f, y + W * 0.11f, text)
+
+        text.textSize = W * 0.032f
         text.color = if (evolving || generationTransitioning) Color.rgb(255, 180, 80) else Color.rgb(120, 230, 150)
         val headState = if (evolving || generationTransitioning) "⚙ 进化繁殖中..." else "▶ 训练运行中"
         text.textAlign = Paint.Align.RIGHT
-        c.drawText(headState, W - pad * 1.6f, y + W * 0.06f, text)
-        text.textAlign = Paint.Align.LEFT; text.textSize = W * 0.032f; text.color = Color.rgb(200, 200, 220)
+        c.drawText(headState, W - pad * 1.6f, y + W * 0.055f, text)
+
+        text.textSize = W * 0.026f; text.color = Color.rgb(180, 180, 200)
+        c.drawText("$POPULATION_SIZE Agent / $TRAIN_THREADS Threads", W - pad * 1.6f, y + W * 0.10f, text)
+
+        text.textAlign = Paint.Align.LEFT; text.textSize = W * 0.026f; text.color = Color.rgb(200, 200, 220)
         c.drawText("已分配 $currentAgentIndex/$POPULATION_SIZE   已完成 $completedAgents/$POPULATION_SIZE   总局数 $totalGames",
-            pad * 1.6f, y + W * 0.118f, text)
-        y += W * 0.155f + pad * 0.6f
+            pad * 1.6f, y + W * 0.165f, text)
+        y += W * 0.19f + pad * 0.6f
 
         val schedPanelH = W * 0.135f
         panel.color = Color.rgb(20, 30, 34)
@@ -2456,6 +2618,7 @@ class SnakeView @JvmOverloads constructor(
         panel.color = Color.rgb(80, 220, 150)
         if (frac > 0.01f) c.drawRoundRect(pad, y, pad + (W - 2 * pad) * frac, y + barH, barH / 2, barH / 2, panel)
         y += barH + pad
+
         val cardW = (W - 3 * pad) / 2f; val cardH = W * 0.118f
         val phaseColor = mapOf(
             "捕食" to Color.rgb(255, 170, 60), "避险" to Color.rgb(255, 90, 90),
@@ -2515,12 +2678,44 @@ class SnakeView @JvmOverloads constructor(
         }
         y += 4 * mH + 3 * pad * 0.5f + pad
 
+        // ★ 新增：评分统计面板（最近5/50局均分 + 波动率 + 趋势）
+        val statH = W * 0.108f
+        panel.color = Color.rgb(22, 30, 40)
+        c.drawRoundRect(pad, y, W - pad, y + statH, pad * 0.5f, pad * 0.5f, panel)
+
+        val avg5 = recentAverage(5)
+        val avg50 = recentAverage(50)
+        val vol = recentVolatility()
+        val trendStr = recentScoreTrend()
+
+        val trendCol = when {
+            trendStr.contains("IMPROVING") -> Color.rgb(80, 220, 140)
+            trendStr.contains("DEGRADING") -> Color.rgb(231, 76, 60)
+            trendStr.contains("STABLE") -> Color.rgb(120, 200, 255)
+            else -> Color.GRAY
+        }
+
+        text.textAlign = Paint.Align.LEFT
+        text.isFakeBoldText = true; text.textSize = W * 0.028f; text.color = Color.rgb(255, 220, 130)
+        c.drawText("【评分统计】", pad * 1.4f, y + pad * 1.3f, text)
+
+        text.isFakeBoldText = false; text.textSize = W * 0.026f; text.color = Color.WHITE
+        c.drawText("最近5局均分：${"%.0f".format(avg5)}   最近50局均分：${"%.0f".format(avg50)}",
+            pad * 1.4f, y + pad * 3.0f, text)
+        c.drawText("波动率：${"%.1f".format(vol * 100f)}%   趋势：$trendStr",
+            pad * 1.4f, y + pad * 4.5f, text)
+
+        text.isFakeBoldText = true; text.color = trendCol
+        c.drawText(trendStr, W - pad * 1.6f - text.measureText(trendStr), y + pad * 4.5f, text)
+        text.isFakeBoldText = false
+        y += statH + pad * 0.5f
+
         val tuneH = W * 0.28f
         panel.color = Color.rgb(18, 24, 34)
         c.drawRoundRect(pad, y, W - pad, y + tuneH, pad * 0.6f, pad * 0.6f, panel)
         text.textAlign = Paint.Align.LEFT; text.isFakeBoldText = true
         text.textSize = W * 0.032f
-        val trendCol = when (trendState) {
+        val trendCol2 = when (trendState) {
             "IMPROVING" -> Color.rgb(80, 220, 140)
             "STABLE" -> Color.rgb(120, 200, 255)
             "STALLED" -> Color.rgb(241, 196, 15)
@@ -2536,7 +2731,7 @@ class SnakeView @JvmOverloads constructor(
             "DEGRADING" -> "↓"
             else -> "·"
         }
-        text.color = trendCol
+        text.color = trendCol2
         c.drawText("训练趋势: $trendArrow $trendState", pad * 1.4f, y + pad * 1.6f, text)
         text.isFakeBoldText = false; text.textSize = W * 0.026f; text.color = Color.rgb(200, 200, 220)
         c.drawText("原因: $diagnosisCause", pad * 1.4f, y + pad * 2.9f, text)
@@ -2598,6 +2793,25 @@ class SnakeView @JvmOverloads constructor(
             c.drawText("$cnt", dx0 + dW + pad * 0.5f, y + dRowH * 0.6f, text)
             y += dRowH + pad * 0.15f
         }
+
+        // 右下角：强化按钮区域（只在强化模式显示，文字改成"停止强化训练"）
+        val btnW = W * 0.42f
+        val btnH = W * 0.10f
+        val btnLeft = W - pad - btnW
+        val btnTop = height - btnH - pad * 1.6f
+        reinforceButtonRect.set(btnLeft, btnTop, btnLeft + btnW, btnTop + btnH)
+        panel.color = Color.rgb(231, 76, 60)
+        c.drawRoundRect(reinforceButtonRect, pad * 0.5f, pad * 0.5f, panel)
+        text.textAlign = Paint.Align.CENTER
+        text.isFakeBoldText = true
+        text.textSize = W * 0.036f
+        text.color = Color.WHITE
+        c.drawText("停止强化训练",
+            reinforceButtonRect.centerX(),
+            reinforceButtonRect.centerY() + W * 0.012f,
+            text)
+        text.isFakeBoldText = false
+        text.textAlign = Paint.Align.LEFT
     }
 
     private fun drawDebug(c: Canvas) {
@@ -2784,14 +2998,21 @@ class SnakeView @JvmOverloads constructor(
             c.drawText("死亡原因：$deathCause", left + 16f, infoY + 62f, text)
             text.isFakeBoldText = false
         }
-        val btnW = 160f; val btnH = 42f
-        val btnLeft = left + w - btnW - 16f; val btnTop = infoY + 48f
-        reinforceButtonRect.set(btnLeft, btnTop, btnLeft + btnW, btnTop + btnH)
-        val btnColor = if (reinforceTraining) Color.rgb(231, 76, 60) else Color.rgb(46, 204, 113)
-        panel.color = btnColor; c.drawRoundRect(reinforceButtonRect, 12f, 12f, panel)
-        text.textAlign = Paint.Align.CENTER; text.isFakeBoldText = true; text.textSize = 18f; text.color = Color.WHITE
-        c.drawText(if (reinforceTraining) "停止进化" else "神经进化", reinforceButtonRect.centerX(), reinforceButtonRect.centerY() + 7f, text)
-        text.isFakeBoldText = false; text.textAlign = Paint.Align.LEFT
+
+        // 按钮只在 trainingMode 或 reinforceTraining 时设置 rect 并显示
+        if (trainingMode || reinforceTraining) {
+            val btnW = 160f; val btnH = 42f
+            val btnLeft = left + w - btnW - 16f; val btnTop = infoY + 48f
+            reinforceButtonRect.set(btnLeft, btnTop, btnLeft + btnW, btnTop + btnH)
+            val btnColor = if (reinforceTraining) Color.rgb(231, 76, 60) else Color.rgb(46, 204, 113)
+            panel.color = btnColor; c.drawRoundRect(reinforceButtonRect, 12f, 12f, panel)
+            text.textAlign = Paint.Align.CENTER; text.isFakeBoldText = true; text.textSize = 18f; text.color = Color.WHITE
+            val btnText = if (reinforceTraining) "停止强化训练" else "开始强化训练"
+            c.drawText(btnText, reinforceButtonRect.centerX(), reinforceButtonRect.centerY() + 7f, text)
+            text.isFakeBoldText = false; text.textAlign = Paint.Align.LEFT
+        } else {
+            reinforceButtonRect.set(0f, 0f, 0f, 0f)
+        }
     }
 
     private fun drawGameOver(c: Canvas) {
@@ -2815,9 +3036,14 @@ class SnakeView @JvmOverloads constructor(
         when (e.action) {
             MotionEvent.ACTION_DOWN -> { touchStartX = e.x; touchStartY = e.y; return true }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (reinforceButtonRect.contains(e.x, e.y)) {
+                // 只有强化训练状态下才响应停止按钮
+                if (reinforceTraining && reinforceButtonRect.contains(e.x, e.y)) {
                     val now = System.currentTimeMillis()
-                    if (now - lastReinforceTap > 400L) { lastReinforceTap = now; setReinforceTraining(!reinforceTraining) }
+                    if (now - lastReinforceTap > 400L) {
+                        lastReinforceTap = now
+                        setReinforceTraining(false)
+                        invalidate()
+                    }
                     return true
                 }
                 if (reinforceTraining) return true
@@ -2842,12 +3068,21 @@ class SnakeView @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
-        stopParallelTraining(); stopWatchDog()
-        super.onDetachedFromWindow()
-        bgm?.stop()
+        stopWatchDog()
+
+        // 强化状态下（切屏、配置变化）不摧毁训练，靠 preserveReinforceOnDetach 保留
+        if (!preserveReinforceOnDetach) {
+            stopParallelTraining()
+        } else {
+            saveTrainingState()
+            saveLearning()
+        }
+
+        try { bgm?.stop() } catch (_: Throwable) {}
         try { toneGen?.release() } catch (_: Throwable) {}
         try { aiPool.shutdownNow() } catch (_: Throwable) {}
-        saveTrainingState()
+
+        super.onDetachedFromWindow()
     }
 
     private fun foundationHungerThreshold(length: Int): Int = when {
@@ -3096,8 +3331,12 @@ class SnakeView @JvmOverloads constructor(
             val beamNorm = if (beamValid && candidate.d == beamMove) tanh(beamResult!!.second / 20f).coerceIn(-1f, 1f) else 0f
             val rolloutScore = if (rSteps > 0) rolloutN(candidate.d, rSteps) else 0f
             val rolloutNorm = tanh(rolloutScore / 30f)
-            val v3Penalty = v3Memory.penaltyFor(v3Ctx, a) * (if (v3FusionEnabled) 45f else 0f)
-            val memoryNorm = tanh(v3Penalty / 10f)
+
+            // ★ Failure Memory 方向修正：坏动作给负贡献
+            val memoryPenalty = if (v3FusionEnabled) {
+                v3Memory.penaltyFor(v3Ctx, a).coerceIn(0f, 0.35f)
+            } else 0f
+            val memoryNorm = (-memoryPenalty).coerceIn(-0.35f, 0f)
 
             val contributions = floatArrayOf(
                 qW * abs(qNorm), nnW * abs(nnNorm), foodW * abs(foodNorm), safetyW * abs(safetyNorm),
@@ -3392,7 +3631,6 @@ class SnakeView @JvmOverloads constructor(
         sourceBody: ArrayDeque<P>,
         sourceDir: P,
         targetFood: P,
-        // ★ V9：允许训练线程传入自己的搜索函数，避免使用主线程状态
         evalFn: (ArrayDeque<P>, P, P, P) -> Candidate,
         simulateFn: (
             ArrayDeque<P>, P, P, P, P, IntArray
@@ -3667,7 +3905,6 @@ class SnakeView @JvmOverloads constructor(
             return
         }
 
-        // ★ V9：AutoTune 阶段化，避免早期乱调
         if (generation < 10) {
             lastAutoTuneText = "OBSERVE(G<10)"
             return
@@ -3727,7 +3964,6 @@ class SnakeView @JvmOverloads constructor(
         if (beamEligibleCalls.get() > 100L && beamCalls.get() == 0L) return "BEAM_NOT_ACTIVE"
         if (beamCalls.get() > 500L && beamSelected.get().toFloat() / beamCalls.get().toFloat() < 0.02f) return "BEAM_TOO_WEAK"
 
-        // ★ V9：FOOD_PROBLEM 多指标综合判断
         if ((hungerRate > 0.35f && recentFood < 4f) || (foodPerStep < 0.015f && recentSteps > 80f)) {
             return "FOOD_PROBLEM"
         }
@@ -3850,10 +4086,6 @@ class SnakeView @JvmOverloads constructor(
         while (autoTuneEvents.size > 30) autoTuneEvents.pollFirst()
     }
 
-    /**
-     * ★ V9：训练状态特征缓存。
-     * 每个 TrainGame 独立拥有。
-     */
     private class TrainStateFeatures(
         val region: Int,
         val safeMoves: Int,
@@ -3896,7 +4128,6 @@ class SnakeView @JvmOverloads constructor(
         private var episodeExpectedEpoch: Long = 0L
         var gLastAction = -1
 
-        // ★ V9：每个 TrainGame 独立的状态特征缓存
         private var cachedFeatures: TrainStateFeatures? = null
         private var cachedFeatureKey: Long = 0L
         private var cachedFeatureValid: Boolean = false
@@ -4025,7 +4256,6 @@ class SnakeView @JvmOverloads constructor(
             val action = dirs.indexOfFirst { it == mv }.coerceAtLeast(0)
             gLastAction = action
             if (!gIsReverse(mv, gDir)) gDir = mv
-            // ★ V9：状态已变化，失效缓存
             invalidateFeaturesCache()
             val nh = P(gSnake.first().x + gDir.x, gSnake.first().y + gDir.y)
             if (!gInside(nh)) { gTerminal(state, action, DEATH_WALL); lastDeathCause = "WALL"; gOver = true; return }
@@ -4071,7 +4301,6 @@ class SnakeView @JvmOverloads constructor(
             if (statusIndex in threadStatus.indices) {
                 val st = threadStatus[statusIndex]
                 st.score = gScore; st.steps = gSteps
-                // ★ V9：使用缓存特征，避免重复 BFS
                 val phaseFeatures = getCachedTrainFeatures()
                 st.phase = if (ate) "捕食" else if (phaseFeatures.danger >= 3) "避险" else "搜索"
             }
@@ -4103,7 +4332,6 @@ class SnakeView @JvmOverloads constructor(
             val nnInputs = buildInputs(gSnake.first(), gFood, gSnake)
             val nnVals = brain.think(nnInputs)
 
-            // ★ V9：使用缓存的特征，避免重复 BFS
             val features = getCachedTrainFeatures()
             val hRatio = (gHunger.toFloat() / hungerKillLimit).coerceIn(0f, 1f)
             val danger = features.danger
@@ -4117,7 +4345,6 @@ class SnakeView @JvmOverloads constructor(
                 val h0 = gSnake.first()
                 val foodDxBucket = ((gFood.x - h0.x) / 3).coerceIn(-5, 5)
                 val foodDyBucket = ((gFood.y - h0.y) / 3).coerceIn(-5, 5)
-                // ★ V9：使用 features，避免重复 gFreeRegion / gTailReachable
                 val regionBucket = (features.region / 4).coerceIn(0, 60)
                 val lenBucket = (features.length / 8).coerceIn(0, 30)
                 val headingBucket = when (gDir) { P(0, -1) -> 0; P(0, 1) -> 1; P(-1, 0) -> 2; else -> 3 }
@@ -4130,7 +4357,6 @@ class SnakeView @JvmOverloads constructor(
                 hh = hh * 31 + regionBucket; hh = hh * 31 + lenBucket; hh = hh * 31 + tailBucket
                 hh xor v3TrainCtxSalt
             }
-            // ★ V9：food deadEnd 加条件触发
             val de = if (shouldRunFoodDeadEnd(features)) {
                 foodDeadEndCalls.incrementAndGet()
                 gCheckFoodDeadEnd()
@@ -4176,8 +4402,12 @@ class SnakeView @JvmOverloads constructor(
                 val beamNorm = if (beamValid && candidate.d == beamMove) tanh(beamResult!!.second / 20f).coerceIn(-1f, 1f) else 0f
                 val rolloutScore = if (rSteps > 0) gRolloutN(candidate, rSteps) else 0f
                 val rolloutNorm = tanh(rolloutScore / 30f)
-                val v3Penalty = v3Memory.penaltyFor(v3TrainCtx, a) * (if (v3FusionEnabled) 45f else 0f)
-                val memoryNorm = tanh(v3Penalty / 10f)
+
+                // ★ Failure Memory 方向修正：坏动作给负贡献
+                val memoryPenalty = if (v3FusionEnabled) {
+                    v3Memory.penaltyFor(v3TrainCtx, a).coerceIn(0f, 0.35f)
+                } else 0f
+                val memoryNorm = (-memoryPenalty).coerceIn(-0.35f, 0f)
 
                 val mixed = qW * qNorm + nnW * nnNorm + foodW * foodNorm + safetyW * safetyNorm +
                             beamW * beamNorm + rollW * rolloutNorm + memW * memoryNorm
@@ -4258,15 +4488,11 @@ class SnakeView @JvmOverloads constructor(
             return space.toFloat() / max(1, gSnake.size)
         }
 
-        /**
-         * ★ V9：Rollout 第一层复用 Candidate，减少重复 BFS。
-         */
         private fun gRolloutN(firstCandidate: Candidate, maxSteps: Int): Float {
             rolloutCalls.incrementAndGet()
             if (maxSteps <= 0) return 0f
 
             var score = 0f
-            // 第一层直接使用 Candidate 已有数据
             val firstSpaceRatio = firstCandidate.region.toFloat() / max(1, gSnake.size + 1)
             score += firstSpaceRatio.coerceIn(0f, 6f) * 0.8f
             score += firstCandidate.mobility * 0.5f
@@ -4278,7 +4504,6 @@ class SnakeView @JvmOverloads constructor(
 
             if (maxSteps <= 1) return score
 
-            // 后续层：只计算空间比 + 食物距离
             var body = gSimulateOn(ArrayDeque(gSnake), firstCandidate.d).body
             var dir = firstCandidate.d
             for (step in 1 until maxSteps) {
@@ -4299,12 +4524,10 @@ class SnakeView @JvmOverloads constructor(
                 if (bestNext == null) return score - 50f
                 val sim = gSimulateOn(body, bestNext); body = sim.body
 
-                // 只算空间比
                 val region = gFreeRegion(body)
                 val spaceRatio = region.toFloat() / max(1, body.size)
                 score += spaceRatio.coerceIn(0f, 6f) * 0.8f
 
-                // 只有第 2 层且蛇 > 10 或吃到食物时才检查尾巴
                 if (step >= 1 && (body.size > 10 || sim.ate)) {
                     val tailOk = gTailReachable(body)
                     if (tailOk) score += 1.5f
@@ -4428,7 +4651,6 @@ class SnakeView @JvmOverloads constructor(
             body.addFirst(nextHead); if (!ate) body.removeLast()
             beamNodeEvaluations.incrementAndGet()
 
-            // ★ V9：计算一次并存入 BeamNode
             val region = gFreeRegion(body)
             val ratio = region.toFloat() / max(1, body.size)
             val tailOk = gTailReachable(body)
@@ -4622,6 +4844,10 @@ class SnakeView @JvmOverloads constructor(
             }
             try { if (v3FusionEnabled && gSnake.isNotEmpty()) v3TrainRecordLesson(cause, gSnake.first(), gTailReachable(gSnake), gSnake.size, gLastAction) }
             catch (t: Throwable) { Log.e(LOG_TAG, "v3TrainRecordLesson failed", t) }
+
+            // ★ 用 applyDeathFeedback 替代旧的 selfAdjust，幅度更小更克制
+            applyDeathFeedback(cause)
+
             adjustWeights(cause)
             safetyMargin = (safetyMargin * 0.95f + 1.08f * 0.05f).coerceIn(1.0f, 1.20f)
             aggression = (aggression * 0.95f + 1.15f * 0.05f).coerceIn(0.95f, 1.35f)
