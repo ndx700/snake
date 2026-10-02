@@ -429,6 +429,12 @@ class MainActivity : AppCompatActivity() {
                             Toast.LENGTH_SHORT
                         ).show()
                     }
+
+                    // 长按 AI ON = 启动/停止 8蛇强化训练（复用强化按钮逻辑）
+                    setOnLongClickListener {
+                        reinforceBtn?.performClick()
+                        true
+                    }
                 }
 
             v4Btn =
@@ -478,8 +484,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-            row2.addView(trainingBtn)
-            row2.addView(reinforceBtn)
+            // 只显示三个按键：AI ON / V4融合 / 商店（强化训练通过长按AI ON触发）
             row2.addView(aiBtn)
             row2.addView(v4Btn)
             row2.addView(shop)
@@ -648,7 +653,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateAiButton() {
 
-        if (aiOn) {
+        when {
+            reinforceMode -> {
+                aiBtn?.text = "8蛇训练中"
+                aiBtn?.setBackgroundColor(Color.rgb(230, 120, 30))
+            }
+            aiOn -> {
 
             aiBtn?.text = "AI ON"
 
@@ -660,7 +670,8 @@ class MainActivity : AppCompatActivity() {
                 )
             )
 
-        } else {
+            }
+            else -> {
 
             aiBtn?.text = "AI OFF"
 
@@ -671,6 +682,7 @@ class MainActivity : AppCompatActivity() {
                     80
                 )
             )
+        }
         }
     }
 
@@ -728,6 +740,7 @@ class MainActivity : AppCompatActivity() {
                 )
             )
         }
+        updateAiButton()   // 同步AI按钮文字（8蛇训练中/AI ON/OFF）
     }
 
     private fun showShopCategoryDialog() {
