@@ -970,6 +970,7 @@ class SnakeView @JvmOverloads constructor(
         startWatchDog()
     }
 
+    // ★ 关键修复：删除固定 myGenerationToken，每次 while 循环重新读取
     private fun startParallelTraining(resetCounters: Boolean = true) {
         synchronized(trainingLifecycleLock) {
             if (trainThreads.any { it.isAlive }) return
@@ -997,7 +998,6 @@ class SnakeView @JvmOverloads constructor(
             }
 
             generationToken++
-            val myGenerationToken = generationToken
             generationTransitioning = false
 
             for (i in threadStatus.indices) {
@@ -1005,7 +1005,7 @@ class SnakeView @JvmOverloads constructor(
                 threadStatus[i].score = 0; threadStatus[i].steps = 0; threadStatus[i].phase = "空闲"
             }
 
-            Log.d(LOG_TAG, "GEN_START gen=$generation token=$myGenerationToken run=$myRunId pop=$POPULATION_SIZE th=$TRAIN_THREADS")
+            Log.d(LOG_TAG, "GEN_START gen=$generation token=$generationToken run=$myRunId pop=$POPULATION_SIZE th=$TRAIN_THREADS")
 
             for (i in 0 until TRAIN_THREADS) {
                 val threadIdx = i
@@ -1014,19 +1014,36 @@ class SnakeView @JvmOverloads constructor(
                     threadStatus[threadIdx].alive = true
 
                     while (isTrainingRunActive(myRunId) && !Thread.currentThread().isInterrupted) {
-                        if (evolving || generationTransitioning || generationToken != myGenerationToken) {
-                            threadStatus[threadIdx].phase = "进化"; Thread.yield(); continue
-                        }
+                        // ★ 每次都重新读取当前 generationToken
+                        var myGenerationToken = 0L
+                        var agentId = -1
+                        var waitingForEvolution = false
 
-                        val agentId: Int
                         synchronized(sharedLock) {
-                            if (currentAgentIndex >= POPULATION_SIZE) agentId = -1
-                            else { agentId = currentAgentIndex; currentAgentIndex++ }
+                            myGenerationToken = generationToken
+
+                            if (evolving || generationTransitioning) {
+                                waitingForEvolution = true
+                            } else if (currentAgentIndex >= POPULATION_SIZE) {
+                                agentId = -1
+                            } else {
+                                agentId = currentAgentIndex
+                                currentAgentIndex++
+                            }
                         }
 
-                        if (agentId < 0) { threadStatus[threadIdx].phase = "等待"; Thread.yield(); continue }
+                        if (waitingForEvolution) {
+                            threadStatus[threadIdx].phase = "进化"
+                            Thread.yield()
+                            continue
+                        }
 
-                        // ★ 修复 1035：不在 synchronized lambda 中 continue
+                        if (agentId < 0) {
+                            threadStatus[threadIdx].phase = "等待"
+                            Thread.yield()
+                            continue
+                        }
+
                         var invalidAgent = false
                         synchronized(sharedLock) {
                             if (agentId !in 0 until POPULATION_SIZE || agentCompleted[agentId]) {
@@ -1050,7 +1067,6 @@ class SnakeView @JvmOverloads constructor(
 
                         if (!episodeCompleted) { threadStatus[threadIdx].phase = "等待"; continue }
 
-                        // ★ 修复 1054 / 1060：不在 synchronized lambda 中让 if 处于表达式位置
                         var shouldEvolve = false
                         synchronized(sharedLock) {
                             if (generationToken != myGenerationToken) {
@@ -1069,10 +1085,10 @@ class SnakeView @JvmOverloads constructor(
                                     shouldEvolve = true
                                     Log.d(LOG_TAG, "GEN_COMPLETE gen=$generation done=$completedAgents/$POPULATION_SIZE")
                                 } else {
-                                    // 保持 if 有 else，避免 Kotlin 把同步块最后一句 if 当表达式
+                                    // 保持 if 有 else
                                 }
                             } else {
-                                // generationToken 不一致或该 agent 已完成 → 不结算
+                                // 保持 if 有 else
                             }
                         }
 
@@ -1084,9 +1100,10 @@ class SnakeView @JvmOverloads constructor(
                                         synchronized(sharedLock) {
                                             currentAgentIndex = 0; completedAgents = 0; uniqueCompletedAgents = 0
                                             completedAgentIds.clear(); java.util.Arrays.fill(agentCompleted, false)
-                                            generationToken++; generationTransitioning = false
+                                            generationToken++
+                                            generationTransitioning = false
                                         }
-                                        Log.d(LOG_TAG, "GEN_NEXT_READY gen=$generation")
+                                        Log.d(LOG_TAG, "GEN_NEXT_READY gen=$generation token=$generationToken")
                                     }
                                 } else synchronized(sharedLock) { generationTransitioning = false }
                             }
