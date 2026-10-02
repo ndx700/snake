@@ -386,8 +386,9 @@ class SnakeView @JvmOverloads constructor(
 
     /** 循环风险：最近10步重复访问过多 */
     private fun v3LoopRisk(): Boolean {
-        if (v3RecentHeads.size < 10) return false
-        return v3RecentHeads.takeLast(10).toSet().size <= 4
+    if (v3RecentHeads.size < 10) return false
+    val last10 = if (v3RecentHeads.size > 10) v3RecentHeads.drop(v3RecentHeads.size - 10) else v3RecentHeads
+    return last10.toSet().size <= 4
     }
 
     /** V3 目标选择器：感知 → 目标（层级链第一级） */
