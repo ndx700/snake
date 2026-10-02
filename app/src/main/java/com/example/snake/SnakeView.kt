@@ -177,6 +177,27 @@ class SnakeView @JvmOverloads constructor(
     @Volatile private var foodSpaceRatio = 1f
     @Volatile private var evolving = false
     private val visitedStates = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
+
+    // ===== 8线程实时状态（HUD可视化） =====
+    private class ThreadStatus {
+        @Volatile var alive = false
+        @Volatile var agentId = -1
+        @Volatile var score = 0
+        @Volatile var steps = 0
+        @Volatile var phase = "空闲"   // 空闲/捕食/搜索/进化
+    }
+    private val threadStatus = Array(8) { ThreadStatus() }
+
+    // ===== 进化历史记录（进化过程可视化） =====
+    private class EvoRecord(
+        val gen: Int, val bestScore: Float,
+        val eliteN: Int, val crossN: Int, val breedN: Int,
+        val personality: String, val deaths: IntArray, val timestamp: Long
+    )
+    private val evoHistory = java.util.concurrent.ConcurrentLinkedDeque<EvoRecord>()
+
+    // 防重复提交：当前run已提交的agentId
+    private val completedAgentIds = HashSet<Int>()
     // =============================
 
     /*
@@ -366,8 +387,7 @@ class SnakeView @JvmOverloads constructor(
     /** 循环风险：最近10步重复访问过多 */
     private fun v3LoopRisk(): Boolean {
         if (v3RecentHeads.size < 10) return false
-        // 修复编译错误：先转为 List，再调用 takeLast
-        return v3RecentHeads.toList().takeLast(10).toSet().size <= 4
+        return v3RecentHeads.takeLast(10).toSet().size <= 4
     }
 
     /** V3 目标选择器：感知 → 目标（层级链第一级） */
@@ -922,6 +942,26 @@ class SnakeView @JvmOverloads constructor(
                 }
             }
 
+            // —— 记录本次进化到历史（进化过程可视化）——
+            val personality = when {
+                v3Genome.dangerAversion > 1.8f && v3Genome.spacePriority > 1.6f -> "稳健保守型"
+                v3Genome.foodPriority > 1.6f && v3Genome.hungerUrgency > 1.4f -> "激进捕食型"
+                v3Genome.loopAversion > 1.6f -> "反循环型"
+                v3Genome.tailPriority > 1.5f -> "追尾保命型"
+                else -> "均衡探索型"
+            }
+            evoHistory.addLast(
+                EvoRecord(
+                    generation, bestScore,
+                    bestBrains.size, 30, POPULATION_SIZE - bestBrains.size - 30,
+                    personality,
+                    intArrayOf(deathWall, deathSelf, deathTrap),
+                    System.currentTimeMillis()
+                )
+            )
+            while (evoHistory.size > 24) evoHistory.pollFirst()
+            bestScoreThisGen = 0f   // 新一代从零开始累积
+
             // 动态权重：世代越高+分数越好，NN权重越大
             val baseRatio = (generation / 30f).coerceIn(0f, 0.7f)
             val scoreBonus = (bestScoreThisGen / 25000f).coerceIn(0f, 0.15f)
@@ -1096,7 +1136,7 @@ class SnakeView @JvmOverloads constructor(
     private val trainThreads: MutableList<Thread> =
         mutableListOf()
 
-    private val TRAIN_THREADS = 6
+    private val TRAIN_THREADS = 8
 
     private val aiPool: ExecutorService = run {
         val cores =
@@ -1146,18 +1186,19 @@ class SnakeView @JvmOverloads constructor(
         }
 
     private fun vibrateEat() {
+        if (reinforceTraining || trainingMode) return   // 训练时完全不震动
         vibrator?.let {
             try {
                 if (Build.VERSION.SDK_INT >= 26) {
                     it.vibrate(
-                        VibrationEffect.createWaveform(
-                            longArrayOf(0, 12, 25, 12),
-                            -1
+                        VibrationEffect.createOneShot(
+                            18,
+                            VibrationEffect.DEFAULT_AMPLITUDE
                         )
                     )
                 } else {
                     @Suppress("DEPRECATION")
-                    it.vibrate(longArrayOf(0, 12, 25, 12), -1)
+                    it.vibrate(18)
                 }
             } catch (_: Throwable) {
             }
@@ -1165,6 +1206,7 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun vibrateDeath() {
+        if (reinforceTraining || trainingMode) return   // 训练死亡不震动
         vibrator?.let {
             try {
                 if (Build.VERSION.SDK_INT >= 26) {
@@ -1184,6 +1226,7 @@ class SnakeView @JvmOverloads constructor(
     }
 
     private fun playEatSound() {
+        if (reinforceTraining || trainingMode) return   // 训练时不发声
         try {
             toneGen?.startTone(
                 ToneGenerator.TONE_PROP_BEEP,
@@ -1552,20 +1595,32 @@ class SnakeView @JvmOverloads constructor(
             currentAgentIndex = 0
             completedAgents = 0
             bestScoreThisGen = 0f
+            completedAgentIds.clear()
+            for (i in threadStatus.indices) {
+                threadStatus[i].alive = false
+                threadStatus[i].agentId = -1
+                threadStatus[i].score = 0
+                threadStatus[i].steps = 0
+                threadStatus[i].phase = "空闲"
+            }
             for (i in 0 until POPULATION_SIZE) {
                 currentScores[i] = 0f
             }
 
             for (i in 0 until TRAIN_THREADS) {
+                val threadIdx = i
                 val t = Thread(
                     {
                         val game = TrainGame(
                             seed = System.nanoTime() + i * 999983L,
-                            runId = myRunId
+                            runId = myRunId,
+                            statusIndex = threadIdx
                         )
 
+                        threadStatus[threadIdx].alive = true
                         while (isTrainingRunActive(myRunId) && !Thread.currentThread().isInterrupted) {
                             if (evolving) {
+                                threadStatus[threadIdx].phase = "进化"
                                 if (Thread.currentThread().isInterrupted) break
                                 Thread.yield()
                                 continue
@@ -1578,10 +1633,13 @@ class SnakeView @JvmOverloads constructor(
                             }
 
                             if (agentId == -1) {
+                                threadStatus[threadIdx].phase = "等待"
                                 Thread.yield()
                                 continue
                             }
 
+                            threadStatus[threadIdx].agentId = agentId
+                            threadStatus[threadIdx].phase = "训练"
                             try {
                                 game.playOneGame(agentId)
                             } catch (e: InterruptedException) {
@@ -1589,17 +1647,37 @@ class SnakeView @JvmOverloads constructor(
                                 break
                             } catch (e: Exception) {
                                 e.printStackTrace()
-                            } finally {
+                            }
+
+                            // —— 结果提交：runId隔离 + 防重复，只有首次提交才计数 ——
+                            var shouldEvolve = false
+                            if (isTrainingRunActive(myRunId)) {
                                 synchronized(sharedLock) {
-                                    completedAgents++
-                                    if (completedAgents >= POPULATION_SIZE) {
+                                    if (agentId !in completedAgentIds) {
+                                        completedAgentIds.add(agentId)
+                                        completedAgents++
+                                        if (completedAgents >= POPULATION_SIZE) shouldEvolve = true
+                                    }
+                                }
+                            }
+                            // —— Evolution：移出sharedLock，独立evolveLock保证全局只执行一次 ——
+                            if (shouldEvolve) {
+                                synchronized(evolveLock) {
+                                    if (isTrainingRunActive(myRunId) && !evolving &&
+                                        completedAgents >= POPULATION_SIZE) {
                                         evolveNextGeneration()
-                                        currentAgentIndex = 0
-                                        completedAgents = 0
+                                        synchronized(sharedLock) {
+                                            currentAgentIndex = 0
+                                            completedAgents = 0
+                                            completedAgentIds.clear()
+                                        }
                                     }
                                 }
                             }
                         }
+                        threadStatus[threadIdx].alive = false
+                        threadStatus[threadIdx].phase = "空闲"
+                        threadStatus[threadIdx].agentId = -1
                     },
                     "snake-train-$i"
                 )
@@ -5153,12 +5231,20 @@ class SnakeView @JvmOverloads constructor(
     ) {
         super.onDraw(c)
 
-        if (reinforceTraining || trainingMode) {
+        if (reinforceTraining) {
             c.drawColor(
                 Color.BLACK
             )
-            // 训练模式：全屏HUD，不画棋盘
+            // 8蛇强化训练：全屏信息仪表盘，不画棋盘
+            text.textAlign = Paint.Align.LEFT
+            drawTrainingDashboard(c)
+            return
+        }
 
+        if (trainingMode) {
+            c.drawColor(
+                Color.BLACK
+            )
             text.textAlign =
                 Paint.Align.LEFT
 
@@ -6238,6 +6324,205 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = false
         text.textSize = 14f
         text.color = Color.WHITE
+    }
+
+    // ═══════════════════ 8蛇强化训练：全屏信息仪表盘 ═══════════════════
+    private fun drawTrainingDashboard(c: Canvas) {
+        val W = width.toFloat()
+        val pad = W * 0.022f
+        var y = pad
+
+        // —— 顶部标题条 ——
+        panel.color = Color.rgb(28, 24, 48)
+        c.drawRoundRect(pad, y, W - pad, y + W * 0.155f, pad * 0.7f, pad * 0.7f, panel)
+        text.textAlign = Paint.Align.LEFT
+        text.isFakeBoldText = true
+        text.textSize = W * 0.062f
+        text.color = Color.rgb(150, 230, 255)
+        c.drawText("🧬 第 $generation 代", pad * 1.6f, y + W * 0.068f, text)
+        text.textSize = W * 0.034f
+        text.color = if (evolving) Color.rgb(255, 180, 80) else Color.rgb(120, 230, 150)
+        val headState = if (evolving) "⚙ 进化繁殖中..." else "▶ 训练运行中"
+        text.textAlign = Paint.Align.RIGHT
+        c.drawText(headState, W - pad * 1.6f, y + W * 0.06f, text)
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = W * 0.032f
+        text.color = Color.rgb(200, 200, 220)
+        c.drawText("本代完成 $completedAgents/$POPULATION_SIZE   总局数 $totalGames",
+            pad * 1.6f, y + W * 0.118f, text)
+        y += W * 0.155f + pad * 0.6f
+
+        // —— 本代完成度进度条 ——
+        val barH = W * 0.022f
+        panel.color = Color.rgb(50, 48, 66)
+        c.drawRoundRect(pad, y, W - pad, y + barH, barH / 2, barH / 2, panel)
+        val frac = (completedAgents.toFloat() / POPULATION_SIZE).coerceIn(0f, 1f)
+        panel.color = Color.rgb(80, 220, 150)
+        if (frac > 0.01f)
+            c.drawRoundRect(pad, y, pad + (W - 2 * pad) * frac, y + barH, barH / 2, barH / 2, panel)
+        y += barH + pad
+
+        // —— 8个线程实时卡片（2列×4行）——
+        val cardW = (W - 3 * pad) / 2f
+        val cardH = W * 0.118f
+        val phaseColor = mapOf(
+            "捕食" to Color.rgb(255, 170, 60),
+            "避险" to Color.rgb(255, 90, 90),
+            "搜索" to Color.rgb(90, 170, 255),
+            "进化" to Color.rgb(200, 130, 255),
+            "等待" to Color.rgb(130, 130, 140),
+            "空闲" to Color.rgb(100, 100, 110),
+            "训练" to Color.rgb(120, 220, 150)
+        )
+        for (ti in 0 until 8) {
+            val col = ti % 2; val row = ti / 2
+            val x0 = pad + col * (cardW + pad)
+            val y0 = y + row * (cardH + pad * 0.55f)
+            val st = threadStatus[ti]
+            panel.color = Color.rgb(24, 26, 38)
+            c.drawRoundRect(x0, y0, x0 + cardW, y0 + cardH, pad * 0.5f, pad * 0.5f, panel)
+            // 状态点
+            paint.color = phaseColor[st.phase] ?: Color.GRAY
+            c.drawCircle(x0 + pad * 0.8f, y0 + pad * 0.9f, pad * 0.32f, paint)
+            text.textSize = W * 0.029f
+            text.isFakeBoldText = true
+            text.color = Color.WHITE
+            c.drawText("线程$ti · Agent ${if (st.agentId >= 0) st.agentId else "-"}",
+                x0 + pad * 1.5f, y0 + pad * 1.15f, text)
+            text.textAlign = Paint.Align.RIGHT
+            text.color = paint.color
+            c.drawText(st.phase, x0 + cardW - pad * 0.7f, y0 + pad * 1.15f, text)
+            text.textAlign = Paint.Align.LEFT
+            text.textSize = W * 0.045f
+            text.color = Color.rgb(150, 235, 170)
+            c.drawText("${st.score}", x0 + pad * 0.9f, y0 + cardH - pad * 0.55f, text)
+            text.textSize = W * 0.026f
+            text.color = Color.rgb(160, 165, 185)
+            text.textAlign = Paint.Align.RIGHT
+            c.drawText("步 ${st.steps}", x0 + cardW - pad * 0.7f, y0 + cardH - pad * 0.6f, text)
+            text.textAlign = Paint.Align.LEFT
+        }
+        y += 4 * cardH + 3 * pad * 0.55f + pad * 0.4f
+
+        // —— 关键指标（2×4网格）——
+        val metrics = arrayOf(
+            "本代最佳" to "%.0f".format(bestScoreThisGen),
+            "历史最佳" to "%.0f".format(bestScoreAllTime),
+            "Q权重" to "%.2f".format(qWeight),
+            "NN权重" to "%.2f".format(nnWeight),
+            "回放" to "${replayBuffer.size}",
+            "ε" to "%.3f".format(v2Epsilon),
+            "学习步" to "$v2LearningSteps",
+            "当前个体" to "$currentAgentIndex"
+        )
+        val mW = (W - 5 * pad) / 4f; val mH = W * 0.105f
+        for (mi in metrics.indices) {
+            val col = mi % 4; val row = mi / 4
+            val x0 = pad + col * (mW + pad)
+            val y0 = y + row * (mH + pad * 0.5f)
+            panel.color = Color.rgb(30, 30, 44)
+            c.drawRoundRect(x0, y0, x0 + mW, y0 + mH, pad * 0.4f, pad * 0.4f, panel)
+            text.textSize = W * 0.024f
+            text.isFakeBoldText = false
+            text.color = Color.rgb(150, 155, 175)
+            c.drawText(metrics[mi].first, x0 + pad * 0.5f, y0 + pad * 0.95f, text)
+            text.textSize = W * 0.040f
+            text.isFakeBoldText = true
+            text.color = Color.WHITE
+            c.drawText(metrics[mi].second, x0 + pad * 0.5f, y0 + mH - pad * 0.5f, text)
+        }
+        y += 2 * mH + pad * 0.5f + pad
+
+        // —— 进化历程可视化（最近10代）——
+        text.textSize = W * 0.034f
+        text.isFakeBoldText = true
+        text.color = Color.rgb(200, 170, 255)
+        c.drawText("🧪 进化繁殖历程", pad * 0.4f, y, text)
+        y += pad * 0.7f
+        val history = evoHistory.toList().takeLast(10)
+        val rowH = W * 0.052f
+        if (history.isEmpty()) {
+            text.textSize = W * 0.028f; text.isFakeBoldText = false
+            text.color = Color.rgb(140, 140, 155)
+            c.drawText("（等待第一代50只完成后开始进化…）", pad * 0.6f, y + rowH * 0.6f, text)
+            y += rowH
+        }
+        for (rec in history) {
+            // 世代号
+            text.textSize = W * 0.026f; text.isFakeBoldText = true; text.color = Color.WHITE
+            c.drawText("G${rec.gen}", pad * 0.5f, y + rowH * 0.62f, text)
+            // 堆叠繁殖条：elite绿 / cross蓝 / breed橙
+            val barX = pad * 2.6f; val barW = W * 0.46f; val bh2 = rowH * 0.42f
+            val total = (rec.eliteN + rec.crossN + rec.breedN).coerceAtLeast(1)
+            var bx = barX
+            val seg = arrayOf(
+                rec.eliteN to Color.rgb(70, 220, 130),
+                rec.crossN to Color.rgb(80, 150, 255),
+                rec.breedN to Color.rgb(255, 160, 70)
+            )
+            for ((cnt, col) in seg) {
+                val wseg = barW * (cnt.toFloat() / total)
+                if (wseg > 0.5f) { panel.color = col; c.drawRect(bx, y, bx + wseg, y + bh2, panel) }
+                bx += wseg
+            }
+            // 最佳分数
+            text.textSize = W * 0.025f; text.isFakeBoldText = false; text.color = Color.rgb(180, 240, 190)
+            c.drawText("最佳%.0f".format(rec.bestScore), barX + barW + pad * 0.5f, y + rowH * 0.55f, text)
+            // 性格
+            text.color = Color.rgb(230, 200, 140)
+            text.textAlign = Paint.Align.RIGHT
+            c.drawText(rec.personality, W - pad * 0.5f, y + rowH * 0.55f, text)
+            text.textAlign = Paint.Align.LEFT
+            y += rowH + pad * 0.18f
+        }
+        y += pad * 0.4f
+
+        // —— 死因统计（横向条）——
+        text.textSize = W * 0.032f; text.isFakeBoldText = true
+        text.color = Color.rgb(255, 150, 150)
+        c.drawText("☠ 死因分布", pad * 0.4f, y, text)
+        y += pad * 0.7f
+        val deaths = arrayOf(
+            "撞墙" to deathWall, "撞自己" to deathSelf, "被困" to deathTrap
+        )
+        val maxDeath = max(1, max(deathWall, max(deathSelf, deathTrap)))
+        val dRowH = W * 0.05f
+        for ((name, cnt) in deaths) {
+            text.textSize = W * 0.027f; text.isFakeBoldText = false; text.color = Color.WHITE
+            c.drawText(name, pad * 0.6f, y + dRowH * 0.6f, text)
+            val dx0 = pad * 2.4f; val dW = W * 0.55f
+            panel.color = Color.rgb(60, 50, 60)
+            c.drawRect(dx0, y + dRowH * 0.18f, dx0 + dW, y + dRowH * 0.62f, panel)
+            panel.color = Color.rgb(235, 90, 90)
+            val wf = dW * (cnt.toFloat() / maxDeath)
+            if (wf > 0.5f) c.drawRect(dx0, y + dRowH * 0.18f, dx0 + wf, y + dRowH * 0.62f, panel)
+            text.color = Color.rgb(220, 220, 230)
+            c.drawText("$cnt", dx0 + dW + pad * 0.5f, y + dRowH * 0.6f, text)
+            y += dRowH + pad * 0.15f
+        }
+        y += pad * 0.3f
+
+        // —— 底部状态：现在在干什么（填充剩余空间）——
+        val bottom0 = y
+        panel.color = Color.rgb(20, 30, 34)
+        c.drawRoundRect(pad, bottom0, W - pad, height - pad, pad * 0.6f, pad * 0.6f, panel)
+        text.textSize = W * 0.033f; text.isFakeBoldText = true
+        text.color = Color.rgb(120, 230, 200)
+        val nowDoing = when {
+            evolving -> "🧬 正在繁殖下一代：精英保留 + 交叉 + 变异"
+            completedAgents >= POPULATION_SIZE - 2 -> "⏳ 本代即将完成，准备进化"
+            else -> "🐍 8只小蛇并行训练，吃满CPU搜索+学习"
+        }
+        c.drawText(nowDoing, pad * 1.4f, bottom0 + pad * 1.4f, text)
+        text.textSize = W * 0.026f; text.isFakeBoldText = false
+        text.color = Color.rgb(170, 200, 210)
+        val why = v3LayerWhy
+        // 自动换行（简单按长度切两段）
+        c.drawText(why.take(46), pad * 1.4f, bottom0 + pad * 2.6f, text)
+        if (why.length > 46) c.drawText(why.substring(46), pad * 1.4f, bottom0 + pad * 3.6f, text)
+        text.color = Color.rgb(150, 180, 200)
+        c.drawText("目标: $v3Goal   循环命中$v3LoopHits  教训触发$v3LessonFires",
+            pad * 1.4f, bottom0 + pad * 4.8f, text)
     }
 
     private fun drawDebug(
@@ -7438,7 +7723,8 @@ class SnakeView @JvmOverloads constructor(
 
     private inner class TrainGame(
         seed: Long,
-        private val runId: Long
+        private val runId: Long,
+        private val statusIndex: Int = 0
     ) {
         val rng =
             Random(seed)
@@ -7739,6 +8025,14 @@ class SnakeView @JvmOverloads constructor(
             }
 
             gSteps++
+
+            // 实时更新线程状态到HUD
+            if (statusIndex in threadStatus.indices) {
+                val st = threadStatus[statusIndex]
+                st.score = gScore
+                st.steps = gSteps
+                st.phase = if (ate) "捕食" else if (gCalculateDanger() >= 3) "避险" else "搜索"
+            }
 
             if (
                 gHunger >=
@@ -9206,6 +9500,9 @@ class SnakeView @JvmOverloads constructor(
 
                 // 记录当前个体的成绩
                 currentScores[currentAgentId % POPULATION_SIZE] = max(currentScores[currentAgentId % POPULATION_SIZE], gScore.toFloat())
+                // 实时更新最佳（HUD即使第一代未进化也能看到数据）
+                if (gScore.toFloat() > bestScoreThisGen) bestScoreThisGen = gScore.toFloat()
+                if (gScore.toFloat() > bestScoreAllTime) bestScoreAllTime = gScore.toFloat()
 
                 // V4：训练死亡也写入失败记忆（层级L5数据源之一）
                 v3TrainRecordLesson(
