@@ -6440,7 +6440,8 @@ class SnakeView @JvmOverloads constructor(
         text.color = Color.rgb(200, 170, 255)
         c.drawText("🧪 进化繁殖历程", pad * 0.4f, y, text)
         y += pad * 0.7f
-        val history = evoHistory.toList().takeLast(10)
+        val fullHistory = evoHistory.toList()
+        val history = if (fullHistory.size > 10) fullHistory.drop(fullHistory.size - 10) else fullHistory
         val rowH = W * 0.052f
         if (history.isEmpty()) {
             text.textSize = W * 0.028f; text.isFakeBoldText = false
