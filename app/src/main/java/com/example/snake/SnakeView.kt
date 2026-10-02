@@ -76,7 +76,6 @@ class SnakeView @JvmOverloads constructor(
     private data class Particle(var x: Float, var y: Float, var vx: Float, var vy: Float, var life: Float, val color: Int)
     private data class FloatText(var x: Float, var y: Float, var life: Float, val text: String)
 
-    // ★ Beam Search 节点（未来模拟状态，不引用真实游戏对象）
     private data class BeamNode(
         val body: ArrayDeque<P>,
         val dir: P,
@@ -92,7 +91,6 @@ class SnakeView @JvmOverloads constructor(
 
     private val snake = ArrayDeque<P>()
     private val queue = ArrayDeque<P>()
-
     private val dirs = listOf(P(0, -1), P(0, 1), P(-1, 0), P(1, 0))
 
     private var dir = P(1, 0)
@@ -120,7 +118,6 @@ class SnakeView @JvmOverloads constructor(
     private val sharedLock = Any()
     private val evolveLock = Any()
 
-    // ===== 神经进化变量 =====
     private val POPULATION_SIZE = 50
     @Volatile private var generation = 0
     private val population = MutableList(POPULATION_SIZE) { TinyBrain() }
@@ -138,7 +135,6 @@ class SnakeView @JvmOverloads constructor(
     @Volatile private var evolving = false
     @Volatile private var generationTransitioning = false
 
-    // ★ Beam Search 统计
     @Volatile private var beamCalls = 0L
     @Volatile private var beamSuccess = 0L
     @Volatile private var beamSelected = 0L
@@ -414,7 +410,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // ===== 权重 =====
     private var wRegion = 11f
     private var wMobility = 35f
     private var wTailGood = 180f
@@ -477,7 +472,6 @@ class SnakeView @JvmOverloads constructor(
         const val LOG_TAG = "SnakeTrain"
         const val HEARTBEAT_TIMEOUT_MS = 7_200_000L
 
-        // ★ Beam Search 参数
         const val BEAM_ENABLED = true
         const val BEAM_WIDTH = 3
         const val BEAM_DEPTH_SHORT = 5
@@ -604,7 +598,6 @@ class SnakeView @JvmOverloads constructor(
         return e
     }
 
-    // ===== TinyBrain（8 输入不变）=====
     private inner class TinyBrain {
         var w1 = FloatArray(8 * 32) { Random.nextFloat() * 2f - 1f }
         var w2 = FloatArray(32 * 16) { Random.nextFloat() * 2f - 1f }
@@ -2114,7 +2107,6 @@ class SnakeView @JvmOverloads constructor(
         c.drawText("失败记忆: ${v3Memory.size()} 条", infoX, top + 118f, text)
         c.drawText("教训触发: ${v3LessonFires} 次", infoX, top + 136f, text)
         c.drawText("循环打断: ${v3LoopHits} 次", infoX, top + 154f, text)
-        // ★ Beam 统计
         c.drawText("Beam 命中: $beamSelected/$beamCalls", infoX, top + 172f, text)
         text.textSize = 12f
         if (v3LessonFlash > 0.01f) {
@@ -2447,7 +2439,6 @@ class SnakeView @JvmOverloads constructor(
                 left + 16f, infoY + 36f, text)
             c.drawText("回放${replayBuffer.size}/$REPLAY_CAPACITY   ε${"%.2f".format(v2Epsilon)}   步${v2LearningSteps}",
                 left + 16f, infoY + 54f, text)
-            // ★ Beam 统计
             val avgBeamNodes = if (beamCalls > 0) beamTotalNodes.toFloat() / beamCalls else 0f
             c.drawText("Beam 命中$beamSelected 调用$beamCalls 成功$beamSuccess 节点$beamTotalNodes 均$avgBeamNodes",
                 left + 16f, infoY + 72f, text)
@@ -2548,9 +2539,6 @@ class SnakeView @JvmOverloads constructor(
         saveTrainingState()
     }
 
-    // ============================================================
-    // TRAINING GAME
-    // ============================================================
     private inner class TrainGame(
         seed: Long,
         private val runId: Long,
@@ -2658,7 +2646,6 @@ class SnakeView @JvmOverloads constructor(
 
         private fun gTerminal(state: Int, action: Int, reward: Float) { qUpdate(state, action, reward, state, 0, true) }
 
-        // ★ Beam Search 主函数：从当前状态向前搜索，返回 (firstAction, score) 或 null
         private fun beamSearchBestMove(): Pair<P, Float>? {
             if (!BEAM_ENABLED) return null
             if (gSnake.isEmpty()) return null
@@ -2689,13 +2676,16 @@ class SnakeView @JvmOverloads constructor(
 
                 for (candidate in initialMoves) {
                     val node = simulateBeamMove(gSnake, gDir, gFood, candidate.d, candidate.d, startHeads)
-                    if (node != null) { beam.add(node); nodesExpanded++ }
+                    if (node != null) {
+                        beam.add(node)
+                        nodesExpanded++
+                    }
                 }
 
                 if (beam.isEmpty()) return null
 
-                repeat(depth - 1) {
-                    if (beam.isEmpty()) return@repeat
+                var depthStep = 0
+                while (depthStep < depth - 1 && beam.isNotEmpty()) {
                     val next = ArrayList<BeamNode>()
                     var stop = false
                     for (node in beam) {
@@ -2710,10 +2700,16 @@ class SnakeView @JvmOverloads constructor(
                             .take(width)
                         next.addAll(moves)
                         nodesExpanded += moves.size
-                        if (nodesExpanded >= BEAM_MAX_NODES) stop = true
+                        if (nodesExpanded >= BEAM_MAX_NODES) {
+                            stop = true
+                        }
                     }
-                    if (next.isEmpty()) { beam = ArrayList(); return@repeat }
+                    if (next.isEmpty()) {
+                        beam = ArrayList()
+                        break
+                    }
                     beam = ArrayList(next.sortedByDescending { it.score }.take(width))
+                    depthStep++
                 }
 
                 if (beam.isEmpty()) return null
@@ -2732,7 +2728,6 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
-        // ★ Beam 单步模拟：不改真实状态
         private fun simulateBeamMove(
             sourceBody: ArrayDeque<P>,
             sourceDir: P,
@@ -2826,7 +2821,6 @@ class SnakeView @JvmOverloads constructor(
             return danger.coerceIn(0f, 5f)
         }
 
-        // ★ 软评分：安全食物/尾巴加 bonus，不再硬 return
         fun gChooseMove(state: Int): P {
             val cands = dirs.map { gEvaluate(it) }
             val legal = cands.filter { it.legal }
@@ -2861,7 +2855,6 @@ class SnakeView @JvmOverloads constructor(
             return gSelectAction(state, boosted).d
         }
 
-        // ★ Beam 融入 gSelectAction 统一评分
         private fun gSelectAction(state: Int, legal: List<Candidate>): Candidate {
             if (legal.size == 1) return legal.first()
             if (rng.nextFloat() < currentEpsilon()) {
@@ -2953,7 +2946,6 @@ class SnakeView @JvmOverloads constructor(
             return Pair(ratio < 1.2f, ratio)
         }
 
-        // ★ 多因素 rollout
         private fun gRolloutN(startDir: P, maxSteps: Int): Float {
             var body = ArrayDeque(gSnake); var dir = startDir; var score = 0f
             for (step in 0 until maxSteps) {
@@ -3167,7 +3159,6 @@ class SnakeView @JvmOverloads constructor(
             }
         }
 
-        // ★ gDie 修复：不用 %，不用 max
         fun gDie(cause: String) {
             var shouldSave = false
             synchronized(sharedLock) {
@@ -3194,9 +3185,6 @@ class SnakeView @JvmOverloads constructor(
         }
     }
 
-    // =========================
-    // BGM
-    // =========================
     private class BgmPlayer {
         private var audioTrack: AudioTrack? = null
         @Volatile private var playing = false
