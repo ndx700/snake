@@ -18,6 +18,7 @@ import android.util.Log
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
@@ -903,7 +904,6 @@ class SnakeView @JvmOverloads constructor(
         evolving = true
         try {
             deathFeedbackCount = 0
-
             v3EvolveGenome()
             generation++
 
@@ -1007,6 +1007,7 @@ class SnakeView @JvmOverloads constructor(
 
     var onScoreChanged: ((Int) -> Unit)? = null
     var onMoneyChanged: ((Int) -> Unit)? = null
+    var onReinforceStopped: (() -> Unit)? = null
 
     private val prefs = context.getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
 
@@ -1050,6 +1051,42 @@ class SnakeView @JvmOverloads constructor(
     @Volatile private var lastHeartbeat = 0L
     @Volatile private var watchDogThread: Thread? = null
     @Volatile private var watchdogRestartCount = 0
+
+    // ============================================================
+    // HUD V2：自适应 + 滚动 + 系统栏安全区域
+    // ============================================================
+
+    private var hudTopInset = 0
+    private var hudBottomInset = 0
+
+    private var hudScrollY = 0f
+    private var hudMaxScroll = 0f
+
+    private var hudTouchStartY = 0f
+    private var hudLastTouchY = 0f
+    private var hudDragging = false
+
+    private var hudContentBottomY = 0f
+
+    private fun hudDp(value: Float): Float {
+        return value * resources.displayMetrics.density
+    }
+
+    override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bars = insets.getInsets(WindowInsets.Type.systemBars())
+            hudTopInset = bars.top
+            hudBottomInset = bars.bottom
+        } else {
+            @Suppress("DEPRECATION")
+            hudTopInset = insets.systemWindowInsetTop
+            @Suppress("DEPRECATION")
+            hudBottomInset = insets.systemWindowInsetBottom
+        }
+        requestLayout()
+        invalidate()
+        return insets
+    }
 
     private fun heartbeat() { lastHeartbeat = System.currentTimeMillis() }
 
@@ -1229,6 +1266,7 @@ class SnakeView @JvmOverloads constructor(
         }
 
         reset()
+        requestApplyInsets()
     }
 
     fun getAIMode(): Int = aiMode
@@ -1255,6 +1293,8 @@ class SnakeView @JvmOverloads constructor(
             reinforceTraining = true
             trainingMode = true
             aiMode = 1
+            hudScrollY = 0f
+            hudDragging = false
 
             startParallelTraining(resetCounters = false)
             startWatchDog()
@@ -1267,6 +1307,8 @@ class SnakeView @JvmOverloads constructor(
             stopParallelTraining()
 
             prefs.edit().putBoolean(PREF_REINFORCE_MODE, false).apply()
+
+            try { onReinforceStopped?.invoke() } catch (_: Throwable) {}
         }
         invalidate()
     }
@@ -2223,19 +2265,62 @@ class SnakeView @JvmOverloads constructor(
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        val hudReserve = 760f + 292f; val availTop = 12f
-        val availBottom = (h - hudReserve).coerceAtLeast(availTop + h * 0.30f)
-        val availH = availBottom - availTop
-        cell = min(w.toFloat() / cols, availH / rows)
-        ox = (w - cols * cell) / 2f
-        val baseOy = availTop + (availH - rows * cell) / 2f
-        val moveDown = cell * 2.5f; val maxOy = availBottom - rows * cell
-        oy = (baseOy + moveDown).coerceAtMost(maxOy)
+        if (reinforceTraining) {
+            return
+        }
+
+        val topSafe = max(
+            hudTopInset.toFloat(),
+            hudDp(8f)
+        )
+
+        val bottomSafe = max(
+            hudBottomInset.toFloat(),
+            hudDp(8f)
+        )
+
+        val availableTop =
+            topSafe + hudDp(4f)
+
+        val availableBottom =
+            (h - bottomSafe)
+                .coerceAtLeast(
+                    availableTop + h * 0.5f
+                )
+
+        val availableHeight =
+            (availableBottom - availableTop)
+                .coerceAtLeast(h * 0.25f)
+
+        cell = min(
+            w.toFloat() / cols,
+            availableHeight / rows
+        )
+
+        ox =
+            (w - cols * cell) / 2f
+
+        val baseOy =
+            availableTop +
+                (availableHeight - rows * cell) / 2f
+
+        val maxOy =
+            availableBottom -
+                rows * cell
+
+        oy =
+            (baseOy + cell * 0.5f)
+                .coerceAtMost(maxOy)
     }
 
     override fun onDraw(c: Canvas) {
         super.onDraw(c)
-        if (reinforceTraining) { c.drawColor(Color.BLACK); text.textAlign = Paint.Align.LEFT; drawTrainingDashboard(c); return }
+        if (reinforceTraining) {
+            c.drawColor(Color.rgb(7, 10, 18))
+            text.textAlign = Paint.Align.LEFT
+            drawTrainingDashboard(c)
+            return
+        }
         if (trainingMode) { c.drawColor(Color.BLACK); text.textAlign = Paint.Align.LEFT; drawDebug(c); return }
         c.drawColor(bgColor)
         gridPaint.color = gridColor; gridPaint.style = Paint.Style.STROKE; gridPaint.strokeWidth = 1f
@@ -2566,256 +2651,745 @@ class SnakeView @JvmOverloads constructor(
         text.isFakeBoldText = false; text.textSize = 14f; text.color = Color.WHITE
     }
 
+    // ============================================================
+    // ============== 新版可滚动强化 HUD ==========================
+    // ============================================================
+
     private fun drawTrainingDashboard(c: Canvas) {
-        val W = width.toFloat(); val pad = W * 0.022f; var y = pad
-        panel.color = Color.rgb(28, 24, 48)
-        c.drawRoundRect(pad, y, W - pad, y + W * 0.19f, pad * 0.7f, pad * 0.7f, panel)
 
-        text.textAlign = Paint.Align.LEFT; text.isFakeBoldText = true
-        text.textSize = W * 0.052f; text.color = Color.rgb(150, 230, 255)
-        c.drawText("🧬 强化训练", pad * 1.6f, y + W * 0.058f, text)
+        val W = width.toFloat()
+        val H = height.toFloat()
 
-        text.textSize = W * 0.038f; text.color = Color.rgb(200, 230, 255)
-        c.drawText("第 $generation 代", pad * 1.6f, y + W * 0.11f, text)
+        val side = hudDp(12f)
+        val gap = hudDp(10f)
 
-        text.textSize = W * 0.032f
-        text.color = if (evolving || generationTransitioning) Color.rgb(255, 180, 80) else Color.rgb(120, 230, 150)
-        val headState = if (evolving || generationTransitioning) "⚙ 进化繁殖中..." else "▶ 训练运行中"
-        text.textAlign = Paint.Align.RIGHT
-        c.drawText(headState, W - pad * 1.6f, y + W * 0.055f, text)
+        val topSafe = max(hudTopInset.toFloat(), hudDp(8f))
+        val bottomSafe = max(hudBottomInset.toFloat(), hudDp(8f))
 
-        text.textSize = W * 0.026f; text.color = Color.rgb(180, 180, 200)
-        c.drawText("$POPULATION_SIZE Agent / $TRAIN_THREADS Threads", W - pad * 1.6f, y + W * 0.10f, text)
+        val headerH = hudDp(76f)
+        val bottomButtonH = hudDp(56f)
 
-        text.textAlign = Paint.Align.LEFT; text.textSize = W * 0.026f; text.color = Color.rgb(200, 200, 220)
-        c.drawText("已分配 $currentAgentIndex/$POPULATION_SIZE   已完成 $completedAgents/$POPULATION_SIZE   总局数 $totalGames",
-            pad * 1.6f, y + W * 0.165f, text)
-        y += W * 0.19f + pad * 0.6f
+        val contentTop = topSafe + headerH + gap
+        val buttonTop = H - bottomSafe - bottomButtonH
+        val contentBottom = buttonTop - gap
 
-        val schedPanelH = W * 0.135f
-        panel.color = Color.rgb(20, 30, 34)
-        c.drawRoundRect(pad, y, W - pad, y + schedPanelH, pad * 0.5f, pad * 0.5f, panel)
-        val unclaimed = (POPULATION_SIZE - currentAgentIndex).coerceAtLeast(0)
-        val waiting = (TRAIN_THREADS - activeAgents).coerceAtLeast(0)
-        val schedStatus = when {
-            evolving || generationTransitioning -> "EVOLVING"
-            currentAgentIndex < POPULATION_SIZE -> "RUNNING"
-            completedAgents < POPULATION_SIZE -> "TAIL_WAIT"
-            else -> "GEN_SWITCH"
-        }
-        val schedColor = when (schedStatus) {
-            "RUNNING" -> Color.rgb(46, 204, 113)
-            "TAIL_WAIT" -> Color.rgb(241, 196, 15)
-            "EVOLVING", "GEN_SWITCH" -> Color.rgb(52, 152, 219)
-            else -> Color.GRAY
-        }
-        text.isFakeBoldText = true; text.textSize = W * 0.030f; text.color = Color.rgb(120, 220, 200)
-        c.drawText("调度状态：$schedStatus", pad * 1.4f, y + pad * 1.4f, text)
-        text.isFakeBoldText = false; text.textSize = W * 0.026f; text.color = schedColor
-        c.drawText("活跃：$activeAgents/$TRAIN_THREADS   等待：$waiting   未领取：$unclaimed",
-            pad * 1.4f, y + pad * 2.6f, text)
-        text.color = Color.rgb(200, 200, 220)
-        c.drawText("领取：$agentClaimCount   提交：$agentSubmitCount   过期：$staleResultCount   重复：$duplicateCompletionCount",
-            pad * 1.4f, y + pad * 3.9f, text)
-        c.drawText("V2状态空间：$V2_STATE_COUNT   Q表大小：$V2_Q_SIZE   已访问：${visitedStates.size}",
-            pad * 1.4f, y + pad * 5.2f, text)
-        y += schedPanelH + pad * 0.5f
+        val scale = ((W - side * 2f) / hudDp(390f)).coerceIn(0.78f, 1.15f)
 
-        val barH = W * 0.022f
-        panel.color = Color.rgb(50, 48, 66)
-        c.drawRoundRect(pad, y, W - pad, y + barH, barH / 2, barH / 2, panel)
-        val frac = (completedAgents.toFloat() / POPULATION_SIZE).coerceIn(0f, 1f)
-        panel.color = Color.rgb(80, 220, 150)
-        if (frac > 0.01f) c.drawRoundRect(pad, y, pad + (W - 2 * pad) * frac, y + barH, barH / 2, barH / 2, panel)
-        y += barH + pad
+        c.drawColor(Color.rgb(7, 10, 18))
 
-        val cardW = (W - 3 * pad) / 2f; val cardH = W * 0.118f
-        val phaseColor = mapOf(
-            "捕食" to Color.rgb(255, 170, 60), "避险" to Color.rgb(255, 90, 90),
-            "搜索" to Color.rgb(90, 170, 255), "进化" to Color.rgb(200, 130, 255),
-            "等待" to Color.rgb(130, 130, 140), "空闲" to Color.rgb(100, 100, 110),
-            "运行" to Color.rgb(120, 220, 150), "尾部等待" to Color.rgb(241, 196, 15),
-            "切换世代" to Color.rgb(52, 152, 219)
-        )
-        for (ti in 0 until 8) {
-            val col = ti % 2; val row = ti / 2
-            val x0 = pad + col * (cardW + pad); val y0 = y + row * (cardH + pad * 0.55f)
-            val st = threadStatus[ti]
-            panel.color = Color.rgb(24, 26, 38)
-            c.drawRoundRect(x0, y0, x0 + cardW, y0 + cardH, pad * 0.5f, pad * 0.5f, panel)
-            paint.color = phaseColor[st.phase] ?: Color.GRAY
-            c.drawCircle(x0 + pad * 0.8f, y0 + pad * 0.9f, pad * 0.32f, paint)
-            text.textSize = W * 0.029f; text.isFakeBoldText = true; text.color = Color.WHITE
-            c.drawText("线程$ti · Agent ${if (st.agentId >= 0) st.agentId else "-"}", x0 + pad * 1.5f, y0 + pad * 1.15f, text)
-            text.textAlign = Paint.Align.RIGHT; text.color = paint.color
-            c.drawText(st.phase, x0 + cardW - pad * 0.7f, y0 + pad * 1.15f, text)
-            text.textAlign = Paint.Align.LEFT; text.textSize = W * 0.045f; text.color = Color.rgb(150, 235, 170)
-            c.drawText("${st.score}", x0 + pad * 0.9f, y0 + cardH - pad * 0.55f, text)
-            text.textSize = W * 0.026f; text.color = Color.rgb(160, 165, 185); text.textAlign = Paint.Align.RIGHT
-            c.drawText("步 ${st.steps} · 完成 ${st.completedCount}", x0 + cardW - pad * 0.7f, y0 + cardH - pad * 0.6f, text)
-            text.textAlign = Paint.Align.LEFT
-        }
-        y += 4 * cardH + 3 * pad * 0.55f + pad * 0.4f
+        drawHudHeader(c, side, topSafe, W - side, headerH, scale)
 
-        val metrics = arrayOf(
-            "本代最佳" to "%.0f".format(bestScoreThisGen),
-            "历史最佳" to "%.0f".format(bestScoreAllTime),
-            "Q权重" to "%.2f".format(actualQWeight),
-            "NN权重" to "%.2f".format(actualNNWeight),
-            "Food" to "%.2f".format(actualFoodWeight),
-            "Safety" to "%.2f".format(actualSafetyWeight),
-            "Beam" to "%.2f".format(actualBeamWeight),
-            "ε" to (if (v2EpsilonCurrent <= EPSILON_MIN + 0.0005f) "%.3f(MIN)".format(v2EpsilonCurrent) else "%.3f".format(v2EpsilonCurrent)),
-            "学习步" to "$v2LearningSteps",
-            "回放" to "${replayBuffer.size}",
-            "Beam命中" to "${beamSelected.get()}/${beamCalls.get()}",
-            "Beam有效" to "${beamSuccess.get()}/${beamCalls.get()}",
-            "Feature" to "${featureCalls.get()}",
-            "F命中" to (if (featureCalls.get() > 0) "%.0f%%".format(featureCacheHits.get().toFloat() / featureCalls.get().toFloat() * 100f) else "-"),
-            "Beam节点" to "${beamNodeEvaluations.get()}",
-            "Rollout" to "${rolloutCalls.get()}"
-        )
-        val mW = (W - 5 * pad) / 4f; val mH = W * 0.105f
-        for (mi in metrics.indices) {
-            val col = mi % 4; val row = mi / 4
-            val x0 = pad + col * (mW + pad); val y0 = y + row * (mH + pad * 0.5f)
-            panel.color = Color.rgb(30, 30, 44)
-            c.drawRoundRect(x0, y0, x0 + mW, y0 + mH, pad * 0.4f, pad * 0.4f, panel)
-            text.textSize = W * 0.024f; text.isFakeBoldText = false; text.color = Color.rgb(150, 155, 175)
-            c.drawText(metrics[mi].first, x0 + pad * 0.5f, y0 + pad * 0.95f, text)
-            text.textSize = W * 0.038f; text.isFakeBoldText = true; text.color = Color.WHITE
-            c.drawText(metrics[mi].second, x0 + pad * 0.5f, y0 + mH - pad * 0.5f, text)
-        }
-        y += 4 * mH + 3 * pad * 0.5f + pad
+        c.save()
+        c.clipRect(0f, contentTop, W, contentBottom)
+        c.translate(0f, -hudScrollY)
 
-        val statH = W * 0.108f
-        panel.color = Color.rgb(22, 30, 40)
-        c.drawRoundRect(pad, y, W - pad, y + statH, pad * 0.5f, pad * 0.5f, panel)
+        var y = contentTop
+        y = drawHudScheduler(c, y, W, side, scale); y += gap
+        y = drawHudScoreCenter(c, y, W, side, scale); y += gap
+        y = drawHudTrend(c, y, W, side, scale); y += gap
+        y = drawHudFusionWeights(c, y, W, side, scale); y += gap
+        y = drawHudSearchStats(c, y, W, side, scale); y += gap
+        y = drawHudV3(c, y, W, side, scale); y += gap
+        y = drawHudDeathDistribution(c, y, W, side, scale); y += gap
+        y = drawHudEvolution(c, y, W, side, scale); y += gap
+        y = drawHudAutoTune(c, y, W, side, scale)
 
-        val avg5: Float = recentAverage(5)
-        val avg50: Float = recentAverage(50)
-        val vol: Float = recentVolatility()
-        val trendStr: String = recentScoreTrend()
+        hudContentBottomY = y
 
-        val trendCol = when {
-            trendStr.contains("IMPROVING") -> Color.rgb(80, 220, 140)
-            trendStr.contains("DEGRADING") -> Color.rgb(231, 76, 60)
-            trendStr.contains("STABLE") -> Color.rgb(120, 200, 255)
-            else -> Color.GRAY
-        }
+        hudMaxScroll = max(0f, hudContentBottomY - contentBottom + gap)
+        hudScrollY = hudScrollY.coerceIn(0f, hudMaxScroll)
+
+        c.restore()
+
+        drawHudStopButton(c, side, buttonTop, W - side, bottomButtonH)
+    }
+
+    private fun drawHudHeader(
+        c: Canvas,
+        left: Float,
+        top: Float,
+        right: Float,
+        h: Float,
+        scale: Float
+    ) {
+        panel.color = Color.rgb(17, 25, 42)
+        c.drawRoundRect(left, top, right, top + h, hudDp(18f), hudDp(18f), panel)
+
+        border.style = Paint.Style.STROKE
+        border.strokeWidth = hudDp(1f)
+        border.color = Color.rgb(42, 67, 100)
+        c.drawRoundRect(left, top, right, top + h, hudDp(18f), hudDp(18f), border)
 
         text.textAlign = Paint.Align.LEFT
-        text.isFakeBoldText = true; text.textSize = W * 0.028f; text.color = Color.rgb(255, 220, 130)
-        c.drawText("【评分统计】", pad * 1.4f, y + pad * 1.3f, text)
+        text.isFakeBoldText = true
+        text.textSize = hudDp(21f) * scale
+        text.color = Color.rgb(150, 225, 255)
+        c.drawText("AI 强化训练中心", left + hudDp(16f), top + hudDp(29f), text)
 
-        text.isFakeBoldText = false; text.textSize = W * 0.026f; text.color = Color.WHITE
-        c.drawText("最近5局均分：${"%.0f".format(avg5)}   最近50局均分：${"%.0f".format(avg50)}",
-            pad * 1.4f, y + pad * 3.0f, text)
-        c.drawText("波动率：${"%.1f".format(vol * 100f)}%   趋势：$trendStr",
-            pad * 1.4f, y + pad * 4.5f, text)
-        y += statH + pad * 0.5f
+        text.textSize = hudDp(11f) * scale
+        text.isFakeBoldText = false
+        text.color = Color.rgb(155, 172, 198)
+        c.drawText(
+            "GEN $generation   •   $POPULATION_SIZE AGENT   •   $TRAIN_THREADS THREAD",
+            left + hudDp(16f), top + hudDp(50f), text
+        )
 
-        val tuneH = W * 0.28f
-        panel.color = Color.rgb(18, 24, 34)
-        c.drawRoundRect(pad, y, W - pad, y + tuneH, pad * 0.6f, pad * 0.6f, panel)
-        text.textAlign = Paint.Align.LEFT; text.isFakeBoldText = true
-        text.textSize = W * 0.032f
-        val trendCol2 = when (trendState) {
+        val statusColor = if (evolving || generationTransitioning) Color.rgb(255, 190, 80) else Color.rgb(72, 224, 151)
+
+        panel.color = Color.argb(45, Color.red(statusColor), Color.green(statusColor), Color.blue(statusColor))
+        c.drawRoundRect(
+            right - hudDp(112f), top + hudDp(16f),
+            right - hudDp(12f), top + hudDp(46f),
+            hudDp(15f), hudDp(15f), panel
+        )
+
+        text.textAlign = Paint.Align.CENTER
+        text.isFakeBoldText = true
+        text.textSize = hudDp(10f) * scale
+        text.color = statusColor
+        c.drawText(
+            if (evolving || generationTransitioning) "EVOLVING" else "RUNNING",
+            right - hudDp(62f), top + hudDp(35f), text
+        )
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawHudCard(
+        c: Canvas,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        title: String,
+        accent: Int
+    ) {
+        panel.color = Color.rgb(14, 20, 33)
+        c.drawRoundRect(left, top, right, bottom, hudDp(16f), hudDp(16f), panel)
+
+        border.style = Paint.Style.STROKE
+        border.strokeWidth = hudDp(1f)
+        border.color = Color.rgb(30, 45, 65)
+        c.drawRoundRect(left, top, right, bottom, hudDp(16f), hudDp(16f), border)
+
+        panel.color = accent
+        c.drawRoundRect(left, top, left + hudDp(4f), bottom, hudDp(2f), hudDp(2f), panel)
+
+        text.textAlign = Paint.Align.LEFT
+        text.isFakeBoldText = true
+        text.textSize = hudDp(14f)
+        text.color = Color.rgb(225, 232, 245)
+        c.drawText(title, left + hudDp(15f), top + hudDp(24f), text)
+        text.isFakeBoldText = false
+    }
+
+    private fun drawHudValue(
+        c: Canvas,
+        x: Float,
+        y: Float,
+        label: String,
+        value: String,
+        valueColor: Int = Color.WHITE,
+        scale: Float = 1f
+    ) {
+        text.textAlign = Paint.Align.LEFT
+        text.isFakeBoldText = false
+        text.textSize = hudDp(10f) * scale
+        text.color = Color.rgb(130, 145, 170)
+        c.drawText(label, x, y, text)
+
+        text.isFakeBoldText = true
+        text.textSize = hudDp(16f) * scale
+        text.color = valueColor
+        c.drawText(value, x, y + hudDp(19f), text)
+        text.isFakeBoldText = false
+    }
+
+    private fun drawHudScheduler(
+        c: Canvas,
+        top: Float,
+        W: Float,
+        side: Float,
+        scale: Float
+    ): Float {
+        val h = hudDp(150f)
+
+        drawHudCard(c, side, top, W - side, top + h, "训练调度 / 50 Agent", Color.rgb(72, 224, 151))
+
+        val contentW = W - side * 2f - hudDp(30f)
+        val col = contentW / 4f
+        val x = side + hudDp(15f)
+
+        drawHudValue(c, x, top + hudDp(53f), "活跃", "$activeAgents/$TRAIN_THREADS", Color.rgb(72, 224, 151), scale)
+        drawHudValue(c, x + col, top + hudDp(53f), "等待", "${(TRAIN_THREADS - activeAgents).coerceAtLeast(0)}", Color.WHITE, scale)
+        drawHudValue(c, x + col * 2f, top + hudDp(53f), "未领取", "${(POPULATION_SIZE - currentAgentIndex).coerceAtLeast(0)}", Color.WHITE, scale)
+        drawHudValue(c, x + col * 3f, top + hudDp(53f), "已完成", "$completedAgents/$POPULATION_SIZE", Color.rgb(100, 210, 255), scale)
+
+        drawHudValue(c, x, top + hudDp(103f), "领取", "$agentClaimCount", Color.WHITE, scale)
+        drawHudValue(c, x + col, top + hudDp(103f), "提交", "$agentSubmitCount", Color.WHITE, scale)
+        drawHudValue(c, x + col * 2f, top + hudDp(103f), "过期", "$staleResultCount", Color.WHITE, scale)
+        drawHudValue(c, x + col * 3f, top + hudDp(103f), "重复", "$duplicateCompletionCount", Color.WHITE, scale)
+
+        return top + h
+    }
+
+    private fun drawHudScoreCenter(
+        c: Canvas,
+        top: Float,
+        W: Float,
+        side: Float,
+        scale: Float
+    ): Float {
+        val h = hudDp(142f)
+
+        drawHudCard(c, side, top, W - side, top + h, "成绩中心", Color.rgb(255, 198, 92))
+
+        val col = (W - side * 2f - hudDp(30f)) / 4f
+        val x = side + hudDp(15f)
+
+        drawHudValue(c, x, top + hudDp(53f), "本代最佳", "%.0f".format(bestScoreThisGen), Color.rgb(255, 220, 130), scale)
+        drawHudValue(c, x + col, top + hudDp(53f), "历史最佳", "%.0f".format(bestScoreAllTime), Color.rgb(255, 235, 160), scale)
+        drawHudValue(c, x + col * 2f, top + hudDp(53f), "学习步", "$v2LearningSteps", Color.rgb(120, 210, 255), scale)
+        drawHudValue(c, x + col * 3f, top + hudDp(53f), "回放", "${replayBuffer.size}", Color.rgb(120, 210, 255), scale)
+
+        val progress = (completedAgents.toFloat() / POPULATION_SIZE).coerceIn(0f, 1f)
+        drawHudProgressRing(
+            c,
+            W - side - hudDp(55f),
+            top + hudDp(104f),
+            hudDp(27f),
+            progress,
+            Color.rgb(72, 224, 151),
+            scale
+        )
+
+        return top + h
+    }
+
+    private fun drawHudProgressRing(
+        c: Canvas,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        progress: Float,
+        color: Int,
+        scale: Float
+    ) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = hudDp(6f)
+        p.strokeCap = Paint.Cap.ROUND
+        p.color = Color.rgb(38, 46, 61)
+
+        c.drawArc(RectF(cx - radius, cy - radius, cx + radius, cy + radius), -90f, 360f, false, p)
+
+        p.color = color
+        c.drawArc(RectF(cx - radius, cy - radius, cx + radius, cy + radius), -90f, 360f * progress, false, p)
+
+        text.textAlign = Paint.Align.CENTER
+        text.isFakeBoldText = true
+        text.textSize = hudDp(11f) * scale
+        text.color = Color.WHITE
+        c.drawText("${(progress * 100f).toInt()}%", cx, cy + hudDp(4f), text)
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawHudTrend(
+        c: Canvas,
+        top: Float,
+        W: Float,
+        side: Float,
+        scale: Float
+    ): Float {
+        val h = hudDp(230f)
+
+        drawHudCard(c, side, top, W - side, top + h, "训练趋势 / 最近成绩", Color.rgb(90, 190, 255))
+
+        val scores = getRecentScoresSnapshot()
+
+        val chartLeft = side + hudDp(16f)
+        val chartTop = top + hudDp(44f)
+        val chartW = W - side * 2f - hudDp(32f)
+        val chartH = hudDp(120f)
+
+        drawHudLineChart(c, chartLeft, chartTop, chartW, chartH, scores)
+
+        val avg5 = recentAverage(5)
+        val avg50 = recentAverage(50)
+        val volatility = recentVolatility()
+        val trend = recentScoreTrend()
+
+        drawHudValue(c, side + hudDp(16f), top + hudDp(184f), "最近5局", "%.0f".format(avg5), Color.rgb(100, 230, 170), scale)
+        drawHudValue(c, side + hudDp(110f), top + hudDp(184f), "最近50局", "%.0f".format(avg50), Color.rgb(110, 190, 255), scale)
+        drawHudValue(c, side + hudDp(215f), top + hudDp(184f), "波动率", "%.1f%%".format(volatility * 100f), Color.rgb(255, 200, 100), scale)
+        drawHudValue(c, side + hudDp(310f), top + hudDp(184f), "趋势",
+            trend.replace("↑ ", "").replace("↓ ", "").replace("→ ", ""),
+            Color.WHITE, scale)
+
+        return top + h
+    }
+
+    private fun drawHudLineChart(
+        c: Canvas,
+        left: Float,
+        top: Float,
+        w: Float,
+        h: Float,
+        scores: List<Int>
+    ) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        p.style = Paint.Style.FILL
+        p.color = Color.rgb(9, 14, 24)
+        c.drawRoundRect(left, top, left + w, top + h, hudDp(10f), hudDp(10f), p)
+
+        if (scores.isEmpty()) {
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = hudDp(11f)
+            text.color = Color.rgb(110, 125, 145)
+            text.isFakeBoldText = false
+            c.drawText("WAITING FOR TRAINING DATA", left + w / 2f, top + h / 2f, text)
+            text.textAlign = Paint.Align.LEFT
+            return
+        }
+
+        val maxValue = max(1, scores.maxOrNull() ?: 1)
+        val minValue = min(0, scores.minOrNull() ?: 0)
+        val rangeValue = max(1, maxValue - minValue)
+
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = hudDp(1f)
+        p.color = Color.rgb(28, 39, 55)
+
+        for (i in 1 until 4) {
+            val yy = top + h * i / 4f
+            c.drawLine(left, yy, left + w, yy, p)
+        }
+
+        p.color = Color.rgb(80, 170, 255)
+        p.strokeWidth = hudDp(1.4f)
+
+        val step = if (scores.size <= 1) w else w / (scores.size - 1).toFloat()
+
+        var lastX = left
+        var lastY = top + h - ((scores.first() - minValue).toFloat() / rangeValue) * h
+
+        for (i in 1 until scores.size) {
+            val x = left + step * i
+            val norm = (scores[i] - minValue).toFloat() / rangeValue
+            val yy = top + h - norm * h
+            c.drawLine(lastX, lastY, x, yy, p)
+            lastX = x
+            lastY = yy
+        }
+
+        if (scores.size >= 5) {
+            p.color = Color.rgb(100, 230, 150)
+            p.strokeWidth = hudDp(2f)
+
+            var previousX = left
+            var previousY = top + h
+
+            for (i in 4 until scores.size) {
+                val start = i - 4
+                var sum = 0
+                for (j in start..i) sum += scores[j]
+                val avg = sum / 5f
+                val x = left + step * i
+                val norm = (avg - minValue) / rangeValue.toFloat()
+                val yy = top + h - norm * h
+                if (i > 4) c.drawLine(previousX, previousY, x, yy, p)
+                previousX = x
+                previousY = yy
+            }
+        }
+    }
+
+    private fun drawHudFusionWeights(
+        c: Canvas,
+        top: Float,
+        W: Float,
+        side: Float,
+        scale: Float
+    ): Float {
+        val h = hudDp(280f)
+
+        drawHudCard(c, side, top, W - side, top + h, "AI 融合权重 / 实际动态值", Color.rgb(190, 125, 255))
+
+        val values = arrayOf(
+            "Q" to actualQWeight,
+            "NN" to actualNNWeight,
+            "Food" to actualFoodWeight,
+            "Safety" to actualSafetyWeight,
+            "Beam" to actualBeamWeight,
+            "Rollout" to actualRolloutWeight,
+            "Memory" to actualMemoryWeight
+        )
+
+        val colors = intArrayOf(
+            Color.rgb(231, 76, 60),
+            Color.rgb(52, 152, 219),
+            Color.rgb(46, 204, 113),
+            Color.rgb(241, 196, 15),
+            Color.rgb(155, 89, 182),
+            Color.rgb(230, 126, 34),
+            Color.rgb(26, 188, 156)
+        )
+
+        val barLeft = side + hudDp(16f)
+        val barW = W - side * 2f - hudDp(32f)
+        var yy = top + hudDp(54f)
+
+        for (i in values.indices) {
+            val name = values[i].first
+            val weight = values[i].second
+
+            text.textAlign = Paint.Align.LEFT
+            text.textSize = hudDp(10f) * scale
+            text.color = Color.rgb(160, 170, 190)
+            text.isFakeBoldText = false
+            c.drawText(name, barLeft, yy, text)
+
+            val trackLeft = barLeft + hudDp(52f)
+            val trackW = barW - hudDp(95f)
+
+            panel.color = Color.rgb(31, 38, 52)
+            c.drawRoundRect(trackLeft, yy - hudDp(9f), trackLeft + trackW, yy + hudDp(1f), hudDp(5f), hudDp(5f), panel)
+
+            panel.color = colors[i]
+            val bw = trackW * weight.coerceIn(0f, 1f)
+            c.drawRoundRect(trackLeft, yy - hudDp(9f), trackLeft + bw, yy + hudDp(1f), hudDp(5f), hudDp(5f), panel)
+
+            text.textAlign = Paint.Align.RIGHT
+            text.textSize = hudDp(10f) * scale
+            text.color = colors[i]
+            text.isFakeBoldText = true
+            c.drawText("%.2f".format(weight), barLeft + barW, yy, text)
+            text.textAlign = Paint.Align.LEFT
+
+            yy += hudDp(30f)
+        }
+
+        text.textSize = hudDp(10f) * scale
+        text.color = Color.rgb(125, 140, 160)
+        text.isFakeBoldText = false
+        c.drawText(
+            "ε ${"%.3f".format(v2EpsilonCurrent)}" + if (v2EpsilonCurrent <= EPSILON_MIN + 0.0005f) "  MIN" else "",
+            barLeft, top + hudDp(260f), text
+        )
+
+        return top + h
+    }
+
+    private fun drawHudSearchStats(
+        c: Canvas,
+        top: Float,
+        W: Float,
+        side: Float,
+        scale: Float
+    ): Float {
+        val h = hudDp(250f)
+
+        drawHudCard(c, side, top, W - side, top + h, "搜索引擎 / Beam / Feature / Rollout", Color.rgb(90, 180, 255))
+
+        val calls = beamCalls.get()
+        val success = beamSuccess.get()
+        val selected = beamSelected.get()
+        val beamRate = if (calls > 0) success.toFloat() / calls else 0f
+
+        val featureCall = featureCalls.get()
+        val featureHit = featureCacheHits.get()
+        val featureRate = if (featureCall > 0) featureHit.toFloat() / featureCall else 0f
+
+        drawHudDonut(c, side + hudDp(65f), top + hudDp(85f), hudDp(42f), beamRate, Color.rgb(80, 190, 255), "BEAM")
+        drawHudDonut(c, side + hudDp(170f), top + hudDp(85f), hudDp(42f), featureRate, Color.rgb(160, 120, 255), "FEATURE")
+
+        val x = side + hudDp(250f)
+
+        drawHudValue(c, x, top + hudDp(57f), "Beam命中", "$selected/$calls", Color.WHITE, scale)
+        drawHudValue(c, x, top + hudDp(105f), "Beam有效", "$success/$calls", Color.rgb(90, 200, 255), scale)
+        drawHudValue(c, x, top + hudDp(153f), "Beam节点", "${beamNodeEvaluations.get()}", Color.WHITE, scale)
+        drawHudValue(c, x, top + hudDp(201f), "Rollout", "${rolloutCalls.get()} / ${rolloutStepsTotal.get()}步", Color.rgb(255, 190, 100), scale)
+
+        return top + h
+    }
+
+    private fun drawHudDonut(
+        c: Canvas,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        ratio: Float,
+        color: Int,
+        label: String
+    ) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = hudDp(8f)
+        p.strokeCap = Paint.Cap.ROUND
+
+        p.color = Color.rgb(35, 43, 58)
+        c.drawArc(RectF(cx - radius, cy - radius, cx + radius, cy + radius), -90f, 360f, false, p)
+
+        p.color = color
+        c.drawArc(RectF(cx - radius, cy - radius, cx + radius, cy + radius), -90f, ratio.coerceIn(0f, 1f) * 360f, false, p)
+
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = hudDp(12f)
+        text.isFakeBoldText = true
+        text.color = Color.WHITE
+        c.drawText("${(ratio * 100f).toInt()}%", cx, cy + hudDp(3f), text)
+
+        text.textSize = hudDp(8f)
+        text.isFakeBoldText = false
+        text.color = Color.rgb(145, 160, 180)
+        c.drawText(label, cx, cy + hudDp(17f), text)
+
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawHudV3(
+        c: Canvas,
+        top: Float,
+        W: Float,
+        side: Float,
+        scale: Float
+    ): Float {
+        val h = hudDp(220f)
+
+        drawHudCard(c, side, top, W - side, top + h, "V4 / V3 智能状态", Color.rgb(245, 155, 80))
+
+        text.textSize = hudDp(10f) * scale
+        text.color = Color.rgb(160, 175, 195)
+        text.isFakeBoldText = false
+        c.drawText("当前目标：${v3Goal.label}", side + hudDp(16f), top + hudDp(53f), text)
+        c.drawText("层级：L$v3LayerActive    $v3LayerWhy", side + hudDp(16f), top + hudDp(73f), text)
+
+        drawHudValue(c, side + hudDp(16f), top + hudDp(105f), "Failure Memory", "${v3Memory.size()} lessons", Color.rgb(255, 190, 100), scale)
+        drawHudValue(c, side + hudDp(145f), top + hudDp(105f), "Lesson触发", "$v3LessonFires", Color.rgb(255, 160, 100), scale)
+        drawHudValue(c, side + hudDp(270f), top + hudDp(105f), "循环打断", "$v3LoopHits", Color.rgb(190, 140, 255), scale)
+
+        text.textSize = hudDp(10f) * scale
+        text.color = Color.rgb(145, 155, 175)
+        c.drawText("最近教训：${v3Memory.worstLessonText()}", side + hudDp(16f), top + hudDp(180f), text)
+
+        return top + h
+    }
+
+    private fun drawHudDeathDistribution(
+        c: Canvas,
+        top: Float,
+        W: Float,
+        side: Float,
+        scale: Float
+    ): Float {
+        val h = hudDp(200f)
+
+        drawHudCard(c, side, top, W - side, top + h, "死因分布", Color.rgb(255, 120, 120))
+
+        val total = deathWall + deathSelf + deathTrap + deathHunger
+        val pieCx = side + hudDp(70f)
+        val pieCy = top + h / 2f + hudDp(6f)
+        val pieR = hudDp(52f)
+
+        if (total <= 0) {
+            panel.color = Color.rgb(30, 30, 40)
+            c.drawCircle(pieCx, pieCy, pieR, panel)
+        } else {
+            val oval = RectF(pieCx - pieR, pieCy - pieR, pieCx + pieR, pieCy + pieR)
+            var start = -90f
+
+            val entries = arrayOf(
+                deathWall to Color.rgb(255, 100, 100),
+                deathSelf to Color.rgb(100, 150, 255),
+                deathTrap to Color.rgb(255, 200, 100),
+                deathHunger to Color.rgb(180, 100, 255)
+            )
+
+            for ((cnt, col) in entries) {
+                if (cnt <= 0) continue
+                val sweep = 360f * cnt / total
+                panel.color = col
+                c.drawArc(oval, start, sweep, true, panel)
+                start += sweep
+            }
+
+            panel.color = Color.rgb(14, 20, 33)
+            c.drawCircle(pieCx, pieCy, pieR * 0.42f, panel)
+        }
+
+        val legends = arrayOf(
+            "撞墙" to (deathWall to Color.rgb(255, 100, 100)),
+            "撞自己" to (deathSelf to Color.rgb(100, 150, 255)),
+            "被困" to (deathTrap to Color.rgb(255, 200, 100)),
+            "饿死" to (deathHunger to Color.rgb(180, 100, 255))
+        )
+
+        var ly = top + hudDp(56f)
+        val lx = side + hudDp(155f)
+
+        text.textAlign = Paint.Align.LEFT
+        for ((name, data) in legends) {
+            val (cnt, col) = data
+            panel.color = col
+            c.drawRoundRect(lx, ly - hudDp(7f), lx + hudDp(10f), ly + hudDp(1f), hudDp(3f), hudDp(3f), panel)
+
+            text.textSize = hudDp(11f) * scale
+            text.isFakeBoldText = false
+            text.color = Color.rgb(180, 190, 205)
+            c.drawText(name, lx + hudDp(18f), ly, text)
+
+            text.textAlign = Paint.Align.RIGHT
+            text.isFakeBoldText = true
+            text.color = Color.WHITE
+            c.drawText("$cnt", W - side - hudDp(16f), ly, text)
+            text.textAlign = Paint.Align.LEFT
+
+            ly += hudDp(32f)
+        }
+
+        return top + h
+    }
+
+    private fun drawHudEvolution(
+        c: Canvas,
+        top: Float,
+        W: Float,
+        side: Float,
+        scale: Float
+    ): Float {
+        val h = hudDp(230f)
+
+        drawHudCard(c, side, top, W - side, top + h, "进化繁殖历程", Color.rgb(200, 170, 255))
+
+        val fullHistory = evoHistory.toList()
+        val history = if (fullHistory.size > 5) fullHistory.drop(fullHistory.size - 5) else fullHistory
+
+        var y = top + hudDp(46f)
+
+        if (history.isEmpty()) {
+            text.textSize = hudDp(11f) * scale
+            text.color = Color.rgb(140, 140, 155)
+            text.isFakeBoldText = false
+            c.drawText("（等待第一代 50 只完成后开始进化）", side + hudDp(16f), y + hudDp(16f), text)
+            return top + h
+        }
+
+        val rowH = hudDp(32f)
+
+        for (rec in history) {
+            text.textSize = hudDp(11f) * scale
+            text.isFakeBoldText = true
+            text.color = Color.WHITE
+            c.drawText("G${rec.gen}", side + hudDp(16f), y + hudDp(13f), text)
+
+            val barX = side + hudDp(56f)
+            val barW = W - side * 2f - hudDp(180f)
+            val bh = hudDp(14f)
+
+            val total2 = (rec.eliteN + rec.crossN + rec.breedN).coerceAtLeast(1)
+            var bx = barX
+            val seg = arrayOf(
+                rec.eliteN to Color.rgb(70, 220, 130),
+                rec.crossN to Color.rgb(80, 150, 255),
+                rec.breedN to Color.rgb(255, 160, 70)
+            )
+            for ((cnt, col) in seg) {
+                val wseg = barW * (cnt.toFloat() / total2)
+                if (wseg > 0.5f) { panel.color = col; c.drawRect(bx, y, bx + wseg, y + bh, panel) }
+                bx += wseg
+            }
+
+            text.textSize = hudDp(10f) * scale
+            text.isFakeBoldText = false
+            text.color = Color.rgb(180, 240, 190)
+            c.drawText("最佳 %.0f".format(rec.bestScore), barX + barW + hudDp(8f), y + hudDp(11f), text)
+
+            text.color = Color.rgb(230, 200, 140)
+            text.textAlign = Paint.Align.RIGHT
+            c.drawText(rec.personality, W - side - hudDp(16f), y + hudDp(11f), text)
+            text.textAlign = Paint.Align.LEFT
+
+            y += rowH
+        }
+
+        return top + h
+    }
+
+    private fun drawHudAutoTune(
+        c: Canvas,
+        top: Float,
+        W: Float,
+        side: Float,
+        scale: Float
+    ): Float {
+        val h = hudDp(200f)
+
+        drawHudCard(c, side, top, W - side, top + h, "AutoTune 趋势诊断", Color.rgb(120, 200, 255))
+
+        val trendCol = when (trendState) {
             "IMPROVING" -> Color.rgb(80, 220, 140)
             "STABLE" -> Color.rgb(120, 200, 255)
             "STALLED" -> Color.rgb(241, 196, 15)
             "DEGRADING" -> Color.rgb(231, 76, 60)
-            "WARMUP" -> Color.GRAY
-            "OFF" -> Color.GRAY
-            else -> Color.WHITE
+            else -> Color.GRAY
         }
-        val trendArrow = when (trendState) {
-            "IMPROVING" -> "↑"
-            "STABLE" -> "→"
-            "STALLED" -> "→"
-            "DEGRADING" -> "↓"
-            else -> "·"
-        }
-        text.color = trendCol2
-        c.drawText("训练趋势: $trendArrow $trendState", pad * 1.4f, y + pad * 1.6f, text)
-        text.isFakeBoldText = false; text.textSize = W * 0.026f; text.color = Color.rgb(200, 200, 220)
-        c.drawText("原因: $diagnosisCause", pad * 1.4f, y + pad * 2.9f, text)
-        c.drawText("AutoTune: $lastAutoTuneText", pad * 1.4f, y + pad * 4.1f, text)
+
         val w5 = if (autoTuneSnapshots.size >= 5) windowAvgScore(5) else 0f
         val w10 = if (autoTuneSnapshots.size >= 10) windowAvgScore(10) else 0f
         val w20 = if (autoTuneSnapshots.size >= 20) windowAvgScore(20) else 0f
-        c.drawText("窗口均值  5代:${"%.0f".format(w5)}  10代:${"%.0f".format(w10)}  20代:${"%.0f".format(w20)}",
-            pad * 1.4f, y + pad * 5.4f, text)
-        text.color = Color.rgb(160, 170, 190)
-        c.drawText("自动调参: ${if (autoTuneEnabled) "ON(L$autoTuneLevel)" else "OFF"}  冷却:${autoTuneCooldown}G  50代内:${autoTuneEventsIn50}/5",
-            pad * 1.4f, y + pad * 6.6f, text)
-        y += tuneH + pad * 0.5f
 
-        text.textSize = W * 0.034f; text.isFakeBoldText = true; text.color = Color.rgb(200, 170, 255)
-        c.drawText("🧪 进化繁殖历程", pad * 0.4f, y, text); y += pad * 0.7f
-        val fullHistory = evoHistory.toList()
-        val history = if (fullHistory.size > 5) fullHistory.drop(fullHistory.size - 5) else fullHistory
-        val rowH = W * 0.052f
-        if (history.isEmpty()) {
-            text.textSize = W * 0.028f; text.isFakeBoldText = false; text.color = Color.rgb(140, 140, 155)
-            c.drawText("（等待第一代50只完成后开始进化…）", pad * 0.6f, y + rowH * 0.6f, text)
-            y += rowH
-        }
-        for (rec in history) {
-            text.textSize = W * 0.026f; text.isFakeBoldText = true; text.color = Color.WHITE
-            c.drawText("G${rec.gen}", pad * 0.5f, y + rowH * 0.62f, text)
-            val barX = pad * 2.6f; val barW = W * 0.46f; val bh2 = rowH * 0.42f
-            val total2 = (rec.eliteN + rec.crossN + rec.breedN).coerceAtLeast(1)
-            var bx = barX
-            val seg = arrayOf(rec.eliteN to Color.rgb(70, 220, 130), rec.crossN to Color.rgb(80, 150, 255), rec.breedN to Color.rgb(255, 160, 70))
-            for ((cnt, col) in seg) {
-                val wseg = barW * (cnt.toFloat() / total2)
-                if (wseg > 0.5f) { panel.color = col; c.drawRect(bx, y, bx + wseg, y + bh2, panel) }
-                bx += wseg
-            }
-            text.textSize = W * 0.025f; text.isFakeBoldText = false; text.color = Color.rgb(180, 240, 190)
-            c.drawText("最佳%.0f".format(rec.bestScore), barX + barW + pad * 0.5f, y + rowH * 0.55f, text)
-            text.color = Color.rgb(230, 200, 140); text.textAlign = Paint.Align.RIGHT
-            c.drawText(rec.personality, W - pad * 0.5f, y + rowH * 0.55f, text)
-            text.textAlign = Paint.Align.LEFT; y += rowH + pad * 0.18f
-        }
-        y += pad * 0.4f
-        text.textSize = W * 0.032f; text.isFakeBoldText = true; text.color = Color.rgb(255, 150, 150)
-        c.drawText("☠ 死因分布", pad * 0.4f, y, text); y += pad * 0.7f
-        val deaths = arrayOf("撞墙" to deathWall, "撞自己" to deathSelf, "被困" to deathTrap, "饿死" to deathHunger)
-        val maxDeath = max(1, max(max(deathWall, deathSelf), max(deathTrap, deathHunger)))
-        val dRowH = W * 0.05f
-        for ((name, cnt) in deaths) {
-            text.textSize = W * 0.027f; text.isFakeBoldText = false; text.color = Color.WHITE
-            c.drawText(name, pad * 0.6f, y + dRowH * 0.6f, text)
-            val dx0 = pad * 2.4f; val dW = W * 0.55f
-            panel.color = Color.rgb(60, 50, 60)
-            c.drawRect(dx0, y + dRowH * 0.18f, dx0 + dW, y + dRowH * 0.62f, panel)
-            panel.color = Color.rgb(235, 90, 90)
-            val wf = dW * (cnt.toFloat() / maxDeath)
-            if (wf > 0.5f) c.drawRect(dx0, y + dRowH * 0.18f, dx0 + wf, y + dRowH * 0.62f, panel)
-            text.color = Color.rgb(220, 220, 230)
-            c.drawText("$cnt", dx0 + dW + pad * 0.5f, y + dRowH * 0.6f, text)
-            y += dRowH + pad * 0.15f
-        }
+        drawHudValue(c, side + hudDp(16f), top + hudDp(53f), "趋势", trendState, trendCol, scale)
+        drawHudValue(c, side + hudDp(120f), top + hudDp(53f), "原因", diagnosisCause, Color.WHITE, scale)
+        drawHudValue(c, side + hudDp(240f), top + hudDp(53f), "AutoTune", lastAutoTuneText, Color.WHITE, scale)
 
-        val btnW = W * 0.42f
-        val btnH = W * 0.10f
-        val btnLeft = W - pad - btnW
-        val btnTop = height - btnH - pad * 1.6f
-        reinforceButtonRect.set(btnLeft, btnTop, btnLeft + btnW, btnTop + btnH)
+        drawHudValue(c, side + hudDp(16f), top + hudDp(105f), "5代均值", "%.0f".format(w5), Color.rgb(150, 220, 255), scale)
+        drawHudValue(c, side + hudDp(120f), top + hudDp(105f), "10代均值", "%.0f".format(w10), Color.rgb(150, 220, 255), scale)
+        drawHudValue(c, side + hudDp(240f), top + hudDp(105f), "20代均值", "%.0f".format(w20), Color.rgb(150, 220, 255), scale)
+
+        text.textSize = hudDp(10f) * scale
+        text.color = Color.rgb(145, 160, 180)
+        text.isFakeBoldText = false
+        c.drawText(
+            "自动调参: ${if (autoTuneEnabled) "ON(L$autoTuneLevel)" else "OFF"}   冷却: ${autoTuneCooldown}G   50代内: ${autoTuneEventsIn50}/5",
+            side + hudDp(16f), top + hudDp(160f), text
+        )
+
+        return top + h
+    }
+
+    private fun drawHudStopButton(
+        c: Canvas,
+        left: Float,
+        top: Float,
+        right: Float,
+        h: Float
+    ) {
+        reinforceButtonRect.set(left, top, right, top + h)
+
+        val r = hudDp(16f)
+
+        panel.color = Color.argb(80, 231, 76, 60)
+        c.drawRoundRect(
+            left - hudDp(2f), top - hudDp(2f),
+            right + hudDp(2f), top + h + hudDp(2f),
+            r + hudDp(2f), r + hudDp(2f), panel
+        )
+
         panel.color = Color.rgb(231, 76, 60)
-        c.drawRoundRect(reinforceButtonRect, pad * 0.5f, pad * 0.5f, panel)
+        c.drawRoundRect(left, top, right, top + h, r, r, panel)
+
+        border.style = Paint.Style.STROKE
+        border.strokeWidth = hudDp(1.5f)
+        border.color = Color.rgb(255, 130, 110)
+        c.drawRoundRect(left, top, right, top + h, r, r, border)
+
         text.textAlign = Paint.Align.CENTER
         text.isFakeBoldText = true
-        text.textSize = W * 0.036f
+        text.textSize = hudDp(17f)
         text.color = Color.WHITE
-        c.drawText("停止强化训练",
-            reinforceButtonRect.centerX(),
-            reinforceButtonRect.centerY() + W * 0.012f,
-            text)
-        text.isFakeBoldText = false
+        c.drawText("停止强化训练", (left + right) / 2f, top + h / 2f + hudDp(6f), text)
         text.textAlign = Paint.Align.LEFT
+        text.isFakeBoldText = false
     }
 
     private fun drawDebug(c: Canvas) {
@@ -3036,19 +3610,42 @@ class SnakeView @JvmOverloads constructor(
     private var touchStartY = 0f
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        when (e.action) {
-            MotionEvent.ACTION_DOWN -> { touchStartX = e.x; touchStartY = e.y; return true }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (reinforceTraining && reinforceButtonRect.contains(e.x, e.y)) {
-                    val now = System.currentTimeMillis()
-                    if (now - lastReinforceTap > 400L) {
-                        lastReinforceTap = now
-                        setReinforceTraining(false)
+        if (reinforceTraining) {
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    hudTouchStartY = e.y
+                    hudLastTouchY = e.y
+                    hudDragging = false
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (abs(e.y - hudTouchStartY) > hudDp(8f)) hudDragging = true
+                    if (hudDragging) {
+                        val dy = hudLastTouchY - e.y
+                        hudScrollY = (hudScrollY + dy).coerceIn(0f, hudMaxScroll)
+                        hudLastTouchY = e.y
                         invalidate()
                     }
                     return true
                 }
-                if (reinforceTraining) return true
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (!hudDragging && reinforceButtonRect.contains(e.x, e.y)) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastReinforceTap > 400L) {
+                            lastReinforceTap = now
+                            setReinforceTraining(false)
+                        }
+                    }
+                    hudDragging = false
+                    return true
+                }
+            }
+            return true
+        }
+
+        when (e.action) {
+            MotionEvent.ACTION_DOWN -> { touchStartX = e.x; touchStartY = e.y; return true }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 if (gameOver) { reset(); return true }
                 if (aiMode != 0) return true
                 if (snake.isEmpty()) return true
