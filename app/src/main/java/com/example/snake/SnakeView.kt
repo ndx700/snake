@@ -288,9 +288,6 @@ class SnakeView @JvmOverloads constructor(
     fun isV3FusionEnabled(): Boolean = v3FusionEnabled
 
     private fun v3ActionIndexOf(d: P): Int = dirs.indexOfFirst { it == d }
-    private fun v3DirLabel(d: P): String = when (d) {
-        P(0, -1) -> "上"; P(0, 1) -> "下"; P(-1, 0) -> "左"; P(1, 0) -> "右"; else -> "?"
-    }
     private fun v3RecordHead() {
         val h = snake.firstOrNull() ?: return
         v3RecentHeads.addLast(h.y * cols + h.x)
@@ -1029,11 +1026,17 @@ class SnakeView @JvmOverloads constructor(
 
                         if (agentId < 0) { threadStatus[threadIdx].phase = "等待"; Thread.yield(); continue }
 
+                        // ★ 修复 1035：不在 synchronized lambda 中 continue
+                        var invalidAgent = false
                         synchronized(sharedLock) {
                             if (agentId !in 0 until POPULATION_SIZE || agentCompleted[agentId]) {
                                 Log.e(LOG_TAG, "INVALID_AGENT_ASSIGNMENT agent=$agentId gen=$generation")
-                                continue
+                                invalidAgent = true
                             }
+                        }
+                        if (invalidAgent) {
+                            threadStatus[threadIdx].phase = "等待"
+                            continue
                         }
 
                         threadStatus[threadIdx].agentId = agentId
@@ -1047,6 +1050,7 @@ class SnakeView @JvmOverloads constructor(
 
                         if (!episodeCompleted) { threadStatus[threadIdx].phase = "等待"; continue }
 
+                        // ★ 修复 1054 / 1060：不在 synchronized lambda 中让 if 处于表达式位置
                         var shouldEvolve = false
                         synchronized(sharedLock) {
                             if (generationToken != myGenerationToken) {
@@ -1057,11 +1061,18 @@ class SnakeView @JvmOverloads constructor(
                                 completedAgents++
                                 uniqueCompletedAgents++
                                 Log.d(LOG_TAG, "AGENT_COMPLETE gen=$generation agent=$agentId done=$completedAgents/$POPULATION_SIZE")
-                                if (completedAgents == POPULATION_SIZE && currentAgentIndex == POPULATION_SIZE && !generationTransitioning) {
+                                val generationFinished = completedAgents == POPULATION_SIZE &&
+                                        currentAgentIndex == POPULATION_SIZE &&
+                                        !generationTransitioning
+                                if (generationFinished) {
                                     generationTransitioning = true
                                     shouldEvolve = true
                                     Log.d(LOG_TAG, "GEN_COMPLETE gen=$generation done=$completedAgents/$POPULATION_SIZE")
+                                } else {
+                                    // 保持 if 有 else，避免 Kotlin 把同步块最后一句 if 当表达式
                                 }
+                            } else {
+                                // generationToken 不一致或该 agent 已完成 → 不结算
                             }
                         }
 
