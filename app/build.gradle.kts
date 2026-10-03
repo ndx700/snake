@@ -9,8 +9,8 @@ android {
         applicationId = "com.example.snake.beta"
         minSdk = 24
         targetSdk = 34
-        versionCode = 3
-        versionName = "3.0"
+        versionCode = 4
+        versionName = "3.1"
     }
     buildTypes {
         release {
