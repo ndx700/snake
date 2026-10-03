@@ -1,488 +1,172 @@
 package com.example.snake
 
+import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Color
-import android.os.Bundle
-import android.view.Gravity
-import android.view.View
-import android.view.WindowManager
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.TextView
-import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
+import android.os.*
+import android.view.*
+import android.widget.*
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import kotlin.math.roundToInt
 
-class MainActivity : AppCompatActivity() {
-
-    companion object {
-        private const val CRASH_FILE = "last_crash.txt"
-        private const val PREF_REINFORCE_MODE = "reinforce_mode"
-
-        private fun installCrashHandler(context: Context) {
-            val appContext = context.applicationContext
-            val oldHandler = Thread.getDefaultUncaughtExceptionHandler()
-
-            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-                try {
-                    val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-                    val file = File(appContext.filesDir, CRASH_FILE)
-                    val text = buildString {
-                        append("================================\n")
-                        append("        SNAKE 崩溃诊断日志\n")
-                        append("================================\n\n")
-                        append("时间:\n"); append(time); append("\n\n")
-                        append("线程:\n"); append(thread.name); append("\n\n")
-                        append("异常类型:\n"); append(throwable.javaClass.name); append("\n\n")
-                        append("异常信息:\n"); append(throwable.message ?: "无"); append("\n\n")
-                        append("========== STACK TRACE ==========\n")
-                        append(throwable.stackTraceToString())
-                        var cause = throwable.cause
-                        var level = 1
-                        while (cause != null) {
-                            append("\n\n========== CAUSE $level ==========\n")
-                            append(cause.stackTraceToString())
-                            cause = cause.cause
-                            level++
-                        }
-                    }
-                    file.writeText(text)
-                } catch (_: Throwable) {}
-                try { oldHandler?.uncaughtException(thread, throwable) } catch (_: Throwable) {}
-            }
-        }
-
-        private fun getCrashFile(context: Context): File =
-            File(context.applicationContext.filesDir, CRASH_FILE)
-
-        private fun readCrashLog(context: Context): String? =
-            try { val file = getCrashFile(context); if (file.exists()) file.readText() else null } catch (_: Throwable) { null }
-
-        private fun deleteCrashLog(context: Context) {
-            try { getCrashFile(context).delete() } catch (_: Throwable) {}
+/** Layout assigns actual space to toolbar, board and HUD; nothing floats over the board. */
+class MainActivity:Activity() {
+    private lateinit var prefs:android.content.SharedPreferences
+    private lateinit var trainer:SnakeTrainer
+    private lateinit var game:SnakeView
+    private lateinit var hud:SnakeHud
+    private lateinit var content:LinearLayout
+    private lateinit var scroll:ScrollView
+    private lateinit var score:TextView
+    private lateinit var trainButton:Button
+    private lateinit var manualButton:Button
+    private lateinit var aiButton:Button
+    private lateinit var pauseButton:Button
+    private val handler=Handler(Looper.getMainLooper())
+    private var mode=1 // 0 manual, 1 watch, 2 train; foreground only.
+    private var resumed=false
+    private var fast=false
+    companion object { private var crashInstalled=false }
+    private val refresh=object:Runnable {
+        override fun run() {
+            if(!resumed) return
+            update();handler.postDelayed(this,250)
         }
     }
-
-    private var gameView: SnakeView? = null
-    private var scoreView: TextView? = null
-    private var moneyView: TextView? = null
-
-    private var aiBtn: Button? = null
-    private var trainingBtn: Button? = null
-    private var reinforceBtn: Button? = null
-    private var v4Btn: Button? = null
-    private var shopBtn: Button? = null
-
-    private lateinit var prefs: android.content.SharedPreferences
-
-    private var aiOn = true
-    private var trainingMode = false
-    private var reinforceMode = false
-    private var v4FusionOn = true
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        installCrashHandler(applicationContext)
+    private fun dp(v:Int)=(v*resources.displayMetrics.density).roundToInt()
+    override fun onCreate(savedInstanceState:Bundle?) {
+        installCrashHandler()
         super.onCreate(savedInstanceState)
-        val previousCrash = readCrashLog(applicationContext)
-
-        try {
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-            prefs = getSharedPreferences("snake_prefs", Context.MODE_PRIVATE)
-
-            aiOn = prefs.getBoolean("ai_on", true)
-            trainingMode = prefs.getBoolean("training_mode", false)
-            v4FusionOn = prefs.getBoolean("v4_fusion", true)
-            reinforceMode = prefs.getBoolean(PREF_REINFORCE_MODE, false)
-
-            gameView = SnakeView(this)
-            gameView?.setV3FusionEnabled(v4FusionOn)
-
-            if (reinforceMode) {
-                trainingMode = true
-                aiOn = true
-                gameView?.setAIMode(1)
-                gameView?.setTrainingMode(true)
-                gameView?.setReinforceTraining(true)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        prefs=getSharedPreferences("snake_prefs",Context.MODE_PRIVATE)
+        mode=savedInstanceState?.getInt("mode")?:prefs.getInt("new_mode",1)
+        fast=prefs.getBoolean("fast_training",false)
+        trainer=SnakeTrainer.shared(File(filesDir,"snake_rl_sarsa.bin"))
+        game=SnakeView(this).apply {modelProvider={trainer.model()}}
+        game.restore(savedInstanceState?.getIntArray("game"))
+        game.setPaused(savedInstanceState?.getBoolean("paused")?:false)
+        game.speedMultiplier=savedInstanceState?.getFloat("speed",1f)?:1f
+        hud=SnakeHud(this)
+        val root=LinearLayout(this).apply {orientation=LinearLayout.VERTICAL;setBackgroundColor(Color.rgb(7,10,18))}
+        // Insets include status/nav bars and display cutout on Android 9+; consumed once at root.
+        root.setOnApplyWindowInsetsListener { v,insets ->
+            val left:Int;val top:Int;val right:Int;val bottom:Int
+            if(Build.VERSION.SDK_INT>=30) {
+                val i=insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                left=i.left;top=i.top;right=i.right;bottom=i.bottom
             } else {
-                gameView?.setTrainingMode(trainingMode)
-                gameView?.setAIMode(if (aiOn || trainingMode) 1 else 0)
+                @Suppress("DEPRECATION") val i=insets
+                val cut=if(Build.VERSION.SDK_INT>=28) i.displayCutout else null
+                @Suppress("DEPRECATION") val l=i.systemWindowInsetLeft
+                @Suppress("DEPRECATION") val t=i.systemWindowInsetTop
+                @Suppress("DEPRECATION") val r=i.systemWindowInsetRight
+                @Suppress("DEPRECATION") val b=i.systemWindowInsetBottom
+                left=maxOf(l,cut?.safeInsetLeft?:0);top=maxOf(t,cut?.safeInsetTop?:0)
+                right=maxOf(r,cut?.safeInsetRight?:0);bottom=maxOf(b,cut?.safeInsetBottom?:0)
             }
-
-            val row1 = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(12, 10, 12, 4)
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            scoreView = TextView(this).apply {
-                text = "分数: 0"; textSize = 15f; setTextColor(Color.WHITE)
-            }
-
-            moneyView = TextView(this).apply {
-                text = "金币: ${prefs.getInt("money", 0)}"
-                textSize = 15f
-                setTextColor(Color.rgb(241, 196, 15))
-                setPadding(16, 0, 0, 0)
-            }
-
-            row1.addView(scoreView)
-            row1.addView(moneyView)
-
-            val row2 = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(8, 4, 8, 10)
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            fun compactBtn(textInit: String, bg: Int): Button =
-                Button(this).apply {
-                    text = textInit
-                    textSize = 11f
-                    setTextColor(Color.WHITE)
-                    setPadding(6, 0, 6, 0)
-                    setBackgroundColor(bg)
-                    minWidth = 0; minimumWidth = 0
-                    layoutParams = LinearLayout.LayoutParams(
-                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-                    ).apply { setMargins(3, 0, 3, 0) }
-                }
-
-            trainingBtn = compactBtn("训练AI", Color.rgb(52, 73, 94)).apply {
-                updateTrainingButton()
-                setOnClickListener {
-                    if (reinforceMode) {
-                        reinforceMode = false
-                        prefs.edit().putBoolean(PREF_REINFORCE_MODE, false).apply()
-                        gameView?.setReinforceTraining(false)
-                        updateReinforceUi()
-                    }
-                    trainingMode = !trainingMode
-                    prefs.edit().putBoolean("training_mode", trainingMode).apply()
-                    if (trainingMode) {
-                        aiOn = true
-                        prefs.edit().putBoolean("ai_on", true).apply()
-                        gameView?.setAIMode(1)
-                        updateAiButton()
-                    }
-                    gameView?.setTrainingMode(trainingMode)
-                    updateTrainingButton()
-                    Toast.makeText(this@MainActivity,
-                        if (trainingMode) "训练模式：AI 加速中" else "已退出训练",
-                        Toast.LENGTH_SHORT).show()
-                }
-            }
-
-            reinforceBtn = compactBtn("强化", Color.rgb(39, 174, 96)).apply {
-                updateReinforceButton()
-                setOnClickListener {
-                    reinforceMode = !reinforceMode
-                    if (reinforceMode) {
-                        trainingMode = true
-                        aiOn = true
-                        prefs.edit()
-                            .putBoolean("training_mode", true)
-                            .putBoolean("ai_on", true)
-                            .putBoolean(PREF_REINFORCE_MODE, true)
-                            .apply()
-                        gameView?.setAIMode(1)
-                        gameView?.setTrainingMode(true)
-                        gameView?.setReinforceTraining(true)
-                        updateAiButton()
-                        updateTrainingButton()
-                        updateReinforceUi()
-                        Toast.makeText(this@MainActivity, "强化训练：吃满 CPU", Toast.LENGTH_SHORT).show()
-                    } else {
-                        prefs.edit().putBoolean(PREF_REINFORCE_MODE, false).apply()
-                        gameView?.setReinforceTraining(false)
-                        updateReinforceUi()
-                        Toast.makeText(this@MainActivity, "已停止强化训练", Toast.LENGTH_SHORT).show()
-                    }
-                    updateReinforceButton()
-                }
-            }
-
-            aiBtn = compactBtn("AI ON", Color.rgb(155, 89, 182)).apply {
-                updateAiButton()
-                setOnClickListener {
-                    if (trainingMode || reinforceMode) {
-                        Toast.makeText(this@MainActivity, "训练/强化模式下 AI 强制开启", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    aiOn = !aiOn
-                    prefs.edit().putBoolean("ai_on", aiOn).apply()
-                    gameView?.setAIMode(if (aiOn) 1 else 0)
-                    updateAiButton()
-                    Toast.makeText(this@MainActivity,
-                        if (aiOn) "AI 已开启" else "AI 已关闭，滑动方向手动控制",
-                        Toast.LENGTH_SHORT).show()
-                }
-                setOnLongClickListener { reinforceBtn?.performClick(); true }
-            }
-
-            v4Btn = compactBtn("V4融合", Color.rgb(41, 128, 185)).apply {
-                setOnClickListener {
-                    v4FusionOn = !v4FusionOn
-                    prefs.edit().putBoolean("v4_fusion", v4FusionOn).apply()
-                    gameView?.setV3FusionEnabled(v4FusionOn)
-                    updateV4Button()
-                    Toast.makeText(this@MainActivity,
-                        if (v4FusionOn) "V4融合已开启：L1-L6层级链 + 失败记忆 + 基因组全部接管"
-                        else "V4融合已关闭：回退V2基线AI(17000-22000均分档)",
-                        Toast.LENGTH_SHORT).show()
-                }
-            }
-
-            shopBtn = compactBtn("商店", Color.rgb(46, 204, 113)).apply {
-                setOnClickListener { showShopCategoryDialog() }
-            }
-
-            row2.addView(aiBtn)
-            row2.addView(v4Btn)
-            row2.addView(shopBtn)
-
-            updateV4Button()
-
-            val top = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setBackgroundColor(Color.argb(220, 20, 20, 20))
-                addView(row1)
-                addView(row2)
-            }
-
-            gameView?.onScoreChanged = { s -> runOnUiThread { scoreView?.text = "分数: $s" } }
-            gameView?.onMoneyChanged = { m -> runOnUiThread { moneyView?.text = "金币: $m" } }
-
-            val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-            root.addView(gameView, FrameLayout.LayoutParams(-1, -1))
-            root.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-
-            setContentView(root)
-
-            updateReinforceUi()
-
-            if (!previousCrash.isNullOrBlank()) {
-                window.decorView.post { showPreviousCrash(previousCrash) }
-            }
-        } catch (e: Throwable) {
-            val error = TextView(this).apply {
-                setTextColor(Color.RED); textSize = 14f; setPadding(20, 20, 20, 20)
-                text = buildString {
-                    append("启动失败\n\n")
-                    append(e.javaClass.name); append("\n\n")
-                    append(e.message ?: "无错误信息"); append("\n\n")
-                    append(e.stackTraceToString())
-                }
-            }
-            setContentView(error)
+            v.setPadding(left,top,right,bottom);insets
+        }
+        score=TextView(this).apply {setTextColor(Color.WHITE);textSize=16f;setPadding(dp(12),dp(6),dp(12),dp(4))}
+        root.addView(score,LinearLayout.LayoutParams(-1,-2))
+        val buttons=LinearLayout(this).apply {orientation=LinearLayout.VERTICAL;setPadding(dp(6),0,dp(6),dp(4))}
+        fun row():LinearLayout=LinearLayout(this).apply {orientation=LinearLayout.HORIZONTAL;buttons.addView(this,LinearLayout.LayoutParams(-1,-2))}
+        fun button(row:LinearLayout,title:String,action:()->Unit):Button {
+            val b=Button(this).apply {text=title;textSize=12f;setTextColor(Color.WHITE);setBackgroundColor(Color.rgb(32,57,78));minWidth=0;minimumWidth=0
+                minHeight=dp(48);minimumHeight=dp(48);setPadding(dp(3),dp(6),dp(3),dp(6));setOnClickListener { action() }}
+            row.addView(b,LinearLayout.LayoutParams(0,-2,1f).apply {setMargins(dp(2),dp(2),dp(2),dp(2))});return b
+        }
+        val row1=row()
+        manualButton=button(row1,"手动玩") {selectMode(0)}
+        aiButton=button(row1,"看AI玩") {selectMode(1)}
+        trainButton=button(row1,"训练AI") {selectMode(if(mode==2) 1 else 2)}
+        val row2=row()
+        pauseButton=button(row2,"暂停") {
+            if(mode==2) { if(trainer.stats.active) trainer.stop() else trainer.start(fast) }
+            else game.setPaused(!game.paused)
+            update()
+        }
+        button(row2,"重新开始") { if(mode==2) Toast.makeText(this,"训练会自动开始下一局",Toast.LENGTH_SHORT).show() else game.reset() }
+        button(row2,"设置") {settings()}
+        root.addView(buttons,LinearLayout.LayoutParams(-1,-2))
+        content=LinearLayout(this).apply {
+            orientation=if(resources.configuration.orientation==Configuration.ORIENTATION_LANDSCAPE) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        }
+        scroll=ScrollView(this).apply {isFillViewport=false;clipToPadding=true;addView(hud,FrameLayout.LayoutParams(-1,-2))}
+        content.addView(game);content.addView(scroll)
+        root.addView(content,LinearLayout.LayoutParams(-1,0,1f))
+        setContentView(root);root.requestApplyInsets()
+        game.onChanged={update()};selectMode(mode)
+        val crash=File(filesDir,"last_crash.txt")
+        if(crash.exists()) {
+            val view=TextView(this).apply {textSize=12f;setPadding(dp(16),dp(12),dp(16),dp(12));text=crash.readText().take(20000);setTextIsSelectable(true)}
+            AlertDialog.Builder(this).setTitle("上次崩溃日志").setView(ScrollView(this).apply {addView(view)})
+                .setPositiveButton("已阅读") {_,_->crash.delete()}.setNegativeButton("保留",null).show()
         }
     }
-
-    private fun updateReinforceUi() {
-        if (reinforceMode) {
-            aiBtn?.visibility = View.GONE
-            trainingBtn?.visibility = View.GONE
-            reinforceBtn?.visibility = View.GONE
-            v4Btn?.visibility = View.GONE
-            shopBtn?.visibility = View.GONE
+    private fun selectMode(newMode:Int) {
+        val old=mode;mode=newMode.coerceIn(0,2)
+        prefs.edit().putInt("new_mode",mode).apply()
+        if(mode==2) {
+            game.pause();game.visibility=View.GONE
+            if(resumed) trainer.start(fast)
         } else {
-            aiBtn?.visibility = View.VISIBLE
-            v4Btn?.visibility = View.VISIBLE
-            shopBtn?.visibility = View.VISIBLE
+            trainer.stop();game.visibility=View.VISIBLE;game.setAI(mode==1)
+            if(old==2 && mode==1) game.reset()
+            if(resumed) game.resume()
         }
+        val landscape=content.orientation==LinearLayout.HORIZONTAL
+        game.layoutParams=if(landscape) LinearLayout.LayoutParams(0,-1,1f) else LinearLayout.LayoutParams(-1,0,if(mode==0) 3f else 1.4f)
+        scroll.layoutParams=if(landscape) LinearLayout.LayoutParams(0,-1,if(mode==2) 1f else 0.9f) else LinearLayout.LayoutParams(-1,0,1f)
+        update()
     }
-
-    private fun showPreviousCrash(crash: String) {
-        val view = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = 11f; setPadding(30, 20, 30, 20); text = crash
-        }
-        AlertDialog.Builder(this)
-            .setTitle("上一次运行发生崩溃")
-            .setView(view)
-            .setPositiveButton("知道了") { _, _ -> deleteCrashLog(applicationContext) }
-            .setNeutralButton("保留日志", null)
-            .show()
+    private fun update() {
+        if(!::hud.isInitialized) return
+        val s=trainer.stats
+        score.text=if(mode==2) "训练AI · ${s.games}局 · 最佳${s.best}" else "分数 ${game.game.score} · 最高 ${prefs.getInt("high_score",0)}"
+        manualButton.setBackgroundColor(if(mode==0) Color.rgb(39,145,102) else Color.rgb(32,57,78))
+        aiButton.setBackgroundColor(if(mode==1) Color.rgb(116,75,168) else Color.rgb(32,57,78))
+        trainButton.text=if(mode==2) "停止训练" else "训练AI"
+        trainButton.setBackgroundColor(if(mode==2) Color.rgb(188,72,60) else Color.rgb(32,57,78))
+        pauseButton.text=if(mode==2) if(s.active) "暂停训练" else "继续训练" else if(game.paused) "继续" else "暂停"
+        hud.update(s,game,trainer.model(),mode==2,prefs.getInt("high_score",0))
     }
-
-    private fun updateV4Button() {
-        if (v4FusionOn) {
-            v4Btn?.text = "V4融合"
-            v4Btn?.setBackgroundColor(Color.rgb(41, 128, 185))
-        } else {
-            v4Btn?.text = "V2基线"
-            v4Btn?.setBackgroundColor(Color.rgb(80, 80, 80))
-        }
-    }
-
-    private fun updateAiButton() {
-        when {
-            reinforceMode -> {
-                aiBtn?.text = "8蛇训练中"
-                aiBtn?.setBackgroundColor(Color.rgb(230, 120, 30))
+    private fun settings() {
+        AlertDialog.Builder(this).setTitle("设置").setItems(arrayOf("训练强度：${if(fast) "高速" else "均衡"}","观看速度","蛇皮肤（免费）","棋盘主题（免费）","音乐 / 音效 / 振动","模型说明")) {_,which ->
+            when(which) {
+                0->{fast=!fast;trainer.fast=fast;prefs.edit().putBoolean("fast_training",fast).apply();Toast.makeText(this,if(fast) "高速训练" else "均衡训练",Toast.LENGTH_SHORT).show()}
+                1->AlertDialog.Builder(this).setTitle("观看速度").setItems(arrayOf("0.5倍","1倍","2倍","4倍","8倍","16倍")) {_,i->game.speedMultiplier=floatArrayOf(.5f,1f,2f,4f,8f,16f)[i]}.show()
+                2->chooseTheme("蛇皮肤","equipped_skin",arrayOf("经典绿","海洋蓝","烈焰红","暗夜紫","黄金","RGB神龙"),arrayOf("green","blue","red","purple","gold","rainbow"))
+                3->chooseTheme("棋盘主题","equipped_board",arrayOf("经典纯黑","极简白","霓虹蓝","森林绿","赛博朋克","RGB流光"),arrayOf("dark","light","neon","forest","cyberpunk","rainbow_board"))
+                4->{val keys=arrayOf("music","sound","vibration");val checked=BooleanArray(3){prefs.getBoolean(keys[it],true)}
+                    AlertDialog.Builder(this).setTitle("声音与振动").setMultiChoiceItems(arrayOf("背景音乐","吃食音效","振动"),checked) {_,i,on->prefs.edit().putBoolean(keys[i],on).apply();game.updateAudio()}.setPositiveButton("完成",null).show()}
+                5->AlertDialog.Builder(this).setTitle("模型说明").setMessage("训练在后台执行，离开应用会暂停并保存。每64局独立评测，观看AI使用保留模型。新算法不会读取旧版Q表。两万以上是否稳定达成，需要实际训练与评测确认。删除应用可能丢失模型。").setPositiveButton("知道了",null).show()
             }
-            aiOn -> {
-                aiBtn?.text = "AI ON"
-                aiBtn?.setBackgroundColor(Color.rgb(155, 89, 182))
-            }
-            else -> {
-                aiBtn?.text = "AI OFF"
-                aiBtn?.setBackgroundColor(Color.rgb(80, 80, 80))
-            }
-        }
+        }.show()
     }
-
-    private fun updateTrainingButton() {
-        if (trainingMode) {
-            trainingBtn?.text = "训练中"
-            trainingBtn?.setBackgroundColor(Color.rgb(231, 76, 60))
-        } else {
-            trainingBtn?.text = "训练AI"
-            trainingBtn?.setBackgroundColor(Color.rgb(52, 73, 94))
-        }
+    private fun chooseTheme(title:String,key:String,names:Array<String>,ids:Array<String>) {
+        AlertDialog.Builder(this).setTitle(title).setSingleChoiceItems(names,ids.indexOf(prefs.getString(key,ids[0])).coerceAtLeast(0)) {d,i->prefs.edit().putString(key,ids[i]).apply();game.invalidate();d.dismiss()}.show()
     }
-
-    private fun updateReinforceButton() {
-        if (reinforceMode) {
-            reinforceBtn?.text = "停止"
-            reinforceBtn?.setBackgroundColor(Color.rgb(192, 57, 43))
-        } else {
-            reinforceBtn?.text = "强化"
-            reinforceBtn?.setBackgroundColor(Color.rgb(39, 174, 96))
-        }
-        updateAiButton()
-    }
-
-    private fun showShopCategoryDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("商店")
-            .setItems(arrayOf("蛇皮肤", "棋盘主题")) { _, which ->
-                if (which == 0) showSnakeShopDialog() else showBoardShopDialog()
-            }
-            .setNegativeButton("关闭", null)
-            .show()
-    }
-
-    private fun showSnakeShopDialog() {
-        val current = prefs.getInt("money", 0)
-        val equipped = prefs.getString("equipped_skin", "green") ?: "green"
-        val skins = listOf(
-            Skin("经典绿", "green", 0),
-            Skin("海洋蓝", "blue", 500),
-            Skin("烈焰红", "red", 1000),
-            Skin("暗夜紫", "purple", 2000),
-            Skin("黄金圣斗士", "gold", 5000),
-            Skin("RGB神龙", "rainbow", 100000)
-        )
-        val items = skins.map {
-            val owned = prefs.getBoolean("owned_${it.id}", it.price == 0)
-            val status = when {
-                it.id == equipped -> "[已装备]"
-                owned -> "点击装备"
-                else -> "花费 ${it.price}"
-            }
-            "${it.name} - $status"
-        }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("蛇皮肤 (金币: $current)")
-            .setItems(items) { _, which ->
-                val s = skins[which]
-                val owned = prefs.getBoolean("owned_${s.id}", s.price == 0)
-                if (owned) {
-                    prefs.edit().putString("equipped_skin", s.id).apply()
-                    gameView?.updateCurrentSkin()
-                } else if (current >= s.price) {
-                    val nm = current - s.price
-                    prefs.edit()
-                        .putInt("money", nm)
-                        .putBoolean("owned_${s.id}", true)
-                        .putString("equipped_skin", s.id)
-                        .apply()
-                    moneyView?.text = "金币: $nm"
-                    gameView?.updateCurrentSkin()
-                } else {
-                    Toast.makeText(this, "金币不足", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton("返回", null)
-            .show()
-    }
-
-    private fun showBoardShopDialog() {
-        val current = prefs.getInt("money", 0)
-        val equipped = prefs.getString("equipped_board", "dark") ?: "dark"
-        val boards = listOf(
-            Board("经典纯黑", "dark", 0),
-            Board("极简白", "light", 500),
-            Board("霓虹蓝", "neon", 1500),
-            Board("森林绿", "forest", 3000),
-            Board("赛博朋克", "cyberpunk", 6000),
-            Board("RGB流光", "rainbow_board", 100000)
-        )
-        val items = boards.map {
-            val owned = prefs.getBoolean("owned_board_${it.id}", it.price == 0)
-            val status = when {
-                it.id == equipped -> "[已装备]"
-                owned -> "点击装备"
-                else -> "花费 ${it.price}"
-            }
-            "${it.name} - $status"
-        }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("棋盘主题 (金币: $current)")
-            .setItems(items) { _, which ->
-                val b = boards[which]
-                val owned = prefs.getBoolean("owned_board_${b.id}", b.price == 0)
-                if (owned) {
-                    prefs.edit().putString("equipped_board", b.id).apply()
-                    gameView?.updateCurrentBoard()
-                } else if (current >= b.price) {
-                    val nm = current - b.price
-                    prefs.edit()
-                        .putInt("money", nm)
-                        .putBoolean("owned_board_${b.id}", true)
-                        .putString("equipped_board", b.id)
-                        .apply()
-                    moneyView?.text = "金币: $nm"
-                    gameView?.updateCurrentBoard()
-                } else {
-                    Toast.makeText(this, "金币不足", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton("返回", null)
-            .show()
-    }
-
-    private data class Skin(val name: String, val id: String, val price: Int)
-    private data class Board(val name: String, val id: String, val price: Int)
-
     override fun onResume() {
-        super.onResume()
-        if (prefs.getBoolean(PREF_REINFORCE_MODE, false)) {
-            reinforceMode = true
-            trainingMode = true
-            aiOn = true
-            gameView?.setAIMode(1)
-            gameView?.setTrainingMode(true)
-            gameView?.setReinforceTraining(true)
-            updateReinforceUi()
-        }
-        gameView?.resume()
+        super.onResume();resumed=true
+        if(mode==2) trainer.start(fast) else game.resume()
+        handler.post(refresh)
     }
-
     override fun onPause() {
-        gameView?.pause()
-        super.onPause()
+        resumed=false;handler.removeCallbacks(refresh);game.pause();trainer.stop();super.onPause()
     }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        outState.putBoolean("reinforceMode", reinforceMode)
+    override fun onSaveInstanceState(out:Bundle) {
+        out.putInt("mode",mode);out.putBoolean("paused",game.paused);out.putFloat("speed",game.speedMultiplier);out.putIntArray("game",game.game.saveState());super.onSaveInstanceState(out)
+    }
+    override fun onDestroy() {handler.removeCallbacksAndMessages(null);game.dispose();trainer.stop();super.onDestroy()}
+    private fun installCrashHandler() {
+        if(crashInstalled) return
+        crashInstalled=true
+        val previous=Thread.getDefaultUncaughtExceptionHandler();val app=applicationContext
+        Thread.setDefaultUncaughtExceptionHandler {thread,error ->
+            try {File(app.filesDir,"last_crash.txt").writeText("${java.util.Date()}\n线程 ${thread.name}\n${error.stackTraceToString()}")} catch(_:Exception) {}
+            previous?.uncaughtException(thread,error)
+        }
     }
 }
