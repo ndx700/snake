@@ -1,0 +1,64 @@
+[Script Info]
+; Project: Blue Restaurant（蒼い夜に溶けて）
+; Timing Status: ASR_WORD_ALIGNED (Duration: 274.92s)
+Title: Blue Restaurant（蒼い夜に溶けて）
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: OrigJP,Noto Sans CJK JP,46,&H00FFF8E8,&H00FFB8FF,&H0042140A,&H90140602,1,0,0,0,100,100,1.2,0,1,3.2,2.0,2,80,80,52,1
+Style: TransZH,Noto Sans CJK SC,34,&H00B8ECFF,&H00FFE6B0,&H00381008,&H90140602,1,0,0,0,100,100,1.0,0,1,2.6,1.6,2,80,80,52,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:04:34.92,OrigJP,,0,0,0,,TIMING_STATUS=ASR_WORD_ALIGNED
+Comment: 0,0:00:00.00,0:00:18.60,OrigJP,scene_01_intro,0,0,0,,[Section 01] scene_01_intro
+Comment: 0,0:00:18.60,0:00:53.60,OrigJP,scene_02_verse1,0,0,0,,[Section 02] scene_02_verse1
+Comment: 0,0:00:53.60,0:01:12.40,OrigJP,scene_03_prechorus1,0,0,0,,[Section 03] scene_03_prechorus1
+Comment: 0,0:01:12.40,0:01:47.00,OrigJP,scene_04_chorus1,0,0,0,,[Section 04] scene_04_chorus1
+Comment: 0,0:01:47.00,0:02:03.20,OrigJP,scene_01_intro,0,0,0,,[Section 05] scene_01_intro (instrumental)
+Comment: 0,0:02:03.20,0:02:22.60,OrigJP,scene_05_verse2,0,0,0,,[Section 06] scene_05_verse2
+Comment: 0,0:02:22.60,0:02:42.00,OrigJP,scene_06_prechorus2,0,0,0,,[Section 07] scene_06_prechorus2
+Comment: 0,0:02:42.00,0:02:58.60,OrigJP,scene_05_verse2,0,0,0,,[Section 08] scene_05_verse2 (instrumental)
+Comment: 0,0:02:58.60,0:03:18.60,OrigJP,scene_07_bridge,0,0,0,,[Section 09] scene_07_bridge
+Comment: 0,0:03:18.60,0:03:53.00,OrigJP,scene_08_chorus2,0,0,0,,[Section 10] scene_08_chorus2
+Comment: 0,0:03:53.00,0:04:34.92,OrigJP,scene_09_outro,0,0,0,,[Section 11] scene_09_outro
+Dialogue: 1,0:00:18.76,0:00:24.08,OrigJP,Verse 1,0,0,52,,{\fad(180,180)\blur0.6}海沿いの蒼いカフェテラス\N{\rTransZH\fad(180,180)\blur0.5}海边的蓝色露台餐厅
+Dialogue: 1,0:00:28.12,0:00:33.98,OrigJP,Verse 1,0,0,52,,{\fad(180,180)\blur0.6}氷が鳴るグラスを揺らす\N{\rTransZH\fad(180,180)\blur0.5}晃动着冰块轻响的酒杯
+Dialogue: 1,0:00:35.58,0:00:44.16,OrigJP,Verse 1,0,0,52,,{\fad(180,180)\blur0.6}通り過ぎる風の匂い\N{\rTransZH\fad(180,180)\blur0.5}掠过身旁的微风气息
+Dialogue: 1,0:00:44.66,0:00:52.30,OrigJP,Verse 1,0,0,52,,{\fad(180,180)\blur0.6}まだ言えない言葉が遠い\N{\rTransZH\fad(180,180)\blur0.5}欲言又止的话语依然遥远
+Dialogue: 1,0:00:54.04,0:00:58.74,OrigJP,Pre-Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}ネオンライトが滲む頃に\N{\rTransZH\fad(180,180)\blur0.5}当霓虹灯光渐渐晕染开来
+Dialogue: 1,0:00:58.80,0:01:03.42,OrigJP,Pre-Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}二人の影が重なるように\N{\rTransZH\fad(180,180)\blur0.5}仿佛两人的身影也随之重叠
+Dialogue: 1,0:01:03.58,0:01:08.56,OrigJP,Pre-Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}時計の針をそっと止めて\N{\rTransZH\fad(180,180)\blur0.5}悄悄拨停时钟的指针
+Dialogue: 1,0:01:08.84,0:01:12.26,OrigJP,Pre-Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}今夜だけはそばにいて\N{\rTransZH\fad(180,180)\blur0.5}唯有今夜，请留在我身边
+Dialogue: 1,0:01:12.60,0:01:17.20,OrigJP,Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}Lost in blue, 蒼い夜に溶けて\N{\rTransZH\fad(180,180)\blur0.5}Lost in blue，融化在深蓝的夜色里
+Dialogue: 1,0:01:17.70,0:01:21.90,OrigJP,Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}甘いメロディに身を任せて\N{\rTransZH\fad(180,180)\blur0.5}将身体交给微醺甜美的旋律
+Dialogue: 1,0:01:22.40,0:01:26.98,OrigJP,Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}瞳の奥に映るトワイライト\N{\rTransZH\fad(180,180)\blur0.5}眼眸深处映照着暮色微光
+Dialogue: 1,0:01:27.04,0:01:31.82,OrigJP,Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}揺れるキャンドル見つめるミッドナイト\N{\rTransZH\fad(180,180)\blur0.5}凝视着烛火摇曳的午夜时分
+Dialogue: 1,0:01:31.88,0:01:38.48,OrigJP,Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}波の音がさらう吐息\N{\rTransZH\fad(180,180)\blur0.5}海浪声带走了轻柔的叹息
+Dialogue: 1,0:01:40.74,0:01:46.64,OrigJP,Chorus 1,0,0,52,,{\fad(180,180)\blur0.6}帰らないでと願うひととき\N{\rTransZH\fad(180,180)\blur0.5}在心底祈愿你不要离去的片刻
+Dialogue: 1,0:02:03.32,0:02:08.24,OrigJP,Verse 2,0,0,52,,{\fad(180,180)\blur0.6}テーブルの上冷めたコーヒー\N{\rTransZH\fad(180,180)\blur0.5}餐桌上已经微凉的咖啡
+Dialogue: 1,0:02:08.30,0:02:13.34,OrigJP,Verse 2,0,0,52,,{\fad(180,180)\blur0.6}レコードが紡ぐ古いストーリー\N{\rTransZH\fad(180,180)\blur0.5}黑胶唱片流淌出旧日的故事
+Dialogue: 1,0:02:13.40,0:02:17.68,OrigJP,Verse 2,0,0,52,,{\fad(180,180)\blur0.6}窓を叩く優しい雨\N{\rTransZH\fad(180,180)\blur0.5}轻叩玻璃窗的温柔细雨
+Dialogue: 1,0:02:18.06,0:02:22.58,OrigJP,Verse 2,0,0,52,,{\fad(180,180)\blur0.6}濡れた街並みぼやける眺め\N{\rTransZH\fad(180,180)\blur0.5}湿润的街景化作朦胧的剪影
+Dialogue: 1,0:02:22.64,0:02:26.74,OrigJP,Pre-Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}グラスの雫落ちる頃に\N{\rTransZH\fad(180,180)\blur0.5}当杯壁的水珠悄然滑落
+Dialogue: 1,0:02:26.80,0:02:30.88,OrigJP,Pre-Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}心の距離が縮まるように\N{\rTransZH\fad(180,180)\blur0.5}仿佛彼此的心也靠得更近
+Dialogue: 1,0:02:30.94,0:02:36.02,OrigJP,Pre-Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}傘も差さずに時間を止めて\N{\rTransZH\fad(180,180)\blur0.5}不必撑伞，就这样让时间静止
+Dialogue: 1,0:02:36.08,0:02:41.74,OrigJP,Pre-Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}夜が明けるまでそばにいて\N{\rTransZH\fad(180,180)\blur0.5}在黎明到来之前，请留在我身边
+Dialogue: 1,0:02:58.80,0:03:03.78,OrigJP,Bridge,0,0,52,,{\fad(180,180)\blur0.6}街の灯りが消えていくまで\N{\rTransZH\fad(180,180)\blur0.5}直到街角的灯火渐次熄灭
+Dialogue: 1,0:03:03.92,0:03:07.70,OrigJP,Bridge,0,0,52,,{\fad(180,180)\blur0.6}淡い余韻に浸るこのままで\N{\rTransZH\fad(180,180)\blur0.5}就这样沉浸在淡淡的余韵之中
+Dialogue: 1,0:03:07.76,0:03:12.64,OrigJP,Bridge,0,0,52,,{\fad(180,180)\blur0.6}言葉はいらない視線だけで\N{\rTransZH\fad(180,180)\blur0.5}无需多言，只需目光交汇
+Dialogue: 1,0:03:12.70,0:03:18.56,OrigJP,Bridge,0,0,52,,{\fad(180,180)\blur0.6}青い静寂を二人で泳いで\N{\rTransZH\fad(180,180)\blur0.5}两人一同游向深蓝的静谧
+Dialogue: 1,0:03:18.86,0:03:23.44,OrigJP,Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}Lost in blue, 蒼い夜に溶けて\N{\rTransZH\fad(180,180)\blur0.5}Lost in blue，融化在深蓝的夜色里
+Dialogue: 1,0:03:23.88,0:03:28.10,OrigJP,Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}甘いメロディに身を任せて\N{\rTransZH\fad(180,180)\blur0.5}将身体交给微醺甜美的旋律
+Dialogue: 1,0:03:28.60,0:03:32.80,OrigJP,Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}瞳の奥に映るトワイライト\N{\rTransZH\fad(180,180)\blur0.5}眼眸深处映照着暮色微光
+Dialogue: 1,0:03:32.86,0:03:37.68,OrigJP,Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}揺れるキャンドル見つめるミッドナイト\N{\rTransZH\fad(180,180)\blur0.5}凝视着烛火摇曳的午夜时分
+Dialogue: 1,0:03:37.74,0:03:44.60,OrigJP,Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}波の音がさらう吐息\N{\rTransZH\fad(180,180)\blur0.5}海浪声带走了轻柔的叹息
+Dialogue: 1,0:03:46.70,0:03:52.52,OrigJP,Chorus 2,0,0,52,,{\fad(180,180)\blur0.6}帰らないでと願うひととき\N{\rTransZH\fad(180,180)\blur0.5}在心底祈愿你不要离去的片刻
+Dialogue: 1,0:03:57.00,0:04:04.94,OrigJP,Outro,0,0,52,,{\fad(180,180)\blur0.6}Blue restaurant, 蒼い夜に溶けて\N{\rTransZH\fad(180,180)\blur0.5}Blue restaurant，融化在深蓝的夜色里
+Dialogue: 1,0:04:07.30,0:04:10.86,OrigJP,Outro,0,0,52,,{\fad(180,180)\blur0.6}Lost in blue tonight...\N{\rTransZH\fad(180,180)\blur0.5}今夜迷失在这片蔚蓝之中……
